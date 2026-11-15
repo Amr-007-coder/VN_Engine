@@ -1,16 +1,43 @@
 """Package a project with a prebuilt VN Engine runtime template."""
 
 from copy import deepcopy
+from contextlib import contextmanager
+from io import BytesIO
 import json
 import os
 from pathlib import Path, PurePosixPath
 import plistlib
 import re
+import shlex
+import shutil
+import stat
 import tempfile
 from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile, ZipInfo
 
 
 PLATFORMS = {"windows", "linux", "macos"}
+PROJECT_BUNDLE_COMMENT = b"VN_ENGINE_GAME_BUNDLE_V1"
+
+
+@contextmanager
+def _open_template_archive(template_file: Path):
+    """Open a template ZIP, including the common one-file ZIP wrapper format."""
+    archive = ZipFile(template_file, "r")
+    try:
+        files = [item for item in archive.infolist() if not item.is_dir()]
+        if (
+            len(files) == 1
+            and files[0].filename.casefold() == template_file.name.casefold()
+            and files[0].filename.casefold().endswith(".zip")
+        ):
+            nested_data = archive.read(files[0])
+            archive.close()
+            with ZipFile(BytesIO(nested_data), "r") as nested:
+                yield nested
+            return
+        yield archive
+    finally:
+        archive.close()
 
 
 def safe_project_name(value: str) -> str:
@@ -130,6 +157,84 @@ def _iter_project_files(root: Path, prefix: str):
         yield PurePosixPath(prefix, relative.as_posix()).as_posix(), path
 
 
+def _write_project_resource_bundle(
+    bundle_path: Path,
+    data_root: Path,
+    assets_root: Path,
+    project_json: bytes,
+    story_name: str,
+) -> None:
+    """Store editable project files in the appended executable resource archive."""
+    story_path = PurePosixPath(story_name.replace("\\", "/"))
+    if (
+        story_path.is_absolute()
+        or (story_path.parts and story_path.parts[0].endswith(":"))
+        or ".." in story_path.parts
+        or not story_path.parts
+        or story_path.suffix.casefold() not in {".yaml", ".yml"}
+    ):
+        raise ValueError("The configured story must be a YAML file inside the project's data folder.")
+
+    seen = set()
+    with ZipFile(bundle_path, "w", compression=ZIP_DEFLATED, compresslevel=6) as bundle:
+        bundle.comment = PROJECT_BUNDLE_COMMENT
+        for prefix, source_root in (("data", data_root), ("assets", assets_root)):
+            for relative_name, source_path in _iter_project_files(source_root, prefix):
+                folded_name = relative_name.casefold()
+                if folded_name in seen:
+                    raise ValueError(f"Project contains case-colliding resource paths: {relative_name!r}.")
+                seen.add(folded_name)
+                bundle.write(source_path, relative_name)
+        story_key = PurePosixPath("data", story_path.as_posix()).as_posix().casefold()
+        if story_key not in seen:
+            raise FileNotFoundError(f"Configured story file was not found in the project's data folder: {story_name}")
+        config_key = "data/project.json"
+        if config_key in seen:
+            raise ValueError("The project data folder has an ambiguous project.json path.")
+        bundle.writestr(config_key, project_json)
+
+
+def _create_windows_shortcut(workspace: Path, game_name: str, executable_path: Path) -> Path | None:
+    """Create a relocatable Windows shortcut beside the exported game folder."""
+    if os.name != "nt":
+        return None
+    from engine.windows_shortcut import create_shortcut
+
+    shortcut_path = workspace / f"{game_name}.lnk"
+    create_shortcut(
+        executable_path,
+        shortcut_path,
+        executable_path.parent,
+        relative_link_path=shortcut_path,
+    )
+    return shortcut_path
+
+
+def _launcher_entry(platform: str, game_name: str) -> tuple[str, bytes]:
+    """Return a small clickable launcher placed beside the exported game folder."""
+    if platform == "windows":
+        content = (
+            "@echo off\r\n"
+            "for %%F in (\"%~dp0\\*\\*.exe\") do (\r\n"
+            '  start "" "%%~fF" %*\r\n'
+            "  exit /b 0\r\n"
+            ")\r\n"
+            "echo The game executable was not found.\r\n"
+            "exit /b 1\r\n"
+        )
+        return f"{game_name}.bat", content.encode("utf-8")
+
+    root_line = 'ROOT="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"\n'
+    if platform == "linux":
+        relative_target = shlex.quote(f"{game_name}/{game_name}")
+        command = f'exec "$ROOT"/{relative_target} "$@"\n'
+        return f"{game_name}.sh", ("#!/bin/sh\n" + root_line + command).encode("utf-8")
+
+    relative_app = shlex.quote(f"{game_name}.app")
+    command = f'exec open -W "$ROOT"/{relative_app} --args "$@"\n'
+    return f"{game_name}.command", ("#!/bin/sh\n" + root_line + command).encode("utf-8")
+
+
 def export_project(
     project_root: Path,
     project_file: Path,
@@ -172,6 +277,17 @@ def export_project(
         raise FileNotFoundError(f"Project configuration not found: {project_file}")
 
     project_values = deepcopy(project_values)
+    story_name = project_values.get("story", "story.yaml")
+    if not isinstance(story_name, str):
+        raise ValueError("Project configuration 'story' must be a YAML filename.")
+    story_path = PurePosixPath(story_name.replace("\\", "/"))
+    if (
+        story_path.is_absolute()
+        or (story_path.parts and story_path.parts[0].endswith(":"))
+        or ".." in story_path.parts
+    ):
+        raise ValueError("The configured story must stay inside the project's data folder.")
+    project_values["story"] = story_path.as_posix()
     project_paths = project_values.setdefault("paths", {})
     if not isinstance(project_paths, dict):
         raise ValueError("Project configuration 'paths' must be an object.")
@@ -187,81 +303,97 @@ def export_project(
         else:
             raise ValueError("Choose an export ZIP outside the project's data and assets folders.")
 
-    temporary_handle = tempfile.NamedTemporaryFile(
-        prefix=f".{output_file.stem}_", suffix=".tmp", dir=output_file.parent, delete=False
-    )
-    temporary_zip = Path(temporary_handle.name)
-    temporary_handle.close()
-    seen_names = set()
-    found_main = False
-    try:
-        with ZipFile(template_file, "r") as template, ZipFile(
-            temporary_zip, "w", compression=ZIP_DEFLATED, compresslevel=6
-        ) as archive:
-            for item in template.infolist():
-                relative = _validate_zip_name(item.filename)
-                destination_name = _archive_name(relative, platform, name)
-                info = _template_info(item, destination_name, platform)
-                if destination_name in seen_names:
-                    raise ValueError(f"Template has duplicate paths after renaming: {destination_name}")
-                seen_names.add(destination_name)
-                content = b"" if item.is_dir() else template.read(item)
-                if platform == "macos" and destination_name.endswith(".app/Contents/Info.plist"):
-                    content = _rewrite_bundle_info(content, name)
-                if destination_name == _main_executable_path(platform, name):
-                    found_main = True
-                archive.writestr(info, content)
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=f".vn_export_{platform}_", dir=output_file.parent) as temporary:
+        workspace = Path(temporary)
+        bundle_path = workspace / "project_resources.zip"
+        _write_project_resource_bundle(
+            bundle_path,
+            data_root,
+            assets_root,
+            project_json,
+            story_path.as_posix(),
+        )
 
-            if not found_main:
-                raise ValueError(
-                    f"Template is missing its main executable at {_main_executable_path(platform, name)!r}."
-                )
-
-            project_base = f"{name}.app/Contents/Resources" if platform == "macos" else name
-            for directory in (project_base, f"{project_base}/assets", f"{project_base}/data"):
-                directory_name = directory.rstrip("/") + "/"
-                if directory_name in seen_names:
-                    continue
-                seen_names.add(directory_name)
-                info = ZipInfo(directory_name)
+        executable_path = _main_executable_path(platform, name)
+        try:
+            with _open_template_archive(template_file) as template:
+                executable_items = [
+                    item
+                    for item in template.infolist()
+                    if not item.is_dir()
+                    and _archive_name(_validate_zip_name(item.filename), platform, name) == executable_path
+                ]
+                if len(executable_items) != 1:
+                    raise ValueError(f"Template must contain one main executable at {executable_path!r}.")
+                executable_item = executable_items[0]
+                staged_executable = workspace.joinpath(*PurePosixPath(executable_path).parts)
+                staged_executable.parent.mkdir(parents=True, exist_ok=True)
+                with template.open(executable_item, "r") as source, staged_executable.open("wb") as target:
+                    shutil.copyfileobj(source, target)
+                    with bundle_path.open("rb") as bundle:
+                        shutil.copyfileobj(bundle, target)
                 if platform in {"linux", "macos"}:
-                    info.create_system = 3
-                    info.external_attr = 0o755 << 16
-                archive.writestr(info, b"")
+                    staged_executable.chmod(staged_executable.stat().st_mode | 0o111)
+                windows_shortcut = _create_windows_shortcut(workspace, name, staged_executable)
+        except BadZipFile as error:
+            raise ValueError(f"Export template is not a valid ZIP file: {template_file}") from error
 
-            for prefix, source_root in (("assets", assets_root), ("data", data_root)):
-                for archive_name, source_path in _iter_project_files(source_root, prefix):
-                    destination_name = (
-                        f"{name}.app/Contents/Resources/{archive_name}"
-                        if platform == "macos"
-                        else f"{name}/{archive_name}"
-                    )
+        launcher_name, launcher_content = _launcher_entry(platform, name)
+        launcher_path = workspace / launcher_name
+        launcher_path.write_bytes(launcher_content)
+        if platform in {"linux", "macos"}:
+            launcher_path.chmod(0o755)
+
+        temporary_zip = workspace / "export.zip"
+        seen_names = set()
+        found_main = False
+        try:
+            with _open_template_archive(template_file) as template, ZipFile(
+                temporary_zip, "w", compression=ZIP_DEFLATED, compresslevel=6
+            ) as archive:
+                for item in template.infolist():
+                    relative = _validate_zip_name(item.filename)
+                    if (
+                        platform == "macos"
+                        and relative.parts[:3] == ("Runner.app", "Contents", "_CodeSignature")
+                    ):
+                        # Renaming the bundle and changing its executable invalidates the template seal.
+                        continue
+                    destination_name = _archive_name(relative, platform, name)
+                    if item.is_dir() and not destination_name.endswith("/"):
+                        destination_name += "/"
+                    info = _template_info(item, destination_name, platform)
                     if destination_name in seen_names:
-                        raise ValueError(f"Template path conflicts with project file: {destination_name}")
+                        raise ValueError(f"Template has duplicate paths after renaming: {destination_name}")
                     seen_names.add(destination_name)
-                    info = ZipInfo(destination_name)
-                    info.compress_type = ZIP_DEFLATED
-                    if platform in {"linux", "macos"}:
-                        info.create_system = 3
-                        info.external_attr = (0o755 if _is_shared_library(destination_name) else 0o644) << 16
-                    archive.writestr(info, source_path.read_bytes())
+                    if destination_name == executable_path:
+                        found_main = True
+                        with template.open(item, "r") as source, archive.open(info, "w") as target:
+                            shutil.copyfileobj(source, target)
+                            with bundle_path.open("rb") as bundle:
+                                shutil.copyfileobj(bundle, target)
+                    else:
+                        content = b"" if item.is_dir() else template.read(item)
+                        if platform == "macos" and destination_name.endswith(".app/Contents/Info.plist"):
+                            content = _rewrite_bundle_info(content, name)
+                        archive.writestr(info, content)
 
-            config_name = (
-                f"{name}.app/Contents/Resources/data/project.json"
-                if platform == "macos"
-                else f"{name}/data/project.json"
-            )
-            info = ZipInfo(config_name)
-            info.compress_type = ZIP_DEFLATED
-            if platform in {"linux", "macos"}:
-                info.create_system = 3
-                info.external_attr = 0o644 << 16
-            archive.writestr(info, project_json)
-        os.replace(temporary_zip, output_file)
-    except BadZipFile as error:
-        temporary_zip.unlink(missing_ok=True)
-        raise ValueError(f"Export template is not a valid ZIP file: {template_file}") from error
-    except Exception:
-        temporary_zip.unlink(missing_ok=True)
-        raise
+                if not found_main:
+                    raise ValueError(f"Template is missing its main executable at {executable_path!r}.")
+
+                launcher_info = ZipInfo(launcher_name)
+                launcher_info.compress_type = ZIP_DEFLATED
+                if platform in {"linux", "macos"}:
+                    launcher_info.create_system = 3
+                    launcher_info.external_attr = (stat.S_IFREG | 0o755) << 16
+                archive.writestr(launcher_info, launcher_path.read_bytes())
+                if windows_shortcut is not None:
+                    shortcut_info = ZipInfo(f"{name}.lnk")
+                    shortcut_info.compress_type = ZIP_DEFLATED
+                    archive.writestr(shortcut_info, windows_shortcut.read_bytes())
+
+            os.replace(temporary_zip, output_file)
+        except BadZipFile as error:
+            raise ValueError(f"Export template is not a valid ZIP file: {template_file}") from error
     return output_file

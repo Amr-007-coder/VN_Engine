@@ -1,31 +1,29 @@
 # VN Engine user guide
 
-This guide takes you from the downloadable Windows package to a playable project and a shareable game. You can write the project with any text editor; the packaged engine does not require Python or a separate installation. The editor can export native Windows, Linux, and macOS games from prebuilt templates.
+This guide takes you from the platform-specific VN_Editor download to a playable project and a shareable game. The editor package includes the game runtime templates for Windows, Linux, and macOS. Creators do not need Python, Pygame, Nuitka, or a compiler installed.
 
-## 1. Extract and understand the project
+## 1. Extract and open the editor package
 
-Extract the complete ZIP to a writable folder. Keep the folders together and do not move or rename `VN_Engine/`.
+Extract the ZIP for your computer to a folder you can write to. Keep its project folders together. Launch the platform-specific editor app: `VN_Editor.exe` on Windows, `VN_Editor` on Linux, or `VN_Editor.app` on macOS.
+
+The macOS editor app is not signed or notarized. If macOS blocks it on first launch, Control-click `VN_Editor.app` in Finder and choose **Open**.
 
 ```text
-MyVisualNovel/                 # Project root
-  engine.exe.lnk               # Shortcut to run this project
-  editor.exe                    # Standalone editor; no Python install needed
-  readme.md                     # Documentation
-  guide_vn-engine.md
-  project-config.md
-  story-format.md
+MyVisualNovel/                 # Project and editor package root
+  VN_Editor.exe                # Windows; Linux uses VN_Editor, macOS uses VN_Editor.app/
+  templates/
+    template-windows.zip       # Prebuilt game runtimes used by Test Play and Export Game
+    template-linux.zip
+    template-macos.zip
   assets/                      # Project art and audio
   data/
-    project.json               # Project settings; optional in custom projects
+    project.json               # Project settings
     story.yaml                 # Starter story
-  VN_Engine/
-    engine.exe                # Engine executable
-    ...                        # Supporting runtime files
+  readme.md
+  docs/                        # This guide and the other Markdown references
 ```
 
-The project root is the folder containing the shortcut, `assets/`, and `data/`. The shortcut sets this folder as the engine’s working directory. You can move the whole project folder, but keep its contents in this layout.
-
-Edit `data/story.yaml`, `data/project.json`, and files under `assets/`. Treat `VN_Engine/` as read-only engine files. The engine looks for your story in the configured data folder and your assets in the configured assets folder. If `data/project.json` is missing, it uses the built-in project defaults and looks for `data/story.yaml`.
+The folder containing `assets/` and `data/` is the project root. The editor opens this packaged starter project automatically. Use **Open Project** to select another project folder.
 
 ## 2. Write a story and add assets
 
@@ -55,41 +53,15 @@ Project assets take priority over built-in engine assets for normal asset lookup
 
 Set the project title, window size, menus, credits, intro message, and visual theme in `data/project.json`. See [project configuration](./project-config.md).
 
-The Windows package includes a standalone `editor.exe`. Double-click it, or launch `editor.exe` from the project folder; no Python, Pygame, Nuitka, or extra editor dependency needs to be installed. The editor opens the configured story, each YAML file named by `includes`, and `data/project.json` in separate tabs. It also shows the included Markdown guides in read-only tabs and offers YAML/JSON coloring, engine-specific suggestions, asset browsing, and live diagnostics. Its PowerShell pane starts in the project folder; `Ctrl+F` searches the selected tab, and `F5` saves all open project files and runs the engine validator. It saves ordinary YAML and JSON files, so you can switch to another editor at any time.
+## 3. Validate and test the project
 
-## 3. Validate and run
+The editor opens `data/project.json`, the selected story, and every YAML file listed by `includes`. Its live diagnostics check YAML syntax, story structure, supported keys and actions, project values, and asset references while you edit. Press `Ctrl+Space` for suggestions and `Ctrl+F` to search the active tab.
 
-Open PowerShell in the project root. Validate the configured story before playing:
+Press `F5` to save the open files and run the engine validator. The editor uses an installed engine runtime if the project has one. Otherwise, it prepares the current OS runtime template in a temporary folder and validates the packaged project there.
 
-```powershell
-.\VN_Engine\engine.exe --validate
-```
+Click **Test Play** to save and check the project, place a copy of the current platform template with the project's `assets/` and `data/` in a temporary folder, and launch the game. Test Play uses a temporary `user_data/` folder. When the game closes, the editor removes the temporary build and its temporary saves. Closing the editor also stops an active test game and removes its temporary folder.
 
-Validation checks YAML structure, dialogue targets, declared variables, conditions, supported action names, and referenced assets. It reports the location of errors and suggestions for character names, looks, or expressions when possible. The engine also validates the story before it opens the game window.
-
-To validate or run another story file, pass its filename relative to the configured data folder:
-
-```powershell
-.\VN_Engine\engine.exe --story alternate.yaml --validate
-.\VN_Engine\engine.exe --story alternate.yaml
-```
-
-The story file selected in `data/project.json` is used when `--story` is omitted. `--story` changes the selected story for that run; it does not edit the project configuration.
-
-To see which character files the engine discovers, run:
-
-```powershell
-# List all discovered character names
-.\VN_Engine\engine.exe --list-character-assets
-
-# List each look and its expression names for one character
-.\VN_Engine\engine.exe --list-character-assets Aiko
-
-# Inspect one look; use forward slashes between nested folders
-.\VN_Engine\engine.exe --list-character-assets Aiko --look Summer/Uniform
-```
-
-Double-click `engine.exe.lnk` to launch the selected project normally.
+The editor command pane starts in the project folder. It uses PowerShell on Windows and the available bash, zsh, or sh shell on Linux/macOS. Commands can change the working folder; use **Restart** to start a fresh shell in the project root.
 
 ## 4. Play controls
 
@@ -134,7 +106,7 @@ The runtime includes these assets, and the engine searches them after the projec
 | `engine/assets/images/` | `logo.png`, `content_warning.png`, `headphones.png`, `test.png` | `logo.png` is fixed in the opening splash and cannot be replaced. The warning and headphone images appear on the default notice card and can be replaced. `test.png` can be referenced like any other image. |
 | `engine/assets/sounds/` | `intro.wav`, `hover_button.wav`, `click_button.wav` | Opening splash sound; default menu hover and click sounds. |
 
-There are no built-in character portraits or music tracks. Add your own under `assets/characters/` and `assets/music/`. The built-in files are bundled in `VN_Engine/engine.exe` in the exported package, even if you do not see a loose `engine/assets/` folder.
+There are no built-in character portraits or music tracks. Add your own under `assets/characters/` and `assets/music/`. Built-in engine assets are bundled in each platform runtime template; you do not need a separate `VN_Engine/` folder to use Test Play or Export Game.
 
 ### Character folder example
 
@@ -156,55 +128,63 @@ The dialogue textbox can use a color, an image, or both. Set `theme.textbox.colo
 
 The credits menu lists the project’s configured `credits` and also includes the engine creator’s credit. A credit may be plain text or an object with a label and an optional `http://` or `https://` URL.
 
-## 7. Share the editable project (not recommended)
+## 7. Share the editable project
 
-To let someone play or continue editing the project, share the complete project folder or ZIP it. Include the shortcut, `assets/`, `data/`, all documentation, and the full `VN_Engine/` directory. Recipients do not need to install Python or Pygame.
+To let someone play or continue editing, share the complete project folder with `assets/`, `data/`, and all YAML files named by `includes`. Recipients can open that folder from VN_Editor. Include the editor package and its `templates/` folder when they also need the authoring and Test Play tools.
 
-Do not distribute only `engine.exe` from inside `VN_Engine/`: the engine distribution also needs its supporting runtime files. The shortcut is included so Windows starts the engine with the correct project folder.
+The platform editor ZIP includes the complete game runtime templates under `templates/`; the editor uses the current platform template for Test Play and any selected platform template for export.
 
 ## 8. Export a game for Windows, Linux, or macOS
 
-The editor packages games using prebuilt platform templates. This lets a Windows creator export a Linux or macOS ZIP without installing a compiler or running Nuitka.
+The editor packages games for any supported desktop OS from a prebuilt runtime template. Built-in engine assets and data are compiled into each template executable as native constants. When you export a project, its own `assets/` and `data/` files are bundled into the game executable; the computer doing the export needs no compiler.
 
-1. Download `template-windows.zip`, `template-linux.zip`, and/or `template-macos.zip` from the project’s GitHub release assets.
-2. Put the template ZIPs into a `templates/` folder beside `editor.exe` or inside the project folder. The editor can use another folder if you browse to it.
-3. Open the project in `editor.exe` and click **Export Game…**.
-4. Choose Windows, Linux, or macOS, select an output ZIP path, and click **Export**.
+Each downloadable VN_Editor ZIP includes `template-windows.zip`, `template-linux.zip`, and `template-macos.zip` in its top-level `templates/` folder. The editor also searches beside its application and in the project folder. If you move the templates, use **Browse** in the export dialog to select their folder.
 
-The editor saves the open YAML and JSON files and checks the story and project configuration before exporting. It copies the project’s configured assets and data into the runtime, rewrites their paths to the portable `assets/` and `data/` folders, and creates one ZIP:
+To export in the editor:
+
+1. Open the project and click **Export Game**.
+2. Choose Windows, Linux, or macOS.
+3. Choose the output ZIP and click **Export**.
+
+The editor saves its open YAML and JSON files, checks the project and story, then adds the project's configured `assets/` and `data/` files to the selected runtime executable. It rewrites the project paths to portable `assets/` and `data/` names inside that embedded bundle. The ZIP also contains a launcher beside the game folder:
 
 ```text
-Windows and Linux:
+Windows:
+  <Game Name>.bat          # A Windows .lnk is also included when exported from Windows
   <Game Name>/
-    <Game Name>.exe   # Windows; no extension on Linux
+    <Game Name>.exe        # Project assets and data are embedded here
     ...runtime files...
-    assets/
-    data/
+
+Linux:
+  <Game Name>.sh
+  <Game Name>/
+    <Game Name>            # Project assets and data are embedded here
+    ...runtime files...
 
 macOS:
+  <Game Name>.command
   <Game Name>.app/
     Contents/
       MacOS/Runner
-      Resources/
-        assets/
-        data/
 ```
 
-The macOS exporter renames the app bundle while keeping the executable name expected by its bundle metadata. The ZIP keeps executable permissions for Linux/macOS binaries and shared libraries. Recipients need the matching OS to run a build. Browser/HTML5 exports are not supported.
+The editor's own starter `assets/` and `data/` stay as editable files beside VN_Editor. Only exported game archives embed the project files in the game executable.
 
-The editor looks for templates in `templates/` beside itself and then in `templates/` in the project folder. Download all three files or browse to the directory containing the template for the chosen platform. If a template is missing, the dialog reports its expected filename.
+Linux and macOS archives preserve executable permissions for the main program and shared libraries. The macOS exporter removes the template bundle signature because it changes the app bundle; exported macOS apps are not signed or notarized. Players need the matching OS to run the exported game. Browser/HTML5 exports are not supported.
 
-### Native command-line build
+### Command-line export
 
-The engine command remains available for maintainers who already have a compiled runtime for their current OS:
+The editor ZIP does not include a command-line engine executable. These commands apply when you also have a separate compiled engine distribution; from the source repository, run `python main.py` with the same flags. Without `--platform`, `--build-game` makes a native package. With `--platform`, it creates a ZIP from the selected prebuilt template in `--output-dir`, which defaults to the project `output/` folder:
 
 ```powershell
-.\VN_Engine\engine.exe --build-game
+.\VN_Engine\engine.exe --build-game --platform windows
+.\VN_Engine\engine.exe --build-game --platform linux
+.\VN_Engine\engine.exe --build-game --platform macos --templates-dir "D:\vn-templates" --output-dir output
 ```
 
-It creates a native package for the OS running that engine and does not cross-compile. Use the editor workflow above to export for another OS.
+The source engine defaults to `engine/templates/` and also checks `templates/` in the project folder. Pass `--templates-dir` to select another folder. For example, the Linux command creates `output/<Game Name>-linux.zip`.
 
-To build or update the template ZIPs, maintainers install the packages in the repository’s `requirements.txt` and run the GitHub Actions template workflow by pushing a `v*` version tag. Each template is compiled on its target operating system and attached to that release. The resulting files are available as release assets for creators; they do not need Python, Pygame, Nuitka, or a compiler.
+To build or update the template ZIPs, maintainers install the packages in the repository's `requirements.txt` and push a `v*` version tag. GitHub Actions compiles each template on its target OS and attaches the files to that release. Creators can then export without Python, Pygame, Nuitka, or a compiler installed.
 
 ## 9. User data and common fixes
 
@@ -216,6 +196,6 @@ Settings and save slots are kept outside the editable project so an engine updat
 
 The project name is converted to a folder-safe name. Windows uses `%LOCALAPPDATA%\Visual Novel Engine\<project name>\user_data\`; macOS uses `~/Library/Application Support/Visual Novel Engine/<project name>/user_data/`; Linux uses `$XDG_DATA_HOME/visual-novel-engine/<project name>/user_data/` or `~/.local/share/visual-novel-engine/<project name>/user_data/`. `paths.user_data` in `data/project.json` can select a different location; see [user data, settings, and saves](./project-config.md#user-data-settings-and-saves).
 
-If a story does not start, run `--validate` and follow the reported dialogue path. If a portrait reference is unclear, use `--list-character-assets`; the character folder and PNG filename determine the valid name/look/expression. If the shortcut cannot find files after you rearranged folders, restore the package layout or run the executable from the project root as shown in the commands above.
+If a story does not start, press `F5` to run the engine validator or use **Test Play** to launch the current platform build. If a portrait reference is unclear, use the editor asset hierarchy or character inventory command from a separate engine distribution. If files appear missing, confirm the project root contains the configured `assets/` and `data/` folders.
 
 For YAML field syntax, start with the [story format](./story-format.md). For menu, path, and theme options, use [project configuration](./project-config.md).

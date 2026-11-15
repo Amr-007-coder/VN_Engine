@@ -1,40 +1,33 @@
 # VN Engine
 
-VN Engine is a visual novel player and authoring template. The downloadable editor package currently targets Windows. Its Export Game dialog can create Windows, Linux, or macOS game ZIPs from prebuilt runtime templates, without a compiler on the author’s computer. You write the story in YAML, place artwork and audio in the project’s `assets/` folder, then run the project or export a game package.
-
-You do not need to install Python, Pygame, Nuitka, or another tool to use the packaged engine or editor. Keep the extracted files together and use the shortcut or commands below. The included `editor.exe` is a standalone desktop authoring tool.
+The downloadable VN_Editor package is available for Windows, Linux, and macOS. Each platform ZIP contains its native editor app, the Windows/Linux/macOS game runtime templates, a starter `assets/` folder, `data/`, and the Markdown guides. Creators do not need Python, Pygame, Nuitka, or a compiler installed.
 
 ## Start here
 
-1. Extract the complete ZIP to a folder you can write to. Do not move files out of `VN_Engine/`.
-2. Open the extracted project folder in a text editor or Visual Studio Code.
-3. Edit `data/story.yaml`. The starter story has one line; replace it or add dialogue. Put your own art and audio in `assets/`.
-4. In PowerShell opened at the project folder, validate the story:
+1. Extract the ZIP for your computer to a folder you can write to.
+2. Launch the editor for that platform: `VN_Editor.exe` on Windows, `VN_Editor` on Linux, or `VN_Editor.app` on macOS.
+3. Edit `data/story.yaml`, `data/project.json`, and files under `assets/`. The starter project is ready to edit.
+4. Click **Test Play** to run the project with a temporary copy of the engine runtime for your current OS.
+5. Click **Export Game** to create a Windows, Linux, or macOS ZIP from its prebuilt template.
 
-   ```powershell
-   .\VN_Engine\engine.exe --validate
-   ```
-
-5. Double-click `engine.exe.lnk` to play. The shortcut starts the engine with the project folder as its working folder, so it can find `data/` and `assets/`.
-
-The package has this layout:
+The extracted editor package has this layout; it contains one platform-specific editor app:
 
 ```text
 MyVisualNovel/
-  engine.exe.lnk          # Starts the editable project
-  readme.md                 # This documentation set
-  guide_vn-engine.md
-  story-format.md
-  project-config.md
-  editor.exe               # Standalone story/project editor
-  assets/                  # Your images, sounds, music, and character art
+  VN_Editor.exe             # Windows; Linux uses VN_Editor, macOS uses VN_Editor.app/
+  templates/
+    template-windows.zip
+    template-linux.zip
+    template-macos.zip
+  assets/                   # Project art, sound, music, fonts, and character art
   data/
-    project.json           # Project name, menus, settings, and theme
-    story.yaml             # Story flow and dialogue
-  VN_Engine/               # Engine executable and its supporting runtime files
+    project.json            # Project name, menus, settings, and theme
+    story.yaml              # Starter story
+  readme.md
+  docs/                     # The included Markdown guides
 ```
 
-`assets/`, `data/`, and the shortcut belong to the project. Treat `VN_Engine/` as read-only. For the full workflow, see the [user guide](./guide_vn-engine.md).
+The editor and `templates/` are tools for authoring and running the project. Edit `assets/` and `data/`; Test Play and game export use temporary or output folders and do not require moving files into the editor app.
 
 ## What the engine provides
 
@@ -51,7 +44,7 @@ The [story format reference](./story-format.md) explains how to write each featu
 
 ## Built-in assets
 
-The engine includes the following assets. They are inside the packaged runtime and can be referenced by filename; you do not need to copy them into your project. Project assets with the same relative name take priority for normal image, sound, music, and font lookups. The opening splash logo is fixed to the engine's `logo.png` and cannot be replaced by a project asset.
+The engine includes the following assets. The build process embeds them into each runtime executable as native constants. They can be referenced by filename; you do not need to copy them into your project. Project assets with the same relative name take priority for normal image, sound, music, and font lookups. The opening splash logo is fixed to the engine's `logo.png` and cannot be replaced by a project asset.
 
 | Folder in the engine | Included files | Use |
 | --- | --- | --- |
@@ -63,43 +56,19 @@ Project assets are searched before these built-ins for normal asset lookups. The
 
 The dialogue textbox can use a project image, a project color, or both. Configure `theme.textbox.background` and `theme.textbox.color` in `data/project.json`; see [project configuration](./project-config.md#dialogue-textbox-image-and-color). Story chapters can be split into YAML files with the top-level `includes` list; see [story format](./story-format.md#split-a-story-across-yaml-files).
 
-## Useful commands
+## Use the editor
 
-Run these from the extracted project folder:
+The editor opens the configured story, each YAML file named by `includes`, and `data/project.json` in separate tabs. It provides YAML/JSON highlighting, engine-specific key and asset suggestions, asset browsing, live diagnostics, and read-only tabs for the included Markdown files. `Ctrl+F` searches the selected tab. `Ctrl+S` saves the current file; `Ctrl+Shift+S` saves the open story files and project configuration.
 
-```powershell
-# Validate the configured story without opening a window
-.\VN_Engine\engine.exe --validate
+**Test Play** saves and checks the project, copies the current platform's game template and project files to a temporary folder, then launches that game. The temporary folder is removed when the game closes or the editor exits. Test Play stores settings and saves in that temporary folder, so it does not change the project's normal save data.
 
-# Validate a different YAML story in the configured data folder
-.\VN_Engine\engine.exe --story alternate.yaml --validate
+**Export Game** saves and checks the project, then embeds its `assets/` and `data/` files in the exported game executable. The files travel inside the ZIP, so players do not need separate project folders beside the game. Each ZIP includes a launcher beside the game folder; a Windows `.lnk` is also created when exporting from Windows. Players need the matching OS to run the game. Browser/HTML5 exports are not supported.
 
-# List characters, then inspect one character’s looks and expressions
-.\VN_Engine\engine.exe --list-character-assets
-.\VN_Engine\engine.exe --list-character-assets Aiko
-.\VN_Engine\engine.exe --list-character-assets Aiko --look Summer/Uniform
-
-# Build for the OS running this engine (the editor can export for any supported OS)
-.\VN_Engine\engine.exe --build-game
-```
-
-The `--build-game` command creates a game for the same OS as the engine runtime. For cross-platform exports, use the editor’s **Export Game…** button and provide the prebuilt template ZIP for the target OS. Download `template-windows.zip`, `template-linux.zip`, and `template-macos.zip` from the project’s GitHub release assets and place them in a `templates/` folder beside `editor.exe` or in the project folder. You can also select any templates folder in the export dialog. Browser/HTML5 exports are not supported by this Pygame desktop runtime.
-
-See the [user guide](./guide_vn-engine.md) for command details and the [story format](./story-format.md#character-art-and-portraits) for character folders.
+The command pane uses PowerShell on Windows and the available bash, zsh, or sh shell on Linux/macOS. It starts in the project folder and keeps its working directory as commands run. Use **Restart** to reopen the shell.
 
 ## Optional VS Code helper
 
-The [VN Engine YAML Helper](https://marketplace.visualstudio.com/items?itemName=Marpp.yaml-helper) can suggest character folders and expression filenames while you edit YAML. It is optional and does not run or change the engine. Open the project root—the folder containing `assets/` and `data/`—in VS Code to use it.
-
-## Optional desktop editor
-
-The Windows package includes `editor.exe`, a standalone editor with a tab for the entry story, tabs for each included YAML file, a project JSON tab, YAML and JSON highlighting, field suggestions, asset browsing, live diagnostics, a PowerShell command pane, read-only tabs for the included Markdown guides, and a cross-platform **Export Game…** dialog. It does not require an installed Python or compiler. Its terminal uses Windows PowerShell, which is included with Windows. Double-click `editor.exe`, or run it from PowerShell in the project folder:
-
-```powershell
-.\editor.exe
-```
-
-Suggestions appear while typing; press `Ctrl+Space` to open them, use the arrow keys to choose an item, then press `Tab` or `Enter` to insert it. Double-click an asset to insert its reference. `Ctrl+S` saves the selected file, `Ctrl+Shift+S` saves all open story files and `project.json`, `F5` saves and runs the engine validator, and `Ctrl+F` searches the current tab. For export, download the target platform’s template ZIP into the local `templates/` folder, click **Export Game…**, choose the target platform, and select where to save the game ZIP. The PowerShell pane starts in the project folder and keeps its working directory as you run commands. To open another project, run `.\editor.exe --project-dir "C:\path\to\project"`.
+The [VN Engine YAML Helper](https://marketplace.visualstudio.com/items?itemName=Marpp.yaml-helper) can suggest character folders and expression filenames while you edit YAML. It is optional and does not run or change the engine. Open the project root, the folder containing `assets/` and `data/`, in VS Code to use it.
 
 ## Where settings and saves go
 

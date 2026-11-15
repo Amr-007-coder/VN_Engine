@@ -26,17 +26,19 @@ def _find_dist(build_root: Path) -> Path:
 
 def _write_zip_entry(archive: ZipFile, path: Path, root: Path, platform: str):
     relative = path.relative_to(root).as_posix()
-    info = ZipInfo(relative + ("/" if path.is_dir() else ""))
+    file_mode = path.lstat().st_mode
+    is_symlink = stat.S_ISLNK(file_mode)
+    is_directory = stat.S_ISDIR(file_mode)
+    info = ZipInfo(relative + ("/" if is_directory else ""))
     info.compress_type = ZIP_DEFLATED
     if platform in {"linux", "macos"}:
         info.create_system = 3
-        mode = path.lstat().st_mode
-        if stat.S_ISLNK(mode):
+        if is_symlink:
             info.external_attr = (stat.S_IFLNK | 0o777) << 16
             archive.writestr(info, os.readlink(path).encode("utf-8"))
             return
-        permission = stat.S_IMODE(mode)
-        if path.is_dir():
+        permission = stat.S_IMODE(file_mode)
+        if is_directory:
             info.external_attr = (stat.S_IFDIR | permission) << 16
             archive.writestr(info, b"")
             return
@@ -45,7 +47,7 @@ def _write_zip_entry(archive: ZipFile, path: Path, root: Path, platform: str):
         if is_main or is_library:
             permission |= 0o111
         info.external_attr = (stat.S_IFREG | permission) << 16
-    if path.is_dir():
+    if is_directory:
         archive.writestr(info, b"")
     else:
         with path.open("rb") as source:

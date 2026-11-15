@@ -4,6 +4,7 @@ assets/
 data/
 dist/
 build/
+.editor-venv/
 templates/
 exports/
 template-*.zip

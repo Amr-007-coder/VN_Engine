@@ -138,6 +138,7 @@ def _stage_sources(stage_root: Path) -> None:
     (stage_root / "main.py").write_text(
         "\n".join(main_lines) + "\n", encoding="utf-8", newline="\n"
     )
+    shutil.copy2(PROJECT_ROOT / "export_pipeline.py", stage_root / "export_pipeline.py")
 
     engine_source = PROJECT_ROOT / "engine"
     engine_stage = stage_root / "engine"
@@ -264,6 +265,21 @@ def _parse_args():
         type=Path,
         help="Project root containing assets/ and data/ to embed (default: this script's folder).",
     )
+    parser.add_argument(
+        "--output-name",
+        help="Executable filename (default: the standard project or engine name for this OS).",
+    )
+    parser.add_argument(
+        "--macos-app-bundle",
+        action="store_true",
+        help="Build the output as a macOS .app bundle (macOS only).",
+    )
+    parser.add_argument(
+        "--windows-console-mode",
+        choices=("attach", "disable", "force"),
+        default="attach",
+        help="Windows console behavior for the executable (default: attach).",
+    )
     return parser.parse_args()
 
 
@@ -292,6 +308,9 @@ def main() -> int:
     if args.engine_only and args.project_dir is not None:
         print("--project-dir cannot be used with --engine-only.", file=sys.stderr)
         return 2
+    if args.macos_app_bundle and sys.platform != "darwin":
+        print("--macos-app-bundle can only be used when compiling on macOS.", file=sys.stderr)
+        return 2
 
     project_dir = args.project_dir or PROJECT_ROOT
     if not project_dir.is_absolute():
@@ -307,7 +326,15 @@ def main() -> int:
     print("Embedded payload encoder self-check passed.")
 
     output_dir = (args.output_dir or _default_output_dir()).expanduser()
-    output_name = ENGINE_OUTPUT_NAME if args.engine_only else OUTPUT_NAME
+    output_name = args.output_name or (ENGINE_OUTPUT_NAME if args.engine_only else OUTPUT_NAME)
+    if WINDOWS_BUILD and not output_name.casefold().endswith(".exe"):
+        output_name += ".exe"
+    elif not WINDOWS_BUILD and output_name.casefold().endswith(".exe"):
+        print("Use an executable name without the .exe suffix on Linux and macOS.", file=sys.stderr)
+        return 2
+    if Path(output_name).name != output_name:
+        print("--output-name must be a filename, not a path.", file=sys.stderr)
+        return 2
     if not output_dir.is_absolute():
         output_dir = (PROJECT_ROOT / output_dir).resolve()
     if output_dir.exists() and any(output_dir.iterdir()):
@@ -345,6 +372,7 @@ def main() -> int:
                 "-m",
                 "nuitka",
                 "--mode=standalone",
+                "--assume-yes-for-downloads",
                 f"--output-dir={output_dir}",
                 f"--output-filename={output_name}",
                 f"--jobs={args.jobs}",
@@ -352,8 +380,14 @@ def main() -> int:
                 "--include-package=engine",
                 "main.py",
             ]
+            if args.macos_app_bundle:
+                app_name = Path(output_name).stem
+                command[-1:-1] = ("--macos-create-app-bundle", f"--macos-app-name={app_name}")
             if WINDOWS_BUILD:
-                command.insert(command.index(f"--output-dir={output_dir}"), "--windows-console-mode=attach")
+                command.insert(
+                    command.index(f"--output-dir={output_dir}"),
+                    f"--windows-console-mode={args.windows_console_mode}",
+                )
             result = subprocess.run(command, cwd=stage_root, check=False)
             if result.returncode != 0:
                 print(f"Nuitka failed with exit code {result.returncode}.", file=sys.stderr)
@@ -362,7 +396,19 @@ def main() -> int:
         print(f"Build failed: {error}", file=sys.stderr)
         return 1
 
-    executable_candidates = list(output_dir.glob(f"*.dist/{output_name}"))
+    if args.macos_app_bundle:
+        app_name = Path(output_name).stem
+        app_candidates = [
+            path / "Contents" / "MacOS" / app_name
+            for path in output_dir.rglob(f"{app_name}.app")
+            if (path / "Contents" / "MacOS" / app_name).is_file()
+        ]
+        if len(app_candidates) == 1:
+            print(f"Build complete: {app_candidates[0].parent.parent.parent}")
+            return 0
+        executable_candidates = []
+    else:
+        executable_candidates = list(output_dir.glob(f"*.dist/{output_name}"))
     if len(executable_candidates) == 1:
         executable = executable_candidates[0]
         distribution = executable.parent

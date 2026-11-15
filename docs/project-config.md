@@ -6,23 +6,26 @@ The project configuration is optional. If it is missing, the engine loads its bu
 
 ## Project folder and path rules
 
-The project root is the extracted folder containing `engine.exe.lnk`, `assets/`, and `data/`. The engine runtime is in `VN_Engine/`.
+The project root is the folder containing `assets/` and `data/`. In the downloadable editor package, the starter project is beside the platform-specific editor app and its `templates/` folder. You can also open any other project folder from VN_Editor.
 
 ```text
 MyVisualNovel/
-  engine.exe.lnk
+  VN_Editor.exe                 # Windows; Linux uses VN_Editor, macOS uses VN_Editor.app/
+  templates/
+    template-windows.zip
+    template-linux.zip
+    template-macos.zip
   assets/
   data/
     project.json
     story.yaml
-  VN_Engine/
-    engine.exe
-    ...
 ```
 
 `paths.data` and `paths.assets` are resolved relative to the project root unless they are absolute paths. `story` is a filename or relative path inside the configured data folder. For example, with `"data": "data"` and `"story": "chapter-one.yaml"`, the story file is `data/chapter-one.yaml`. `--story alternate.yaml` overrides that filename for a single run and is also resolved from the configured data folder.
 
 `paths.user_data` is resolved relative to the user-data root described in [User data, settings, and saves](#user-data-settings-and-saves). An absolute path can be used to choose a specific writable location.
+
+For temporary runs such as the editor's **Test Play**, the engine honors the `VN_ENGINE_USER_DATA_DIR` environment variable as an override. The editor sets it to a temporary folder and removes that folder when the test game closes.
 
 ## A practical `project.json`
 
@@ -146,7 +149,7 @@ If you copy this example, add `assets/images/menu-background.jpg` or set `theme.
 | `assets` | `assets` | Folder containing project images, audio, fonts, and character art. Relative paths start at the project root. |
 | `user_data` | `user_data` | Writable folder for settings and saves, relative to the user-data root. Can be absolute. |
 
-The packaged shortcut starts the engine from the project root. If you launch `VN_Engine/engine.exe` yourself, launch it with the project root as the working directory or use the included shortcut.
+Launch VN_Editor and open the folder containing `assets/` and `data/`. The editor's **Test Play** and **Export Game** commands package those configured folders automatically. When running a separate engine executable directly, set its working directory to the project root so it can locate the project files.
 
 ## Intro cards
 

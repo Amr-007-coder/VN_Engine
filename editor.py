@@ -13,15 +13,20 @@ from difflib import get_close_matches
 import json
 import os
 from pathlib import Path
+from pathlib import PurePosixPath
 import queue
 import re
+import shlex
 import shutil
+import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from typing import Any
+from zipfile import ZipFile
 
 from export_pipeline import PLATFORMS, export_project, safe_project_name
 
@@ -206,6 +211,17 @@ def project_root_from(path: Path) -> Path:
     for candidate in (path, *path.parents):
         if (candidate / "data").is_dir() or (candidate / "assets").is_dir():
             return candidate
+    return path
+
+
+def editor_package_root(path: Path) -> Path:
+    """Return the folder beside the editor app bundle or executable."""
+    path = Path(path).resolve()
+    if path.is_file():
+        path = path.parent
+    for candidate in (path, *path.parents):
+        if candidate.suffix.casefold() == ".app":
+            return candidate.parent
     return path
 
 
@@ -1357,7 +1373,7 @@ class VNEditorApp:
     def __init__(self, root: tk.Tk, project_root: Path):
         self.root = root
         self.project_root = project_root.resolve()
-        self.editor_home = Path(sys.argv[0]).resolve().parent
+        self.editor_home = editor_package_root(Path(sys.argv[0]))
         self.project_file = self.project_root / "data" / "project.json"
         self.story_file = self.project_root / "data" / "story.yaml"
         self.project_buffer = ""
@@ -1379,10 +1395,14 @@ class VNEditorApp:
         self.terminal_process = None
         self.terminal_entry = None
         self.terminal_location = str(self.project_root)
+        self.terminal_name = self._available_terminal_name()
         self.terminal_queue = queue.Queue()
         self.terminal_generation = 0
         self.terminal_poll_job = None
-        self.terminal_prompt = f"PS {self.project_root}> "
+        self.terminal_prompt = f"{self.terminal_name} {self.project_root}> "
+        self.test_play_process = None
+        self.test_play_tempdir = None
+        self.test_play_poll_job = None
 
         self.root.title(f"{APP_TITLE} — {self.project_root.name}")
         self.root.geometry("1320x880")
@@ -1411,6 +1431,7 @@ class VNEditorApp:
         ttk.Button(toolbar, text="Save", command=self.save_active).pack(side="left", padx=(8, 0))
         ttk.Button(toolbar, text="Save All", command=self.save_all).pack(side="left", padx=(5, 0))
         ttk.Button(toolbar, text="Validate Story (F5)", command=self.validate_with_engine).pack(side="left", padx=(18, 0))
+        ttk.Button(toolbar, text="Test Play", command=self.test_play).pack(side="left", padx=(5, 0))
         ttk.Button(toolbar, text="Export Game…", command=self.export_game).pack(side="left", padx=(5, 0))
         ttk.Button(toolbar, text="Refresh Assets", command=self.refresh_asset_tree).pack(side="left", padx=(5, 0))
         ttk.Button(toolbar, text="Find (Ctrl+F)", command=self.show_find).pack(side="left", padx=(5, 0))
@@ -1427,7 +1448,9 @@ class VNEditorApp:
         right_split = ttk.Panedwindow(right, orient="vertical")
         right_split.pack(fill="both", expand=True)
         document_area = ttk.Frame(right_split)
-        terminal_frame = ttk.LabelFrame(right_split, text="PowerShell — project folder", padding=5, height=190)
+        terminal_frame = ttk.LabelFrame(
+            right_split, text=f"{self.terminal_name} — project folder", padding=5, height=190
+        )
         right_split.add(document_area, weight=5)
         right_split.add(terminal_frame, weight=1)
 
@@ -1576,21 +1599,36 @@ class VNEditorApp:
             self.markdown_texts[frame] = text
             self.markdown_paths[frame] = path
 
+    @staticmethod
+    def _available_terminal_name():
+        if os.name == "nt":
+            return "PowerShell"
+        configured = os.environ.get("SHELL", "")
+        if Path(configured).name in {"bash", "zsh", "sh", "dash"} and Path(configured).is_file():
+            return Path(configured).name
+        for candidate in ("bash", "zsh", "sh"):
+            if shutil.which(candidate):
+                return candidate
+        return "Shell"
+
     def _start_terminal(self):
         self._stop_terminal()
         self.terminal_generation += 1
         generation = self.terminal_generation
-        powershell = shutil.which("powershell.exe") or shutil.which("pwsh.exe")
-        if not powershell:
-            windows_root = Path(os.environ.get("SystemRoot", "C:/Windows"))
-            candidate = windows_root / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
-            if candidate.is_file():
-                powershell = str(candidate)
-        if not powershell:
-            self._append_terminal("PowerShell was not found. The terminal requires the Windows PowerShell component.\n")
-            return
-        location = str(self.project_root).replace("'", "''")
-        script = f"""
+
+        if os.name == "nt":
+            terminal = shutil.which("powershell.exe") or shutil.which("pwsh.exe")
+            if not terminal:
+                windows_root = Path(os.environ.get("SystemRoot", "C:/Windows"))
+                candidate = windows_root / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+                if candidate.is_file():
+                    terminal = str(candidate)
+            if not terminal:
+                self._append_terminal("PowerShell was not found. The terminal requires Windows PowerShell or pwsh.\n")
+                return
+            self.terminal_name = "PowerShell"
+            location = str(self.project_root).replace("'", "''")
+            script = f"""
 $utf8 = New-Object -TypeName System.Text.UTF8Encoding -ArgumentList $false
 [Console]::InputEncoding = $utf8
 [Console]::OutputEncoding = $utf8
@@ -1611,9 +1649,36 @@ while ($true) {{
     [Console]::Out.WriteLine('__VN_EDITOR_PROMPT__' + (Get-Location).Path)
 }}
 """
+            command = [terminal, "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script]
+        else:
+            configured = os.environ.get("SHELL", "")
+            if Path(configured).name in {"bash", "zsh", "sh", "dash"} and Path(configured).is_file():
+                terminal = configured
+            else:
+                terminal = next((shutil.which(name) for name in ("bash", "zsh", "sh") if shutil.which(name)), None)
+            if not terminal:
+                self._append_terminal("No bash, zsh, or sh shell was found for the command pane.\n")
+                return
+            self.terminal_name = Path(terminal).name
+            script = (
+                f"cd -- {shlex.quote(str(self.project_root))}\n"
+                "printf '__VN_EDITOR_PROMPT__%s\\n' \"$PWD\"\n"
+                "while IFS= read -r commandLine; do\n"
+                "    [ \"$commandLine\" = '__VN_EDITOR_EXIT__' ] && break\n"
+                "    eval \"$commandLine\" 2>&1\n"
+                "    printf '__VN_EDITOR_PROMPT__%s\\n' \"$PWD\"\n"
+                "done\n"
+            )
+            if self.terminal_name == "bash":
+                command = [terminal, "--noprofile", "--norc", "-c", script]
+            elif self.terminal_name == "zsh":
+                command = [terminal, "-f", "-c", script]
+            else:
+                command = [terminal, "-c", script]
+
         try:
             self.terminal_process = subprocess.Popen(
-                [powershell, "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+                command,
                 cwd=self.project_root,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
@@ -1626,14 +1691,14 @@ while ($true) {{
             )
         except OSError as error:
             self.terminal_process = None
-            self._append_terminal(f"Could not start PowerShell: {error}\n")
+            self._append_terminal(f"Could not start {self.terminal_name}: {error}\n")
             return
-        self.terminal_prompt = f"PS {self.project_root}> "
-        self._append_terminal(f"\nPowerShell started in {self.project_root}\n")
+        self.terminal_prompt = f"{self.terminal_name} {self.project_root}> "
+        self._append_terminal(f"\n{self.terminal_name} started in {self.project_root}\n")
         reader = threading.Thread(
             target=self._read_terminal_output,
             args=(self.terminal_process, generation),
-            name="VNEditorPowerShellReader",
+            name="VNEditorShellReader",
             daemon=True,
         )
         reader.start()
@@ -1669,7 +1734,7 @@ while ($true) {{
                 for line in process.stdout:
                     self.terminal_queue.put((generation, line.rstrip("\r\n")))
         except (OSError, ValueError) as error:
-            self.terminal_queue.put((generation, f"PowerShell output error: {error}"))
+            self.terminal_queue.put((generation, f"Shell output error: {error}"))
         finally:
             if process.stdout:
                 process.stdout.close()
@@ -1694,7 +1759,7 @@ while ($true) {{
                     if self.terminal_entry is not None:
                         self.terminal_entry.destroy()
                         self.terminal_entry = None
-                    self._append_terminal("\nPowerShell exited. Use Restart to open it again.\n")
+                    self._append_terminal("\nShell exited. Use Restart to open it again.\n")
                 continue
             if line.startswith("__VN_EDITOR_PROMPT__"):
                 location = line[len("__VN_EDITOR_PROMPT__"):]
@@ -1714,7 +1779,7 @@ while ($true) {{
 
     def _show_terminal_prompt(self, location: str):
         self.terminal_location = location
-        self.terminal_prompt = f"PS {location}> "
+        self.terminal_prompt = f"{self.terminal_name} {location}> "
         self.terminal_output.configure(state="normal")
         self.terminal_output.insert("end-1c", self.terminal_prompt)
         entry = tk.Entry(
@@ -1765,7 +1830,7 @@ while ($true) {{
         if process is None or process.poll() is not None:
             self.terminal_entry.destroy()
             self.terminal_entry = None
-            self._append_terminal("\nPowerShell is not running. Use Restart to open it again.\n")
+            self._append_terminal("\nThe shell is not running. Use Restart to open it again.\n")
             return "break"
         if process.stdin is None:
             return "break"
@@ -2922,19 +2987,24 @@ while ($true) {{
         runtime = self.project_root / "VN_Engine" / "engine.exe"
         if not runtime.is_file():
             runtime = self.project_root / "engine.exe"
+        temporary = None
         if runtime.is_file():
             command = [str(runtime), "--validate"]
         else:
             source_main = self.project_root / "main.py"
-            if not source_main.is_file():
-                self.engine_diagnostics = [Diagnostic(
-                    "warning", "No packaged engine.exe or main.py was found. Live editor checks are still available.", 1, "Engine"
-                )]
-                self.render_diagnostics()
-                return
-            import sys
-            command = [sys.executable, str(source_main), "--validate"]
-        self.set_status("Running the engine story validator…")
+            if source_main.is_file():
+                command = [sys.executable, str(source_main), "--validate"]
+            else:
+                try:
+                    temporary, _platform, _game_name, runtime = self._create_temporary_game()
+                except (OSError, ValueError, json.JSONDecodeError) as error:
+                    self.engine_diagnostics = [Diagnostic(
+                        "error", f"Could not prepare the engine template for validation: {error}", 1, "Engine"
+                    )]
+                    self.render_diagnostics()
+                    return
+                command = [str(runtime), "--validate"]
+        self.set_status("Running the engine story validator...")
         self.root.update_idletasks()
         try:
             result = subprocess.run(
@@ -2952,6 +3022,9 @@ while ($true) {{
             self.engine_diagnostics = [Diagnostic("error", f"Could not run engine validation: {error}", 1, "Engine")]
             self.render_diagnostics()
             return
+        finally:
+            if temporary is not None:
+                temporary.cleanup()
         output = (result.stdout + "\n" + result.stderr).strip()
         if result.returncode == 0:
             self.engine_diagnostics = [Diagnostic("hint", output or "Engine validation passed.", 1, "Engine")]
@@ -2967,10 +3040,7 @@ while ($true) {{
             self.engine_diagnostics = diagnostics
         self.render_diagnostics()
 
-    def export_game(self):
-        if not self.save_all():
-            return
-
+    def _collect_export_errors(self):
         catalog = self._catalog()
         context_variables, context_dialogues = self._story_context()
         errors = []
@@ -2992,22 +3062,187 @@ while ($true) {{
             f"project.json:{item.line}: {item.message}"
             for item in project_diagnostics if item.severity == "error"
         )
-        if errors:
-            messagebox.showerror(
-                "Cannot Export Project",
-                "Fix these errors before exporting:\n\n" + "\n".join(errors[:30]),
-                parent=self.root,
+        return errors
+
+    def _show_export_errors(self, title, errors):
+        if not errors:
+            return False
+        messagebox.showerror(
+            title,
+            "Fix these errors before continuing:\n\n" + "\n".join(errors[:30]),
+            parent=self.root,
+        )
+        return True
+
+    def _template_directory(self):
+        candidates = [
+            self.editor_home / "templates",
+            self.editor_home / "engine" / "templates",
+            self.editor_home / "VN_Engine" / "engine" / "templates",
+            self.project_root / "templates",
+            self.project_root / "engine" / "templates",
+        ]
+        if len(self.editor_home.parents) >= 3:
+            candidates.append(self.editor_home.parents[2] / "templates")
+        return next(
+            (path for path in candidates if path.is_dir() and any(path.glob("template-*.zip"))),
+            next((path for path in candidates if path.is_dir()), candidates[0]),
+        )
+
+    @staticmethod
+    def _current_platform():
+        if sys.platform == "win32":
+            return "windows"
+        if sys.platform == "darwin":
+            return "macos"
+        return "linux"
+
+    @staticmethod
+    def _test_play_executable(runtime_root, platform, game_name):
+        if platform == "windows":
+            return runtime_root / game_name / f"{game_name}.exe"
+        if platform == "linux":
+            return runtime_root / game_name / game_name
+        return runtime_root / f"{game_name}.app" / "Contents" / "MacOS" / "Runner"
+
+    def _create_temporary_game(self):
+        values = json.loads(self.project_editor.get_text())
+        platform = self._current_platform()
+        game_name = safe_project_name(values.get("name", "Visual Novel"))
+        temporary = tempfile.TemporaryDirectory(prefix="vn_editor_test_play_")
+        temporary_root = Path(temporary.name)
+        runtime_root = temporary_root / "runtime"
+        archive_path = temporary_root / f"{game_name}-{platform}.zip"
+        try:
+            export_project(
+                self.project_root,
+                self.project_file,
+                self._template_directory(),
+                platform,
+                archive_path,
             )
+            self._extract_test_play_archive(archive_path, runtime_root)
+            executable = self._test_play_executable(runtime_root, platform, game_name)
+            if not executable.is_file():
+                raise FileNotFoundError(f"Test-play executable was not found: {executable}")
+            return temporary, platform, game_name, executable
+        except Exception:
+            temporary.cleanup()
+            raise
+
+    @staticmethod
+    def _extract_test_play_archive(archive_path, destination):
+        destination.mkdir(parents=True, exist_ok=True)
+        destination_root = destination.resolve()
+        with ZipFile(archive_path, "r") as archive:
+            for item in archive.infolist():
+                relative = PurePosixPath(item.filename.replace("\\", "/"))
+                if relative.is_absolute() or ".." in relative.parts or (
+                    relative.parts and relative.parts[0].endswith(":")
+                ):
+                    raise ValueError(f"Unsafe path in test-play archive: {item.filename!r}")
+                target = destination.joinpath(*relative.parts)
+                if item.is_dir():
+                    target.mkdir(parents=True, exist_ok=True)
+                    mode = item.external_attr >> 16
+                    if os.name != "nt" and mode:
+                        target.chmod(mode & 0o777)
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                mode = item.external_attr >> 16 if item.create_system == 3 else 0
+                if stat.S_ISLNK(mode):
+                    link_target = archive.read(item).decode("utf-8")
+                    if PurePosixPath(link_target).is_absolute():
+                        raise ValueError(f"Absolute symlink in test-play archive: {item.filename!r}")
+                    resolved_link = (target.parent / link_target).resolve()
+                    try:
+                        resolved_link.relative_to(destination_root)
+                    except ValueError as error:
+                        raise ValueError(f"Symlink escapes test-play folder: {item.filename!r}") from error
+                    os.symlink(link_target, target)
+                    continue
+                target.write_bytes(archive.read(item))
+                if os.name != "nt" and mode:
+                    target.chmod(mode & 0o777)
+
+    def _cleanup_test_play(self):
+        temporary = self.test_play_tempdir
+        self.test_play_tempdir = None
+        if temporary is not None:
+            try:
+                temporary.cleanup()
+            except OSError:
+                pass
+
+    def _poll_test_play(self):
+        self.test_play_poll_job = None
+        process = self.test_play_process
+        if process is not None and process.poll() is None:
+            self.test_play_poll_job = self.root.after(750, self._poll_test_play)
+            return
+        self.test_play_process = None
+        self._cleanup_test_play()
+        self.set_status("Test Play closed; temporary game files removed.")
+
+    def _stop_test_play(self):
+        if self.test_play_poll_job is not None:
+            try:
+                self.root.after_cancel(self.test_play_poll_job)
+            except tk.TclError:
+                pass
+            self.test_play_poll_job = None
+        process = self.test_play_process
+        self.test_play_process = None
+        if process is not None and process.poll() is None:
+            try:
+                process.terminate()
+                process.wait(timeout=3)
+            except (OSError, subprocess.TimeoutExpired):
+                try:
+                    process.kill()
+                    process.wait(timeout=2)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+        self._cleanup_test_play()
+
+    def test_play(self):
+        if self.test_play_process is not None and self.test_play_process.poll() is None:
+            messagebox.showinfo("Test Play", "A test game is already running.", parent=self.root)
+            return
+        if not self.save_all():
+            return
+        errors = self._collect_export_errors()
+        if self._show_export_errors("Cannot Start Test Play", errors):
+            return
+        try:
+            temporary, platform, _game_name, executable = self._create_temporary_game()
+            self.test_play_tempdir = temporary
+            environment = os.environ.copy()
+            environment["VN_ENGINE_USER_DATA_DIR"] = str(Path(temporary.name) / "user_data")
+            self.test_play_process = subprocess.Popen(
+                [str(executable)], cwd=executable.parent, env=environment
+            )
+        except (OSError, ValueError, json.JSONDecodeError, subprocess.SubprocessError) as error:
+            self._cleanup_test_play()
+            messagebox.showerror("Cannot Start Test Play", f"Could not prepare or start the game: {error}", parent=self.root)
             return
 
+        self.set_status(f"Test Play running from a temporary {platform} game build.")
+        self.test_play_poll_job = self.root.after(750, self._poll_test_play)
+
+    def export_game(self):
+        if not self.save_all():
+            return
+        errors = self._collect_export_errors()
+        if self._show_export_errors("Cannot Export Project", errors):
+            return
         try:
             values = json.loads(self.project_editor.get_text())
         except json.JSONDecodeError as error:
             messagebox.showerror("Cannot Export Project", f"Invalid project.json: {error}", parent=self.root)
             return
         game_name = safe_project_name(values.get("name", "Visual Novel"))
-        template_candidates = (self.editor_home / "templates", self.project_root / "templates")
-        template_dir = next((path for path in template_candidates if path.is_dir()), template_candidates[0])
+        template_dir = self._template_directory()
 
         dialog = tk.Toplevel(self.root)
         dialog.title("Export Game")
@@ -3041,7 +3276,7 @@ while ($true) {{
         ).grid(row=2, column=2, padx=(6, 0), pady=7)
         ttk.Label(
             body,
-            text="Put template-windows.zip, template-linux.zip, and template-macos.zip in the templates folder.",
+            text="Templates are detected in the editor, engine, or project folder; you can also browse to another folder.",
             foreground="#707987",
         ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(2, 10))
         button_row = ttk.Frame(body)
@@ -3072,7 +3307,7 @@ while ($true) {{
                     platform,
                     target,
                 )
-            except (OSError, ValueError, json.JSONDecodeError) as error:
+            except (OSError, ValueError, json.JSONDecodeError, subprocess.SubprocessError) as error:
                 messagebox.showerror("Export Game", str(error), parent=dialog)
                 return
             dialog.destroy()
@@ -3118,6 +3353,7 @@ while ($true) {{
     def close(self):
         if not self._confirm_discard_or_save():
             return
+        self._stop_test_play()
         self._stop_terminal()
         if self.terminal_poll_job is not None:
             try:
@@ -3136,7 +3372,7 @@ def main():
     else:
         root_path = project_root_from(Path.cwd())
         if not ((root_path / "data").is_dir() or (root_path / "assets").is_dir()):
-            root_path = project_root_from(Path(sys.argv[0]).resolve().parent)
+            root_path = project_root_from(editor_package_root(Path(sys.argv[0])))
     root = tk.Tk()
     VNEditorApp(root, root_path)
     root.mainloop()

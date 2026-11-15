@@ -1,9 +1,6 @@
-"""Build the self-contained Windows editor executable with Nuitka.
+"""Build the standalone VN_Editor executable for the current operating system."""
 
-This is a maintainer build step. People using a released package only run
-editor.exe; they do not need Python or Nuitka installed.
-"""
-
+import argparse
 import importlib.util
 from pathlib import Path
 import subprocess
@@ -12,19 +9,30 @@ import sys
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 EDITOR_SOURCE = PROJECT_ROOT / "editor.py"
-BUILT_EDITOR_OUTPUT = PROJECT_ROOT / "editor.exe"
-EDITOR_OUTPUT = PROJECT_ROOT / "dist" / "editor.exe"
 
 
-def _move_editor_to_dist() -> None:
-    EDITOR_OUTPUT.parent.mkdir(parents=True, exist_ok=True)
-    BUILT_EDITOR_OUTPUT.replace(EDITOR_OUTPUT)
+def _current_platform() -> str:
+    if sys.platform == "win32":
+        return "windows"
+    if sys.platform == "darwin":
+        return "macos"
+    return "linux"
+
+
+def _parse_args():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=PROJECT_ROOT / "dist" / "editor-build",
+        help="Nuitka output folder (default: dist/editor-build)",
+    )
+    return parser.parse_args()
 
 
 def main() -> int:
-    if sys.platform != "win32":
-        print("The editor executable is a Windows application and must be built on Windows.", file=sys.stderr)
-        return 2
+    args = _parse_args()
+    platform = _current_platform()
     if not EDITOR_SOURCE.is_file():
         print(f"Could not find editor.py under {PROJECT_ROOT}.", file=sys.stderr)
         return 2
@@ -40,35 +48,42 @@ def main() -> int:
         print("Could not check whether Nuitka is installed.", file=sys.stderr)
         return 2
 
+    output_dir = args.output_dir.expanduser()
+    if not output_dir.is_absolute():
+        output_dir = PROJECT_ROOT / output_dir
+    output_name = "VN_Editor.exe" if platform == "windows" else "VN_Editor"
+    mode = "app" if platform == "macos" else "onefile"
     command = [
         sys.executable,
         "-m",
         "nuitka",
-        "--mode=onefile",
+        f"--mode={mode}",
         "--assume-yes-for-downloads",
-        "--windows-console-mode=disable",
         "--enable-plugin=tk-inter",
-        f"--output-dir={PROJECT_ROOT}",
-        "--output-filename=editor.exe",
+        f"--output-dir={output_dir}",
+        f"--output-filename={output_name}",
         "--jobs=4",
         "--include-package=yaml",
         "--include-module=export_pipeline",
+        "--include-module=engine.windows_shortcut",
         "--python-flag=no_docstrings",
-        "editor.py",
     ]
+    if platform == "windows":
+        command.append("--windows-console-mode=disable")
+    elif platform == "macos":
+        command.append("--macos-app-name=VN_Editor")
+    command.append("editor.py")
+
     result = subprocess.run(command, cwd=PROJECT_ROOT, check=False)
     if result.returncode:
         print(f"Nuitka failed with exit code {result.returncode}.", file=sys.stderr)
         return result.returncode
-    if not BUILT_EDITOR_OUTPUT.is_file():
-        print(f"Nuitka reported success, but {BUILT_EDITOR_OUTPUT} was not created.", file=sys.stderr)
+
+    expected = output_dir / ("VN_Editor.app" if platform == "macos" else output_name)
+    if not expected.exists():
+        print(f"Nuitka reported success, but the expected editor was not created: {expected}", file=sys.stderr)
         return 1
-    try:
-        _move_editor_to_dist()
-    except OSError as error:
-        print(f"Could not move the editor executable to {EDITOR_OUTPUT}: {error}", file=sys.stderr)
-        return 1
-    print(f"Standalone editor built: {EDITOR_OUTPUT}")
+    print(f"Standalone {platform} editor built: {expected}")
     return 0
 
 

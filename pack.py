@@ -22,7 +22,8 @@ DOCUMENTS = (
     (PROJECT_ROOT / "docs" / "project-config.md", "project-config.md"),
     (PROJECT_ROOT / "docs" / "story-format.md", "story-format.md"),
 )
-EDITOR_EXECUTABLE = DIST_ROOT / "editor.exe"
+EDITOR_EXECUTABLE = DIST_ROOT / "editor-build" / "VN_Editor.exe"
+EXPORT_TEMPLATE_DIRS = (PROJECT_ROOT / "templates", PROJECT_ROOT / "engine" / "templates")
 VERSION_PATTERN = re.compile(r"[0-9A-Za-z][0-9A-Za-z.+-]*")
 
 
@@ -74,7 +75,30 @@ def _copy_editor(package_root: Path) -> None:
             f"The standalone VN Engine editor is missing: {EDITOR_EXECUTABLE}. "
             "Build it first with 'python build_editor.py'."
         )
-    shutil.copy2(EDITOR_EXECUTABLE, package_root / "editor.exe")
+    shutil.copy2(EDITOR_EXECUTABLE, package_root / "VN_Editor.exe")
+
+
+def _copy_export_templates(package_root: Path) -> None:
+    available = {}
+    missing = []
+    for platform in ("windows", "linux", "macos"):
+        filename = f"template-{platform}.zip"
+        source = next(
+            (directory / filename for directory in EXPORT_TEMPLATE_DIRS if (directory / filename).is_file()),
+            None,
+        )
+        if source is None:
+            missing.append(filename)
+        else:
+            available[filename] = source
+    if missing:
+        raise FileNotFoundError(
+            "Required cross-platform game templates are missing: " + ", ".join(missing)
+        )
+    destination = package_root / "templates"
+    destination.mkdir(parents=True, exist_ok=True)
+    for filename, source in available.items():
+        shutil.copy2(source, destination / filename)
 
 
 def _create_example_project(package_root: Path) -> None:
@@ -151,6 +175,7 @@ def create_package() -> Path:
         _create_shortcuts(package_root)
         _copy_documentation(package_root)
         _copy_editor(package_root)
+        _copy_export_templates(package_root)
         _write_archive(package_root, archive_path)
 
     return archive_path

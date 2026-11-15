@@ -2,7 +2,9 @@
 
 A story is a UTF-8 YAML file in the project’s configured data folder (`data/` by default). The default filename is `story.yaml`, selected in `data/project.json`. YAML indentation defines the structure: use spaces, not tabs.
 
-Validate the configured story from PowerShell at the project root:
+Open the project in VN_Editor. Its live diagnostics check YAML syntax and engine-specific story rules as you edit. Press `F5` to run the engine validator, or click **Test Play** to validate and launch the current platform build.
+
+If you are using a separate compiled engine distribution or running the engine from source, you can also validate the configured story from PowerShell at the project root:
 
 ```powershell
 .\VN_Engine\engine.exe --validate
@@ -430,7 +432,7 @@ To browse the discovered assets, run these commands from the project root:
 .\VN_Engine\engine.exe --list-character-assets Aiko --look Summer/Uniform
 ```
 
-The first command lists character names. The second lists each look and its expressions for Aiko. The third lists expressions for one look. The validator also suggests close matches for missing character references.
+These optional command-line inventory commands require a separate compiled engine distribution or a source checkout. In the editor package, use the asset hierarchy to browse characters, looks, and expressions. The validator also suggests close matches for missing character references.
 
 ## Text formatting and inline asset markers
 

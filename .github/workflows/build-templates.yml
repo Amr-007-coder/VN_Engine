@@ -1,4 +1,4 @@
-name: Build cross-platform export templates
+name: Build cross-platform game and editor packages
 
 on:
   push:
@@ -39,30 +39,17 @@ jobs:
       - name: Install engine build dependencies
         run: python -m pip install -r requirements.txt
 
-      - name: Compile Windows engine template
+      - name: Compile Windows engine template with embedded engine resources
         if: matrix.platform == 'windows'
-        run: >-
-          python -m nuitka --standalone --assume-yes-for-downloads --output-dir=build --output-filename=Runner.exe
-          --windows-console-mode=disable --include-package=engine --include-package=pygame
-          --include-package=yaml --include-data-dir=engine/assets=engine/assets
-          --include-data-dir=engine/data=engine/data main.py
+        run: python compile.py --engine-only --output-dir build --output-name Runner.exe --windows-console-mode disable
 
-      - name: Compile Linux engine template
+      - name: Compile Linux engine template with embedded engine resources
         if: matrix.platform == 'linux'
-        run: >-
-          python -m nuitka --standalone --assume-yes-for-downloads --output-dir=build --output-filename=Runner
-          --include-package=engine --include-package=pygame --include-package=yaml
-          --include-data-dir=engine/assets=engine/assets
-          --include-data-dir=engine/data=engine/data main.py
+        run: python compile.py --engine-only --output-dir build --output-name Runner
 
-      - name: Compile macOS engine template
+      - name: Compile macOS engine template with embedded engine resources
         if: matrix.platform == 'macos'
-        run: >-
-          python -m nuitka --standalone --assume-yes-for-downloads --output-dir=build --output-filename=Runner
-          --macos-create-app-bundle --macos-app-name=Runner --include-package=engine
-          --include-package=pygame --include-package=yaml
-          --include-data-dir=engine/assets=engine/assets
-          --include-data-dir=engine/data=engine/data main.py
+        run: python compile.py --engine-only --output-dir build --output-name Runner --macos-app-bundle
 
       - name: Normalize and zip template
         run: >-
@@ -75,17 +62,86 @@ jobs:
           path: templates/template-${{ matrix.platform }}.zip
           if-no-files-found: error
 
-  publish-release-assets:
-    name: Attach templates to release
+  build-editor:
+    name: Build VN_Editor for ${{ matrix.platform }}
     needs: build-template
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows
+          - os: ubuntu-22.04
+            platform: linux
+          - os: macos-latest
+            platform: macos
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        if: runner.os != 'Linux'
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install Linux editor build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y patchelf ccache python3-tk python3-venv tk-dev
+          python3 -m venv --system-site-packages .editor-venv
+          .editor-venv/bin/python -m pip install -r requirements.txt
+
+      - name: Install editor build dependencies
+        if: runner.os != 'Linux'
+        run: python -m pip install -r requirements.txt
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: template-*
+          path: templates
+          merge-multiple: true
+
+      - name: Build Linux editor
+        if: matrix.platform == 'linux'
+        run: .editor-venv/bin/python build_editor.py --output-dir build/editor
+
+      - name: Build Windows or macOS editor
+        if: matrix.platform != 'linux'
+        run: python build_editor.py --output-dir build/editor
+
+      - name: Package Linux editor
+        if: matrix.platform == 'linux'
+        run: >-
+          .editor-venv/bin/python tools/package_editor.py --platform linux
+          --build-dir build/editor --templates-dir templates
+          --output exports/VN_Editor-linux.zip
+
+      - name: Package Windows or macOS editor
+        if: matrix.platform != 'linux'
+        run: >-
+          python tools/package_editor.py --platform ${{ matrix.platform }}
+          --build-dir build/editor --templates-dir templates
+          --output exports/VN_Editor-${{ matrix.platform }}.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vn-editor-${{ matrix.platform }}
+          path: exports/VN_Editor-${{ matrix.platform }}.zip
+          if-no-files-found: error
+
+  publish-release-assets:
+    name: Attach game templates and editor packages to release
+    needs: [build-template, build-editor]
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/download-artifact@v4
         with:
-          path: templates
+          path: release-assets
           merge-multiple: true
 
       - uses: softprops/action-gh-release@v2
         with:
-          files: templates/template-*.zip
+          files: release-assets/*.zip
           fail_on_unmatched_files: true

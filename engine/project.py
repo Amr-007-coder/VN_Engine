@@ -1,4 +1,5 @@
 from copy import deepcopy
+import os
 import re
 from pathlib import Path
 
@@ -98,14 +99,18 @@ class ProjectConfig:
         self.assets_dir = self._resolve_project_path(assets_path, project_root)
         if assets_path == "assets" and not self.assets_dir.is_dir() and PATHS.project_assets.is_dir():
             self.assets_dir = PATHS.project_assets
-        user_data_root = PATHS.user_data_root
-        if PATHS.use_local_app_data:
-            project_folder = re.sub(r"[^A-Za-z0-9_-]+", "-", self.name).strip("-_")
-            user_data_root = user_data_root / (project_folder or "visual-novel")
-        self.user_data_dir = self._resolve_project_path(
-            self.values["paths"].get("user_data", "user_data"),
-            user_data_root,
-        )
+        user_data_override = os.environ.get("VN_ENGINE_USER_DATA_DIR")
+        if user_data_override:
+            self.user_data_dir = Path(user_data_override).expanduser().resolve()
+        else:
+            user_data_root = PATHS.user_data_root
+            if PATHS.use_local_app_data:
+                project_folder = re.sub(r"[^A-Za-z0-9_-]+", "-", self.name).strip("-_")
+                user_data_root = user_data_root / (project_folder or "visual-novel")
+            self.user_data_dir = self._resolve_project_path(
+                self.values["paths"].get("user_data", "user_data"),
+                user_data_root,
+            )
 
         self.story_file = self.values["story"]
         self.window = self.values["window"]
