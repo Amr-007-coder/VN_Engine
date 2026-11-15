@@ -3,6 +3,7 @@
 from copy import deepcopy
 from contextlib import contextmanager
 from io import BytesIO
+import html
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -16,7 +17,7 @@ from uuid import UUID
 from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile, ZipInfo
 
 
-PLATFORMS = {"windows", "linux", "macos"}
+PLATFORMS = {"windows", "linux", "macos", "web"}
 PROJECT_BUNDLE_COMMENT = b"VN_ENGINE_GAME_BUNDLE_V1"
 
 
@@ -236,6 +237,157 @@ def _shortcut_entry(platform: str, game_name: str, executable_size: int) -> tupl
     return f"{game_name} Shortcut.app", f"{game_name}.app".encode("utf-8"), True
 
 
+def _prepare_project_export(project_root: Path, project_file: Path):
+    try:
+        project_values = json.loads(project_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"Could not read project configuration {project_file}: {error}") from error
+    if not isinstance(project_values, dict):
+        raise ValueError("Project configuration must be a JSON object.")
+
+    name = safe_project_name(project_values.get("name", "Visual Novel"))
+    paths = project_values.get("paths", {})
+    if not isinstance(paths, dict):
+        paths = {}
+    data_root = _resolve_config_path(project_root, paths.get("data"), "data")
+    assets_root = _resolve_config_path(project_root, paths.get("assets"), "assets")
+    if not data_root.is_dir():
+        raise FileNotFoundError(f"Project data folder not found: {data_root}")
+    if not assets_root.is_dir():
+        raise FileNotFoundError(f"Project assets folder not found: {assets_root}")
+    if not project_file.is_file():
+        raise FileNotFoundError(f"Project configuration not found: {project_file}")
+
+    project_values = deepcopy(project_values)
+    story_name = project_values.get("story", "story.yaml")
+    if not isinstance(story_name, str):
+        raise ValueError("Project configuration 'story' must be a YAML filename.")
+    story_path = PurePosixPath(story_name.replace("\\", "/"))
+    if (
+        story_path.is_absolute()
+        or (story_path.parts and story_path.parts[0].endswith(":"))
+        or ".." in story_path.parts
+        or not story_path.parts
+        or story_path.suffix.casefold() not in {".yaml", ".yml"}
+    ):
+        raise ValueError("The configured story must be a YAML file inside the project's data folder.")
+    project_values["story"] = story_path.as_posix()
+    project_paths = project_values.setdefault("paths", {})
+    if not isinstance(project_paths, dict):
+        raise ValueError("Project configuration 'paths' must be an object.")
+    project_paths.update({"data": "data", "assets": "assets", "user_data": "user_data"})
+    project_json = (json.dumps(project_values, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    return name, data_root, assets_root, story_path, project_json
+
+
+def _replace_pygbag_project_files(apk_data: bytes, project_bundle: Path) -> bytes:
+    with ZipFile(BytesIO(apk_data), "r") as source:
+        buffer = BytesIO()
+        with ZipFile(buffer, "w", compression=ZIP_DEFLATED, compresslevel=6) as destination:
+            for item in source.infolist():
+                name = item.filename.replace("\\", "/")
+                if name.startswith(("assets/assets/", "assets/data/")):
+                    continue
+                destination.writestr(item, source.read(item))
+            with ZipFile(project_bundle, "r") as project_files:
+                for item in project_files.infolist():
+                    name = f"assets/{item.filename}"
+                    info = ZipInfo(name, item.date_time)
+                    info.compress_type = ZIP_DEFLATED
+                    destination.writestr(info, project_files.read(item))
+        return buffer.getvalue()
+
+
+def export_web_project(
+    project_root: Path,
+    project_file: Path,
+    templates_dir: Path,
+    output_file: Path,
+) -> Path:
+    """Insert a project into the prebuilt Pygbag static-site template."""
+    project_root = Path(project_root).resolve()
+    project_file = Path(project_file).resolve()
+    templates_dir = Path(templates_dir).resolve()
+    output_file = Path(output_file).expanduser().resolve()
+    template_file = templates_dir / "template-web.zip"
+    if not template_file.is_file():
+        raise FileNotFoundError(f"Web export template not found: {template_file}")
+    if output_file == template_file:
+        raise ValueError("The output ZIP cannot overwrite the web export template.")
+
+    name, data_root, assets_root, story_path, project_json = _prepare_project_export(project_root, project_file)
+    unsupported_audio = sorted(
+        path.relative_to(assets_root).as_posix()
+        for path in assets_root.rglob("*")
+        if path.is_file() and path.suffix.casefold() in {".wav", ".mp3", ".aiff"}
+    )
+    if unsupported_audio:
+        files = ", ".join(unsupported_audio[:8])
+        more = "..." if len(unsupported_audio) > 8 else ""
+        raise ValueError(
+            "Pygbag browser builds require OGG audio. Convert these project assets to .ogg: "
+            f"{files}{more}"
+        )
+
+    from engine.validator import StoryValidator
+
+    errors = StoryValidator.validate_file(story_path.as_posix(), data_root, assets_root)
+    if errors:
+        raise ValueError("Story validation failed:\n" + "\n".join(f"- {error}" for error in errors))
+
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    for source_root in (data_root, assets_root):
+        try:
+            output_file.relative_to(source_root)
+        except ValueError:
+            pass
+        else:
+            raise ValueError("Choose an export ZIP outside the project's data and assets folders.")
+
+    with tempfile.TemporaryDirectory(prefix=".vn_export_web_", dir=output_file.parent) as temporary:
+        workspace = Path(temporary)
+        project_bundle = workspace / "project_resources.zip"
+        _write_project_resource_bundle(
+            project_bundle,
+            data_root,
+            assets_root,
+            project_json,
+            story_path.as_posix(),
+        )
+        temporary_output = workspace / "web-export.zip"
+        try:
+            with ZipFile(template_file, "r") as template:
+                app_archives = [
+                    item for item in template.infolist()
+                    if not item.is_dir() and item.filename.casefold().endswith(".apk")
+                ]
+                if len(app_archives) != 1:
+                    raise ValueError("The web template must contain exactly one Pygbag .apk app archive.")
+                app_item = app_archives[0]
+                updated_app = _replace_pygbag_project_files(template.read(app_item), project_bundle)
+
+                with ZipFile(temporary_output, "w", compression=ZIP_DEFLATED, compresslevel=6) as archive:
+                    for item in template.infolist():
+                        if item.is_dir():
+                            continue
+                        content = updated_app if item.filename == app_item.filename else template.read(item)
+                        if item.filename.casefold() == "index.html":
+                            page = content.decode("utf-8")
+                            page, _ = re.subn(
+                                r"<title>.*?</title>",
+                                f"<title>{html.escape(name)}</title>",
+                                page,
+                                count=1,
+                                flags=re.IGNORECASE | re.DOTALL,
+                            )
+                            content = page.encode("utf-8")
+                        archive.writestr(item, content)
+            os.replace(temporary_output, output_file)
+        except BadZipFile as error:
+            raise ValueError(f"Web export template is not a valid ZIP file: {template_file}") from error
+    return output_file
+
+
 def export_project(
     project_root: Path,
     project_file: Path,
@@ -246,6 +398,9 @@ def export_project(
     """Create a standalone game ZIP using the precompiled template for a target OS."""
     if platform not in PLATFORMS:
         raise ValueError(f"Platform must be one of: {', '.join(sorted(PLATFORMS))}.")
+
+    if platform == "web":
+        return export_web_project(project_root, project_file, templates_dir, output_file)
 
     project_root = Path(project_root).resolve()
     project_file = Path(project_file).resolve()

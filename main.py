@@ -31,7 +31,7 @@ def main():
     )
     argument_parser.add_argument(
         "--platform",
-        choices=("windows", "linux", "macos"),
+        choices=("windows", "linux", "macos", "web"),
         help=(
             "Export a ZIP for this platform using its prebuilt template. "
             "Without --platform, --build-game makes the existing native build."

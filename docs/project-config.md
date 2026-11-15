@@ -15,6 +15,7 @@ MyVisualNovel/
     template-windows.zip
     template-linux.zip
     template-macos.zip
+    template-web.zip              # Optional browser export template
   assets/
   data/
     project.json

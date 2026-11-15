@@ -97,6 +97,9 @@ def _copy_game_templates(templates_dir: Path, root: Path) -> None:
         if not source.is_file():
             raise FileNotFoundError(f"Required game template is missing: {source}")
         shutil.copy2(source, destination / name)
+    web_template = templates_dir / "template-web.zip"
+    if web_template.is_file():
+        shutil.copy2(web_template, destination / web_template.name)
 
 
 def _main_executable_path(platform: str) -> str:

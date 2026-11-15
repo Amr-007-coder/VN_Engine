@@ -1,5 +1,6 @@
 from io import BytesIO
 from pathlib import Path
+import sys
 
 import pygame
 
@@ -42,17 +43,21 @@ class AssetManager:
 
         roots = [root for root in (project_assets, fallback_assets) if root is not None]
         category = cls.FOLDERS[kind]
+        names = [path]
+        if sys.platform == "emscripten" and path.suffix.casefold() in {".wav", ".mp3", ".aiff"}:
+            names.append(path.with_suffix(".ogg"))
         for root in roots:
             if EMBEDDED_ENABLED:
                 embedded = find_asset(root, category, name)
                 if embedded is not None:
                     return embedded
 
-            direct = root / path
-            categorized = root / category / path
-            for candidate in (direct, categorized):
-                if candidate.is_file():
-                    return candidate
+            for relative_name in names:
+                direct = root / relative_name
+                categorized = root / category / relative_name
+                for candidate in (direct, categorized):
+                    if candidate.is_file():
+                        return candidate
 
             if not path.suffix:
                 category_dir = root / category

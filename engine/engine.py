@@ -1,7 +1,8 @@
+import asyncio
 import pygame
 import math
 import random
-import webbrowser
+import sys
 from datetime import datetime
 
 from engine.assets import AssetManager
@@ -131,6 +132,21 @@ class Engine:
         finally:
             self.shutdown()
 
+    async def run_async(self):
+        """Run the game loop while yielding control to an async host such as pygbag."""
+        self._initialize()
+        self.running = True
+        try:
+            await self._play_intro_async()
+            while self.running:
+                self._handle_events()
+                self._update()
+                self._render()
+                self.clock.tick(self.fps)
+                await asyncio.sleep(0)
+        finally:
+            self.shutdown()
+
     def _make_menu(self, name):
         config = self.project.menus[name]
         return Menu(config["title"], config["items"], kind=name)
@@ -191,7 +207,16 @@ class Engine:
         return standard
 
     def _play_intro(self):
-        """Show the logo, creator credit, and configurable content notice."""
+        for _ in self._intro_frames():
+            self.clock.tick(self.fps)
+
+    async def _play_intro_async(self):
+        for _ in self._intro_frames():
+            self.clock.tick(self.fps)
+            await asyncio.sleep(0)
+
+    def _intro_frames(self):
+        """Yield frames while showing the logo, creator credit, and content notice."""
         try:
             logo = loader.load_image("logo.png").convert_alpha()
         except (FileNotFoundError, pygame.error):
@@ -286,7 +311,7 @@ class Engine:
                     y = text_top + line_index * font.get_linesize()
                     self.screen.blit(text, text.get_rect(center=(screen_width // 2, y)))
             pygame.display.flip()
-            self.clock.tick(self.fps)
+            yield None
         self.screen.fill((0, 0, 0))
         pygame.display.flip()
 
@@ -857,7 +882,14 @@ class Engine:
         elif action == "open_credit_link":
             url = item.get("url")
             if url:
-                webbrowser.open(url)
+                if sys.platform == "emscripten":
+                    import platform
+
+                    platform.window.open(url)
+                else:
+                    import webbrowser
+
+                    webbrowser.open(url)
         elif action == "quit":
             self.running = False
         elif action == "resume":

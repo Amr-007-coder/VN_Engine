@@ -1,6 +1,6 @@
 # VN Engine user guide
 
-This guide takes you from the platform-specific VN_Editor download to a playable project and a shareable game. The editor package includes the game runtime templates for Windows, Linux, and macOS. Creators do not need Python, Pygame, Nuitka, or a compiler installed.
+This guide takes you from the platform-specific VN_Editor download to a playable project and a shareable game. The editor package includes the game runtime templates for Windows, Linux, and macOS. A separate Pygbag template enables browser exports. Creators do not need Python, Pygame, Nuitka, or a compiler installed.
 
 ## 1. Extract and open the editor package
 
@@ -15,6 +15,7 @@ MyVisualNovel/                 # Project and editor package root
     template-windows.zip       # Prebuilt game runtimes used by Test Play and Export Game
     template-linux.zip
     template-macos.zip
+    template-web.zip           # Optional browser template; download separately from the release
   assets/                      # Project art and audio
   data/
     project.json               # Project settings
@@ -134,16 +135,16 @@ To let someone play or continue editing, share the complete project folder with 
 
 The platform editor ZIP includes the complete game runtime templates under `templates/`; the editor uses the current platform template for Test Play and any selected platform template for export.
 
-## 8. Export a game for Windows, Linux, or macOS
+## 8. Export a desktop game or browser game
 
 The editor packages games for any supported desktop OS from a prebuilt runtime template. Built-in engine assets and data are compiled into each template executable as native constants. When you export a project, its own `assets/` and `data/` files are bundled into the game executable; the computer doing the export needs no compiler.
 
-Each downloadable VN_Editor ZIP includes `template-windows.zip`, `template-linux.zip`, and `template-macos.zip` in its top-level `templates/` folder. The editor also searches beside its application and in the project folder. If you move the templates, use **Browse** in the export dialog to select their folder.
+Each downloadable VN_Editor ZIP includes `template-windows.zip`, `template-linux.zip`, and `template-macos.zip` in its top-level `templates/` folder. The optional `template-web.zip` is a separate download from the matching GitHub release; place it in this `templates/` folder when using a web-enabled editor. Older editor executables need to be rebuilt before they show the Web export target. The editor also searches beside its application and in the project folder. If you move the templates, use **Browse** in the export dialog to select their folder.
 
 To export in the editor:
 
 1. Open the project and click **Export Game**.
-2. Choose Windows, Linux, or macOS.
+2. Choose Windows, Linux, macOS, or Web.
 3. Choose the output ZIP and click **Export**.
 
 The editor saves its open YAML and JSON files, checks the project and story, then adds the project's configured `assets/` and `data/` files to the selected runtime executable. It rewrites the project paths to portable `assets/` and `data/` names inside that embedded bundle. The ZIP also contains a platform shortcut beside the game folder:
@@ -170,7 +171,9 @@ macOS:
 
 The editor's own starter `assets/` and `data/` stay as editable files beside VN_Editor. Only exported game archives embed the project files in the game executable.
 
-Linux and macOS archives preserve executable permissions for the main program and shared libraries. The macOS exporter removes the template bundle signature because it changes the app bundle; exported macOS apps are not signed or notarized. Players need the matching OS to run the exported game. Browser/HTML5 exports are not supported.
+Linux and macOS archives preserve executable permissions for the main program and shared libraries. The macOS exporter removes the template bundle signature because it changes the app bundle; exported macOS apps are not signed or notarized. Players need the matching OS to run a desktop export.
+
+A Web export is a static website ZIP containing `index.html` and the packaged game data. Upload the ZIP contents to a static web host, or start an HTTP server in the extracted folder to preview it. Opening `index.html` directly as a `file://` URL is not supported. Pygbag loads its Python and Pygame runtime from its CDN, so the browser needs internet access. Project sound and music files must be OGG (`.ogg`) for browser exports; convert WAV, MP3, and AIFF files before exporting.
 
 ### Command-line export
 
@@ -180,11 +183,12 @@ The editor ZIP does not include a command-line engine executable. These commands
 .\VN_Engine\engine.exe --build-game --platform windows
 .\VN_Engine\engine.exe --build-game --platform linux
 .\VN_Engine\engine.exe --build-game --platform macos --templates-dir "D:\vn-templates" --output-dir output
+.\VN_Engine\engine.exe --build-game --platform web --templates-dir "D:\vn-templates" --output-dir output
 ```
 
 The source engine defaults to `engine/templates/` and also checks `templates/` in the project folder. Pass `--templates-dir` to select another folder. For example, the Linux command creates `output/<Game Name>-linux.zip`.
 
-To build or update the template ZIPs, maintainers install the packages in the repository's `requirements.txt` and push a `v*` version tag. GitHub Actions compiles each template on its target OS and attaches the files to that release. Creators can then export without Python, Pygame, Nuitka, or a compiler installed.
+To build or update the desktop template ZIPs, maintainers push a `v*` version tag. To build only the browser template, run **Build web export template** from the GitHub Actions page and enter the existing release tag. That workflow uses `requirements-web.txt`, uploads a build artifact, and attaches `template-web.zip` to the selected release. It does not rebuild the VN_Editor executables; those need a later editor package build before the Web target appears in their export dialog. When packaging updated editors, `tools/package_editor.py` includes `template-web.zip` if it is present in the templates folder. A web-enabled editor can export without Python, Pygame, Pygbag, Nuitka, or a compiler installed.
 
 ## 9. User data and common fixes
 
