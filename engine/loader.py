@@ -21,14 +21,29 @@ NORMAL_PROJECT_ROOT = NORMAL_ENGINE_DIR.parent
 MEIPASS_ROOT = getattr(sys, "_MEIPASS", None)
 IS_FROZEN = getattr(sys, "frozen", False)
 NUITKA_COMPILED = globals().get("__compiled__")
-IS_NUITKA = NUITKA_COMPILED is not None
+IS_NUITKA = "__compiled__" in globals()
+IS_COMPILED = IS_NUITKA or IS_FROZEN
+
+
+def _compiled_content_root() -> Path:
+    """Find the folder containing loose project data beside a compiled engine."""
+    executable_parent = Path(sys.executable).resolve().parent
+    if (
+        sys.platform == "darwin"
+        and executable_parent.name.casefold() == "macos"
+        and executable_parent.parent.name.casefold() == "contents"
+    ):
+        return executable_parent.parent / "Resources"
+    return executable_parent
 
 
 def _executable_roots() -> list[Path]:
-    if not (IS_FROZEN or IS_NUITKA):
+    if not IS_COMPILED:
         return []
 
-    roots = []
+    # Exported templates keep project assets/data beside the executable on
+    # Windows/Linux, and in Contents/Resources for a macOS app bundle.
+    roots = [_compiled_content_root()]
     if IS_NUITKA:
         if sys.argv and Path(sys.argv[0]).suffix.casefold() not in {".py", ".pyc"}:
             roots.append(Path(sys.argv[0]).resolve().parent)
@@ -57,7 +72,7 @@ if EMBEDDED_ENABLED:
         )
     else:
         EMBEDDED_ROOT = Path(sys.argv[0]).resolve().parent if sys.argv else NORMAL_PROJECT_ROOT
-    PROJECT_ROOTS = list(dict.fromkeys((EMBEDDED_ROOT.parent, EMBEDDED_ROOT)))
+    PROJECT_ROOTS = list(dict.fromkeys((EMBEDDED_ROOT, EMBEDDED_ROOT.parent)))
     ENGINE_DIRS = [EMBEDDED_ROOT / "engine"]
 else:
     EMBEDDED_ROOT = None
@@ -77,9 +92,9 @@ def _select_root(candidates: list[Path], markers: tuple[str, ...]) -> Path:
 if not EMBEDDED_ENABLED:
     PROJECT_ROOTS = list(
         dict.fromkeys(
-            root
+            candidate
             for executable_root in EXECUTABLE_ROOTS
-            for root in (executable_root.parent, executable_root)
+            for candidate in (executable_root, executable_root.parent)
         )
     )
     ENGINE_DIRS = [root / "engine" for root in EXECUTABLE_ROOTS]

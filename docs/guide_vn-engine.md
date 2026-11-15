@@ -1,6 +1,6 @@
 # VN Engine user guide
 
-This guide takes you from the downloadable Windows package to a playable project and a shareable game. You can write the project with any text editor; the packaged engine does not require Python or a separate installation. Game exports are native desktop builds for the operating system running the matching engine runtime.
+This guide takes you from the downloadable Windows package to a playable project and a shareable game. You can write the project with any text editor; the packaged engine does not require Python or a separate installation. The editor can export native Windows, Linux, and macOS games from prebuilt templates.
 
 ## 1. Extract and understand the project
 
@@ -162,42 +162,49 @@ To let someone play or continue editing the project, share the complete project 
 
 Do not distribute only `engine.exe` from inside `VN_Engine/`: the engine distribution also needs its supporting runtime files. The shortcut is included so Windows starts the engine with the correct project folder.
 
-## 8. Build a project-specific game package (recommended)
+## 8. Export a game for Windows, Linux, or macOS
 
-From the project root, run:
+The editor packages games using prebuilt platform templates. This lets a Windows creator export a Linux or macOS ZIP without installing a compiler or running Nuitka.
+
+1. Download `template-windows.zip`, `template-linux.zip`, and/or `template-macos.zip` from the project’s GitHub release assets.
+2. Put the template ZIPs into a `templates/` folder beside `editor.exe` or inside the project folder. The editor can use another folder if you browse to it.
+3. Open the project in `editor.exe` and click **Export Game…**.
+4. Choose Windows, Linux, or macOS, select an output ZIP path, and click **Export**.
+
+The editor saves the open YAML and JSON files and checks the story and project configuration before exporting. It copies the project’s configured assets and data into the runtime, rewrites their paths to the portable `assets/` and `data/` folders, and creates one ZIP:
+
+```text
+Windows and Linux:
+  <Game Name>/
+    <Game Name>.exe   # Windows; no extension on Linux
+    ...runtime files...
+    assets/
+    data/
+
+macOS:
+  <Game Name>.app/
+    Contents/
+      MacOS/Runner
+      Resources/
+        assets/
+        data/
+```
+
+The macOS exporter renames the app bundle while keeping the executable name expected by its bundle metadata. The ZIP keeps executable permissions for Linux/macOS binaries and shared libraries. Recipients need the matching OS to run a build. Browser/HTML5 exports are not supported.
+
+The editor looks for templates in `templates/` beside itself and then in `templates/` in the project folder. Download all three files or browse to the directory containing the template for the chosen platform. If a template is missing, the dialog reports its expected filename.
+
+### Native command-line build
+
+The engine command remains available for maintainers who already have a compiled runtime for their current OS:
 
 ```powershell
 .\VN_Engine\engine.exe --build-game
 ```
 
-The builder validates the configured story, embeds the project’s `data/` and `assets/` files, and creates `output/`. The project name in `data/project.json` determines the game executable and shortcut names.
+It creates a native package for the OS running that engine and does not cross-compile. Use the editor workflow above to export for another OS.
 
-```text
-output/
-  <Project Name>.lnk
-  VN_Engine/
-    <Project Name>.exe
-    ...supporting runtime files...
-```
-
-Share the complete `output/` folder. Its project-specific executable contains the story, project configuration, and project assets; the other runtime files beside it are still required. The recipient does not need the authoring project folder.
-
-The output folder must not already exist. Choose another path with `--output-dir` if needed:
-
-```powershell
-.\VN_Engine\engine.exe --build-game --output-dir "output-v2"
-```
-
-The output path is relative to the project root unless it is absolute. The command must run from a compiled engine distribution, not from a Python source checkout or a previously built game executable. It creates a native build for the operating system running that engine; it does not cross-compile. To ship for macOS or Linux, build on that OS using its matching native engine runtime. The macOS output includes a `.command` launcher; Linux output includes a `.sh` launcher. Windows output includes a `.lnk` shortcut and `.exe` game. Browser/HTML5 export is not supported by this desktop runtime.
-
-To prepare a macOS or Linux engine runtime, build it on that operating system. On the maintainer’s machine, install Python, Pygame, PyYAML, and Nuitka, then run:
-
-```sh
-python -m pip install pygame PyYAML nuitka
-python compile.py --engine-only --output-dir dist/native-engine
-```
-
-The complete `main.dist/` folder produced inside `dist/native-engine/` is the runtime. It contains `engine.exe` on Windows and `engine` on macOS/Linux, plus supporting files. Include that whole folder in the platform’s project package. Repeat the build on each target operating system; these builds do not cross-compile. People using a released matching engine runtime do not need Python or these build tools to build their game package.
+To build or update the template ZIPs, maintainers install the packages in the repository’s `requirements.txt` and run the GitHub Actions template workflow by pushing a `v*` version tag. Each template is compiled on its target operating system and attached to that release. The resulting files are available as release assets for creators; they do not need Python, Pygame, Nuitka, or a compiler.
 
 ## 9. User data and common fixes
 

@@ -1,6 +1,6 @@
 # VN Engine
 
-VN Engine is a visual novel player and authoring template. The downloadable editor package currently targets Windows. The engine can create native game packages on Windows, macOS, and Linux when run with the matching platform’s engine runtime. You write the story in YAML, place artwork and audio in the project’s `assets/` folder, then run the project or build a project-specific game package.
+VN Engine is a visual novel player and authoring template. The downloadable editor package currently targets Windows. Its Export Game dialog can create Windows, Linux, or macOS game ZIPs from prebuilt runtime templates, without a compiler on the author’s computer. You write the story in YAML, place artwork and audio in the project’s `assets/` folder, then run the project or export a game package.
 
 You do not need to install Python, Pygame, Nuitka, or another tool to use the packaged engine or editor. Keep the extracted files together and use the shortcut or commands below. The included `editor.exe` is a standalone desktop authoring tool.
 
@@ -45,7 +45,7 @@ MyVisualNovel/
 - Main and pause menus, save/load slots, continue, credits, and settings for text speed, volume, and fullscreen.
 - Project-level menu labels, window size, intro cards, credits, and a declarative menu theme.
 - Story validation and a character-asset inventory from the command line.
-- A native desktop build command that embeds a project’s story, configuration, and assets in a standalone game executable.
+- An editor export pipeline for standalone Windows, Linux, and macOS desktop game archives using prebuilt runtime templates.
 
 The [story format reference](./story-format.md) explains how to write each feature. The [project configuration reference](./project-config.md) explains `data/project.json` and the theme options.
 
@@ -79,11 +79,11 @@ Run these from the extracted project folder:
 .\VN_Engine\engine.exe --list-character-assets Aiko
 .\VN_Engine\engine.exe --list-character-assets Aiko --look Summer/Uniform
 
-# Build a game package in output/
+# Build for the OS running this engine (the editor can export for any supported OS)
 .\VN_Engine\engine.exe --build-game
 ```
 
-The included runtime and `editor.exe` in this download target Windows. The source build script can produce native runtimes for Windows, macOS, and Linux, but a matching runtime must first be built on each target OS; this Windows download cannot cross-compile macOS or Linux games. Native game packages include a `.command` launcher on macOS or a `.sh` launcher on Linux. Browser/HTML5 exports are not supported by the current Pygame desktop runtime.
+The `--build-game` command creates a game for the same OS as the engine runtime. For cross-platform exports, use the editor’s **Export Game…** button and provide the prebuilt template ZIP for the target OS. Download `template-windows.zip`, `template-linux.zip`, and `template-macos.zip` from the project’s GitHub release assets and place them in a `templates/` folder beside `editor.exe` or in the project folder. You can also select any templates folder in the export dialog. Browser/HTML5 exports are not supported by this Pygame desktop runtime.
 
 See the [user guide](./guide_vn-engine.md) for command details and the [story format](./story-format.md#character-art-and-portraits) for character folders.
 
@@ -93,13 +93,13 @@ The [VN Engine YAML Helper](https://marketplace.visualstudio.com/items?itemName=
 
 ## Optional desktop editor
 
-The Windows package includes `editor.exe`, a standalone editor with a tab for the entry story, tabs for each included YAML file, a project JSON tab, YAML and JSON highlighting, field suggestions, asset browsing, live diagnostics, a PowerShell command pane, and read-only tabs for the included Markdown guides. It does not require an installed Python or any separate editor dependencies. Its terminal uses Windows PowerShell, which is included with Windows. Double-click `editor.exe`, or run it from PowerShell in the project folder:
+The Windows package includes `editor.exe`, a standalone editor with a tab for the entry story, tabs for each included YAML file, a project JSON tab, YAML and JSON highlighting, field suggestions, asset browsing, live diagnostics, a PowerShell command pane, read-only tabs for the included Markdown guides, and a cross-platform **Export Game…** dialog. It does not require an installed Python or compiler. Its terminal uses Windows PowerShell, which is included with Windows. Double-click `editor.exe`, or run it from PowerShell in the project folder:
 
 ```powershell
 .\editor.exe
 ```
 
-Suggestions appear while typing; press `Ctrl+Space` to open them, use the arrow keys to choose an item, then press `Tab` or `Enter` to insert it. Double-click an asset to insert its reference. `Ctrl+S` saves the selected file, `Ctrl+Shift+S` saves all open story files and `project.json`, `F5` saves and runs the engine validator, and `Ctrl+F` searches the current tab. The PowerShell pane starts in the project folder and keeps its working directory as you run commands. To open another project, run `.\editor.exe --project-dir "C:\path\to\project"`.
+Suggestions appear while typing; press `Ctrl+Space` to open them, use the arrow keys to choose an item, then press `Tab` or `Enter` to insert it. Double-click an asset to insert its reference. `Ctrl+S` saves the selected file, `Ctrl+Shift+S` saves all open story files and `project.json`, `F5` saves and runs the engine validator, and `Ctrl+F` searches the current tab. For export, download the target platform’s template ZIP into the local `templates/` folder, click **Export Game…**, choose the target platform, and select where to save the game ZIP. The PowerShell pane starts in the project folder and keeps its working directory as you run commands. To open another project, run `.\editor.exe --project-dir "C:\path\to\project"`.
 
 ## Where settings and saves go
 

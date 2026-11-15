@@ -3,6 +3,13 @@ __pycache__/
 assets/
 data/
 dist/
+build/
+templates/
+exports/
+template-*.zip
+*.dist/
+*.build/
+*.onefile-build/
 editor.build/
 editor.dist/
 editor.onefile-build/

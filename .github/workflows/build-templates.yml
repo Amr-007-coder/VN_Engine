@@ -1,0 +1,91 @@
+name: Build cross-platform export templates
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-template:
+    name: Build ${{ matrix.platform }} template
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows
+          - os: ubuntu-22.04
+            platform: linux
+          - os: macos-latest
+            platform: macos
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install Linux build tools
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y patchelf ccache
+
+      - name: Install engine build dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Compile Windows engine template
+        if: matrix.platform == 'windows'
+        run: >-
+          python -m nuitka --standalone --assume-yes-for-downloads --output-dir=build --output-filename=Runner.exe
+          --windows-console-mode=disable --include-package=engine --include-package=pygame
+          --include-package=yaml --include-data-dir=engine/assets=engine/assets
+          --include-data-dir=engine/data=engine/data main.py
+
+      - name: Compile Linux engine template
+        if: matrix.platform == 'linux'
+        run: >-
+          python -m nuitka --standalone --assume-yes-for-downloads --output-dir=build --output-filename=Runner
+          --include-package=engine --include-package=pygame --include-package=yaml
+          --include-data-dir=engine/assets=engine/assets
+          --include-data-dir=engine/data=engine/data main.py
+
+      - name: Compile macOS engine template
+        if: matrix.platform == 'macos'
+        run: >-
+          python -m nuitka --standalone --assume-yes-for-downloads --output-dir=build --output-filename=Runner
+          --macos-create-app-bundle --macos-app-name=Runner --include-package=engine
+          --include-package=pygame --include-package=yaml
+          --include-data-dir=engine/assets=engine/assets
+          --include-data-dir=engine/data=engine/data main.py
+
+      - name: Normalize and zip template
+        run: >-
+          python tools/package_template.py --platform ${{ matrix.platform }}
+          --build-dir build --output templates/template-${{ matrix.platform }}.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: template-${{ matrix.platform }}
+          path: templates/template-${{ matrix.platform }}.zip
+          if-no-files-found: error
+
+  publish-release-assets:
+    name: Attach templates to release
+    needs: build-template
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: templates
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: templates/template-*.zip
+          fail_on_unmatched_files: true

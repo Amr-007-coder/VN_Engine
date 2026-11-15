@@ -23,6 +23,8 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from typing import Any
 
+from export_pipeline import PLATFORMS, export_project, safe_project_name
+
 try:
     import yaml
 except ImportError:
@@ -1409,6 +1411,7 @@ class VNEditorApp:
         ttk.Button(toolbar, text="Save", command=self.save_active).pack(side="left", padx=(8, 0))
         ttk.Button(toolbar, text="Save All", command=self.save_all).pack(side="left", padx=(5, 0))
         ttk.Button(toolbar, text="Validate Story (F5)", command=self.validate_with_engine).pack(side="left", padx=(18, 0))
+        ttk.Button(toolbar, text="Export Game…", command=self.export_game).pack(side="left", padx=(5, 0))
         ttk.Button(toolbar, text="Refresh Assets", command=self.refresh_asset_tree).pack(side="left", padx=(5, 0))
         ttk.Button(toolbar, text="Find (Ctrl+F)", command=self.show_find).pack(side="left", padx=(5, 0))
         self.project_label = ttk.Label(toolbar, text="", anchor="e")
@@ -2963,6 +2966,154 @@ while ($true) {{
                 diagnostics.append(Diagnostic("error", message, line, "Engine"))
             self.engine_diagnostics = diagnostics
         self.render_diagnostics()
+
+    def export_game(self):
+        if not self.save_all():
+            return
+
+        catalog = self._catalog()
+        context_variables, context_dialogues = self._story_context()
+        errors = []
+        for path, editor in self.story_editors.items():
+            diagnostics = analyze_story(
+                editor.get_text(),
+                catalog,
+                fragment=editor is not self.story_editor,
+                context_variables=context_variables,
+                context_dialogues=context_dialogues,
+                source_path=path,
+            )
+            errors.extend(
+                f"{path.name}:{item.line}: {item.message}"
+                for item in diagnostics if item.severity == "error"
+            )
+        project_diagnostics = analyze_project(self.project_editor.get_text(), catalog)
+        errors.extend(
+            f"project.json:{item.line}: {item.message}"
+            for item in project_diagnostics if item.severity == "error"
+        )
+        if errors:
+            messagebox.showerror(
+                "Cannot Export Project",
+                "Fix these errors before exporting:\n\n" + "\n".join(errors[:30]),
+                parent=self.root,
+            )
+            return
+
+        try:
+            values = json.loads(self.project_editor.get_text())
+        except json.JSONDecodeError as error:
+            messagebox.showerror("Cannot Export Project", f"Invalid project.json: {error}", parent=self.root)
+            return
+        game_name = safe_project_name(values.get("name", "Visual Novel"))
+        template_candidates = (self.editor_home / "templates", self.project_root / "templates")
+        template_dir = next((path for path in template_candidates if path.is_dir()), template_candidates[0])
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Export Game")
+        dialog.transient(self.root)
+        dialog.resizable(False, False)
+        body = ttk.Frame(dialog, padding=14)
+        body.pack(fill="both", expand=True)
+        ttk.Label(body, text="Target platform").grid(row=0, column=0, sticky="w", pady=(0, 7))
+        platform_var = tk.StringVar(value="windows")
+        platform_box = ttk.Combobox(
+            body, textvariable=platform_var, values=sorted(PLATFORMS), state="readonly", width=18
+        )
+        platform_box.grid(row=0, column=1, columnspan=2, sticky="ew", pady=(0, 7))
+        ttk.Label(body, text="Templates folder").grid(row=1, column=0, sticky="w", pady=7)
+        templates_var = tk.StringVar(value=str(template_dir))
+        ttk.Entry(body, textvariable=templates_var, width=52).grid(row=1, column=1, sticky="ew", pady=7)
+        ttk.Button(
+            body,
+            text="Browse…",
+            command=lambda: self._browse_export_folder(dialog, templates_var),
+        ).grid(row=1, column=2, padx=(6, 0), pady=7)
+        ttk.Label(body, text="Output ZIP").grid(row=2, column=0, sticky="w", pady=7)
+        output_var = tk.StringVar(
+            value=str(self.project_root / "exports" / f"{game_name}-windows.zip")
+        )
+        ttk.Entry(body, textvariable=output_var, width=52).grid(row=2, column=1, sticky="ew", pady=7)
+        ttk.Button(
+            body,
+            text="Browse…",
+            command=lambda: self._browse_export_zip(dialog, output_var, game_name, platform_var.get()),
+        ).grid(row=2, column=2, padx=(6, 0), pady=7)
+        ttk.Label(
+            body,
+            text="Put template-windows.zip, template-linux.zip, and template-macos.zip in the templates folder.",
+            foreground="#707987",
+        ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(2, 10))
+        button_row = ttk.Frame(body)
+        button_row.grid(row=4, column=0, columnspan=3, sticky="e")
+        ttk.Button(button_row, text="Cancel", command=dialog.destroy).pack(side="right")
+
+        def run_export():
+            output_value = output_var.get().strip()
+            template_value = templates_var.get().strip()
+            if not output_value or not template_value:
+                messagebox.showerror("Export Game", "Choose a templates folder and output ZIP.", parent=dialog)
+                return
+            platform = platform_var.get()
+            target = Path(output_value)
+            if target.suffix.casefold() != ".zip":
+                target = target.with_suffix(".zip")
+            if target.exists() and not messagebox.askyesno(
+                "Replace Export",
+                f"Replace the existing archive?\n{target}",
+                parent=dialog,
+            ):
+                return
+            try:
+                exported = export_project(
+                    self.project_root,
+                    self.project_file,
+                    Path(template_value),
+                    platform,
+                    target,
+                )
+            except (OSError, ValueError, json.JSONDecodeError) as error:
+                messagebox.showerror("Export Game", str(error), parent=dialog)
+                return
+            dialog.destroy()
+            self.set_status(f"Exported {platform} game: {exported}")
+            messagebox.showinfo("Export Complete", f"Game ZIP created:\n{exported}", parent=self.root)
+
+        ttk.Button(button_row, text="Export", command=run_export).pack(side="right", padx=(0, 7))
+
+        def update_output_name(_event=None):
+            current = Path(output_var.get())
+            output_var.set(str(current.with_name(f"{game_name}-{platform_var.get()}.zip")))
+
+        platform_box.bind("<<ComboboxSelected>>", update_output_name)
+        dialog.bind("<Return>", lambda _event: run_export())
+        dialog.bind("<Escape>", lambda _event: dialog.destroy())
+        dialog.columnconfigure(0, weight=0)
+        dialog.columnconfigure(1, weight=1)
+        dialog.grab_set()
+        dialog.wait_visibility()
+        dialog.focus_set()
+
+    def _browse_export_folder(self, parent, variable):
+        selected = filedialog.askdirectory(
+            title="Choose templates folder",
+            initialdir=variable.get() or self.project_root,
+            parent=parent,
+        )
+        if selected:
+            variable.set(selected)
+
+    def _browse_export_zip(self, parent, variable, game_name, platform):
+        selected = filedialog.asksaveasfilename(
+            title="Save exported game ZIP",
+            initialdir=self.project_root,
+            initialfile=f"{game_name}-{platform}.zip",
+            defaultextension=".zip",
+            filetypes=(("ZIP archive", "*.zip"),),
+            parent=parent,
+        )
+        if selected:
+            variable.set(selected)
 
     def close(self):
         if not self._confirm_discard_or_save():
