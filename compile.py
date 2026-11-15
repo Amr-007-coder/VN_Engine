@@ -400,9 +400,10 @@ def main() -> int:
     if args.macos_app_bundle:
         app_name = Path(output_name).stem
         app_candidates = [
-            path / "Contents" / "MacOS" / app_name
-            for path in output_dir.rglob(f"{app_name}.app")
-            if (path / "Contents" / "MacOS" / app_name).is_file()
+            executable
+            for app_bundle in output_dir.rglob("*.app")
+            for executable in [app_bundle / "Contents" / "MacOS" / app_name]
+            if executable.is_file()
         ]
         if len(app_candidates) == 1:
             print(f"Build complete: {app_candidates[0].parent.parent.parent}")

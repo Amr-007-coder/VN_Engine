@@ -151,16 +151,8 @@ def build_game(output_dir: Path | None = None) -> Path:
             relative_link_path = target_dir / shortcut_path.name
             create_shortcut(shortcut_target, shortcut_path, runtime_output, relative_link_path)
         else:
-            launcher_suffix = ".command" if sys.platform == "darwin" else ".sh"
-            launcher = staging_root / f"{game_name}{launcher_suffix}"
-            launcher.write_text(
-                '#!/bin/sh\n'
-                'ROOT="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"\n'
-                f'exec "$ROOT/VN_Engine/{game_executable.name}" "$@"\n',
-                encoding="utf-8",
-                newline="\n",
-            )
-            launcher.chmod(0o755)
+            shortcut_path = staging_root / f"{game_name} Shortcut"
+            shortcut_path.symlink_to(Path("VN_Engine") / game_executable.name)
         staging_root.rename(target_dir)
 
     print(f"Embedded {resource_count:,} project files.")
