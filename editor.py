@@ -114,6 +114,7 @@ def _literal_from_engine(relative_file: str, variable: str):
 DEFAULT_PROJECT = _literal_from_engine("engine/project.py", "DEFAULT_PROJECT") or {
     "name": "Visual Novel",
     "story": "story.yaml",
+    "icon": None,
     "save_slots": 5,
     "credits": [],
     "intro": {
@@ -3258,6 +3259,20 @@ while ($true) {{
         platform_box.grid(row=0, column=1, columnspan=2, sticky="ew", pady=(0, 7))
         ttk.Label(body, text="Templates folder").grid(row=1, column=0, sticky="w", pady=7)
         templates_var = tk.StringVar(value=str(template_dir))
+
+        def update_platform_choices(*_args):
+            available = sorted(
+                platform
+                for platform in PLATFORMS
+                if (Path(templates_var.get()) / f"template-{platform}.zip").is_file()
+            )
+            choices = available or sorted(PLATFORMS)
+            platform_box.configure(values=choices)
+            if platform_var.get() not in choices:
+                platform_var.set(choices[0])
+
+        update_platform_choices()
+        templates_var.trace_add("write", update_platform_choices)
         ttk.Entry(body, textvariable=templates_var, width=52).grid(row=1, column=1, sticky="ew", pady=7)
         ttk.Button(
             body,
@@ -3266,7 +3281,7 @@ while ($true) {{
         ).grid(row=1, column=2, padx=(6, 0), pady=7)
         ttk.Label(body, text="Output ZIP").grid(row=2, column=0, sticky="w", pady=7)
         output_var = tk.StringVar(
-            value=str(self.project_root / "exports" / f"{game_name}-windows.zip")
+            value=str(self.project_root / "exports" / f"{game_name}-{platform_var.get()}.zip")
         )
         ttk.Entry(body, textvariable=output_var, width=52).grid(row=2, column=1, sticky="ew", pady=7)
         ttk.Button(
@@ -3307,7 +3322,7 @@ while ($true) {{
                     platform,
                     target,
                 )
-            except (OSError, ValueError, json.JSONDecodeError, subprocess.SubprocessError) as error:
+            except (OSError, ValueError, RuntimeError, json.JSONDecodeError, subprocess.SubprocessError) as error:
                 messagebox.showerror("Export Game", str(error), parent=dialog)
                 return
             dialog.destroy()

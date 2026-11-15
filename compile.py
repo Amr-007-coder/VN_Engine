@@ -15,6 +15,7 @@ import argparse
 import base64
 from datetime import datetime
 import hashlib
+import json
 import os
 from pathlib import Path
 import shutil
@@ -22,6 +23,9 @@ import subprocess
 import sys
 import tempfile
 import zlib
+
+from engine.icon_utils import make_icns, make_ico
+from export_pipeline import _project_icon_path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -242,6 +246,19 @@ def _default_output_dir() -> Path:
     return candidate
 
 
+def _configured_project_icon(project_dir: Path) -> Path | None:
+    config_path = project_dir / "data" / "project.json"
+    if not config_path.is_file():
+        return None
+    try:
+        values = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"Could not read project configuration {config_path}: {error}") from error
+    if not isinstance(values, dict):
+        raise ValueError(f"Project configuration {config_path} must contain a JSON object.")
+    return _project_icon_path(project_dir / "assets", values)
+
+
 def _parse_args():
     parser = argparse.ArgumentParser(description="Compile this project with Nuitka for the current desktop OS.")
     parser.add_argument(
@@ -319,6 +336,12 @@ def main() -> int:
         project_dir = project_dir.resolve()
 
     try:
+        project_icon = None if args.engine_only else _configured_project_icon(project_dir)
+    except (OSError, ValueError) as error:
+        print(f"Could not resolve the project icon: {error}", file=sys.stderr)
+        return 2
+
+    try:
         _self_check_payload_generator()
     except Exception as error:
         print(f"Embedded-payload preflight failed: {error}", file=sys.stderr)
@@ -384,10 +407,23 @@ def main() -> int:
             if args.macos_app_bundle:
                 app_name = Path(output_name).stem
                 command[-1:-1] = (f"--macos-app-name={app_name}",)
+                icon_path = Path(temporary) / "engine.icns"
+                icon_source = project_icon or (PROJECT_ROOT / "engine" / "assets" / "images" / "logo.png")
+                icon_path.write_bytes(make_icns(icon_source))
+                command.insert(command.index("main.py"), f"--macos-app-icon={icon_path}")
             if WINDOWS_BUILD:
                 command.insert(
                     command.index(f"--output-dir={output_dir}"),
                     f"--windows-console-mode={args.windows_console_mode}",
+                )
+                if project_icon is not None:
+                    icon_path = Path(temporary) / "project.ico"
+                    icon_path.write_bytes(make_ico(project_icon))
+                else:
+                    icon_path = PROJECT_ROOT / "engine" / "assets" / "images" / "logo.ico"
+                command.insert(
+                    command.index("main.py"),
+                    f"--windows-icon-from-ico={icon_path}",
                 )
             result = subprocess.run(command, cwd=stage_root, check=False)
             if result.returncode != 0:

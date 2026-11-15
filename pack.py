@@ -120,6 +120,7 @@ def _create_example_project(package_root: Path) -> None:
     project_config = {
         "name": "My Visual Novel",
         "story": "story.yaml",
+        "icon": None,
         "save_slots": 5,
         "paths": {"data": "data", "assets": "assets", "user_data": "user_data"},
     }

@@ -1,3 +1,4 @@
 pygame
-PyYAML
+PyYAML==6.0.3
 Nuitka
+pygbag==0.9.3

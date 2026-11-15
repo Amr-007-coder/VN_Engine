@@ -1,4 +1,4 @@
-name: Build cross-platform game and editor packages
+name: Build selected game templates and editor packages
 
 on:
   push:
@@ -9,8 +9,24 @@ permissions:
   contents: write
 
 jobs:
+  release-options:
+    name: Read build selection from release tag
+    runs-on: ubuntu-22.04
+    outputs:
+      platforms: ${{ steps.options.outputs.platforms }}
+      platform_csv: ${{ steps.options.outputs.platform_csv }}
+      build_editor: ${{ steps.options.outputs.build_editor }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read release options
+        id: options
+        run: python tools/release.py --read-tag "$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+
   build-template:
     name: Build ${{ matrix.platform }} template
+    needs: release-options
+    if: contains(fromJSON(needs.release-options.outputs.platforms), matrix.platform)
     strategy:
       fail-fast: false
       matrix:
@@ -21,6 +37,8 @@ jobs:
             platform: linux
           - os: macos-latest
             platform: macos
+          - os: ubuntu-22.04
+            platform: web
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -29,29 +47,41 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
+          cache-dependency-path: requirements.txt
 
-      - name: Install Linux build tools
-        if: runner.os == 'Linux'
+      - name: Install Linux engine build tools
+        if: matrix.platform == 'linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y patchelf ccache
 
-      - name: Install engine build dependencies
+      - name: Install browser audio conversion tool
+        if: matrix.platform == 'web'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Install build dependencies
         run: python -m pip install -r requirements.txt
 
-      - name: Compile Windows engine template with embedded engine resources
+      - name: Compile Windows engine template
         if: matrix.platform == 'windows'
         run: python compile.py --engine-only --output-dir build --output-name Runner.exe --windows-console-mode disable
 
-      - name: Compile Linux engine template with embedded engine resources
+      - name: Compile Linux engine template
         if: matrix.platform == 'linux'
         run: python compile.py --engine-only --output-dir build --output-name Runner
 
-      - name: Compile macOS engine template with embedded engine resources
+      - name: Compile macOS engine template
         if: matrix.platform == 'macos'
         run: python compile.py --engine-only --output-dir build --output-name Runner --macos-app-bundle
 
-      - name: Normalize and zip template
+      - name: Build browser template
+        if: matrix.platform == 'web'
+        run: python tools/build_web_template.py --output templates/template-web.zip
+
+      - name: Normalize and zip desktop template
+        if: matrix.platform != 'web'
         run: >-
           python tools/package_template.py --platform ${{ matrix.platform }}
           --build-dir build --output templates/template-${{ matrix.platform }}.zip
@@ -64,7 +94,8 @@ jobs:
 
   build-editor:
     name: Build VN_Editor for ${{ matrix.platform }}
-    needs: build-template
+    needs: [release-options, build-template]
+    if: needs.release-options.outputs.build_editor == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -84,6 +115,7 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
+          cache-dependency-path: requirements.txt
 
       - name: Install Linux editor build dependencies
         if: runner.os == 'Linux'
@@ -116,6 +148,7 @@ jobs:
         run: >-
           .editor-venv/bin/python tools/package_editor.py --platform linux
           --build-dir build/editor --templates-dir templates
+          --template-platforms "${{ needs.release-options.outputs.platform_csv }}"
           --output exports/VN_Editor-linux.zip
 
       - name: Package Windows or macOS editor
@@ -123,6 +156,7 @@ jobs:
         run: >-
           python tools/package_editor.py --platform ${{ matrix.platform }}
           --build-dir build/editor --templates-dir templates
+          --template-platforms "${{ needs.release-options.outputs.platform_csv }}"
           --output exports/VN_Editor-${{ matrix.platform }}.zip
 
       - uses: actions/upload-artifact@v4
@@ -132,12 +166,25 @@ jobs:
           if-no-files-found: error
 
   publish-release-assets:
-    name: Attach game templates and editor packages to release
-    needs: [build-template, build-editor]
+    name: Attach selected templates and editor packages to release
+    needs: [release-options, build-template, build-editor]
+    if: >-
+      always() &&
+      needs.release-options.result == 'success' &&
+      needs.build-template.result == 'success' &&
+      (needs.build-editor.result == 'success' || needs.build-editor.result == 'skipped')
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/download-artifact@v4
         with:
+          pattern: template-*
+          path: release-assets
+          merge-multiple: true
+
+      - uses: actions/download-artifact@v4
+        if: needs.release-options.outputs.build_editor == 'true'
+        with:
+          pattern: vn-editor-*
           path: release-assets
           merge-multiple: true
 

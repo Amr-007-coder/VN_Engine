@@ -169,6 +169,8 @@ class Engine:
             textbox_color = tuple(textbox_color) if textbox_color is not None else COLORS.panel
             flags = pygame.FULLSCREEN if self.settings.values["fullscreen"] else 0
             self.screen = pygame.display.set_mode(self.windowed_size, flags)
+            window_icon = self.assets.load_image(self.project.icon) if self.project.icon else loader.load_image("logo.png")
+            pygame.display.set_icon(window_icon)
             self.window_size = self.screen.get_size()
             pygame.display.set_caption(self.caption)
             self.clock = pygame.time.Clock()

@@ -36,6 +36,7 @@ This example changes the project name, window, credits, menu labels, intro text,
 {
   "name": "Moonlight at Noon",
   "story": "story.yaml",
+  "icon": null,
   "save_slots": 8,
   "paths": {
     "data": "data",
@@ -125,6 +126,7 @@ If you copy this example, add `assets/images/menu-background.jpg` or set `theme.
 | --- | --- | --- |
 | `name` | `Visual Novel` | Project/game display name. Used for the built game filename and the per-project user-data folder. |
 | `story` | `story.yaml` | YAML story file inside `paths.data`. |
+| `icon` | `null` | Optional PNG path inside project `assets/`, used for the game window and native/browser app icon where supported. |
 | `save_slots` | `5` | Number of save/load slots. Must be a positive integer. |
 | `paths` | See [paths](#paths) | Project data, asset, and user-data locations. |
 | `window` | `1920` × `1200`, caption `VN Engine` | Initial window size and operating-system window caption. Fullscreen can also be toggled in Settings. |
@@ -151,6 +153,14 @@ If you copy this example, add `assets/images/menu-background.jpg` or set `theme.
 | `user_data` | `user_data` | Writable folder for settings and saves, relative to the user-data root. Can be absolute. |
 
 Launch VN_Editor and open the folder containing `assets/` and `data/`. The editor's **Test Play** and **Export Game** commands package those configured folders automatically. When running a separate engine executable directly, set its working directory to the project root so it can locate the project files.
+
+## Application icon
+
+Set the optional top-level `icon` field to a PNG in the project's assets folder. Paths are relative to `assets/`; for example, `"icon": "images/game-icon.png"`. The default `null` uses the engine's built-in `logo.png` for the game window.
+
+The configured PNG is used as the Windows executable icon and macOS app icon in desktop exports and direct builds, as well as the browser tab favicon. Linux executables do not have an embedded file icon, so the PNG is used for the game's window icon. To export a Windows game with a project-specific executable icon, run the editor on Windows. The opening splash always keeps the engine's built-in logo.
+
+The default Windows game executable uses `engine/assets/images/logo.ico`; the VN_Editor executable uses `engine/assets/images/editor_logo.ico`. macOS app icons are generated from the matching PNG assets.
 
 ## Intro cards
 

@@ -12,9 +12,12 @@ import re
 import shutil
 import stat
 import struct
+import sys
 import tempfile
 from uuid import UUID
 from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile, ZipInfo
+
+from engine.icon_utils import make_icns, make_ico, update_windows_executable_icon
 
 
 PLATFORMS = {"windows", "linux", "macos", "web"}
@@ -62,6 +65,31 @@ def _resolve_config_path(root: Path, value, fallback: str) -> Path:
     return path.resolve() if path.is_absolute() else (root / path).resolve()
 
 
+def _project_icon_path(assets_root: Path, project_values: dict) -> Path | None:
+    value = project_values.get("icon")
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("Project configuration 'icon' must be a relative PNG path or null.")
+    relative = PurePosixPath(value.replace("\\", "/"))
+    if (
+        not value.strip()
+        or relative.is_absolute()
+        or re.match(r"^[A-Za-z]:", value) is not None
+        or ".." in relative.parts
+        or relative.suffix.casefold() != ".png"
+    ):
+        raise ValueError("Project configuration 'icon' must be a relative PNG path inside the project's assets folder.")
+
+    root = assets_root.resolve()
+    candidates = (root / Path(*relative.parts), root / "images" / Path(*relative.parts))
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved.is_relative_to(root) and resolved.is_file():
+            return resolved
+    raise FileNotFoundError(f"Project icon image was not found in the assets folder: {value}")
+
+
 def _validate_zip_name(name: str) -> PurePosixPath:
     relative = PurePosixPath(name.replace("\\", "/"))
     if relative.is_absolute() or ".." in relative.parts or not relative.parts:
@@ -99,16 +127,22 @@ def _is_shared_library(name: str) -> bool:
     return filename.endswith((".so", ".dylib")) or ".so." in filename
 
 
-def _rewrite_bundle_info(data: bytes, game_name: str) -> bytes:
+def _rewrite_bundle_info(data: bytes, game_name: str, icon_filename: str | None = None) -> bytes:
     try:
         values = plistlib.loads(data)
-    except Exception:
+    except (plistlib.InvalidFileException, ValueError, TypeError) as error:
+        if icon_filename is not None:
+            raise ValueError(f"Could not update the macOS app icon in its Info.plist: {error}") from error
         return data
     if not isinstance(values, dict):
+        if icon_filename is not None:
+            raise ValueError("The macOS app Info.plist must contain a dictionary to set a custom icon.")
         return data
     for key in ("CFBundleName", "CFBundleDisplayName"):
         if key in values:
             values[key] = game_name
+    if icon_filename:
+        values["CFBundleIconFile"] = icon_filename
     return plistlib.dumps(values, fmt=plistlib.FMT_BINARY if data.startswith(b"bplist") else plistlib.FMT_XML)
 
 
@@ -277,7 +311,8 @@ def _prepare_project_export(project_root: Path, project_file: Path):
         raise ValueError("Project configuration 'paths' must be an object.")
     project_paths.update({"data": "data", "assets": "assets", "user_data": "user_data"})
     project_json = (json.dumps(project_values, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
-    return name, data_root, assets_root, story_path, project_json
+    icon_path = _project_icon_path(assets_root, project_values)
+    return name, data_root, assets_root, story_path, project_json, icon_path
 
 
 def _replace_pygbag_project_files(apk_data: bytes, project_bundle: Path) -> bytes:
@@ -315,7 +350,7 @@ def export_web_project(
     if output_file == template_file:
         raise ValueError("The output ZIP cannot overwrite the web export template.")
 
-    name, data_root, assets_root, story_path, project_json = _prepare_project_export(project_root, project_file)
+    name, data_root, assets_root, story_path, project_json, icon_path = _prepare_project_export(project_root, project_file)
     unsupported_audio = sorted(
         path.relative_to(assets_root).as_posix()
         for path in assets_root.rglob("*")
@@ -381,6 +416,8 @@ def export_web_project(
                                 flags=re.IGNORECASE | re.DOTALL,
                             )
                             content = page.encode("utf-8")
+                        elif item.filename.casefold() == "favicon.png" and icon_path is not None:
+                            content = icon_path.read_bytes()
                         archive.writestr(item, content)
             os.replace(temporary_output, output_file)
         except BadZipFile as error:
@@ -449,6 +486,7 @@ def export_project(
         raise ValueError("Project configuration 'paths' must be an object.")
     project_paths.update({"data": "data", "assets": "assets", "user_data": "user_data"})
     project_json = (json.dumps(project_values, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    icon_path = _project_icon_path(assets_root, project_values)
 
     output_file.parent.mkdir(parents=True, exist_ok=True)
     for source_root in (data_root, assets_root):
@@ -472,6 +510,11 @@ def export_project(
         )
 
         executable_path = _main_executable_path(platform, name)
+        if platform == "windows" and icon_path is not None and sys.platform != "win32":
+            raise RuntimeError("Export a Windows game with a custom icon from Windows so its executable icon can be updated.")
+        windows_icon = make_ico(icon_path) if platform == "windows" and icon_path is not None else None
+        macos_icon = make_icns(icon_path) if platform == "macos" and icon_path is not None else None
+        macos_icon_path = f"{name}.app/Contents/Resources/AppIcon.icns"
         try:
             with _open_template_archive(template_file) as template:
                 executable_items = [
@@ -487,8 +530,10 @@ def export_project(
                 staged_executable.parent.mkdir(parents=True, exist_ok=True)
                 with template.open(executable_item, "r") as source, staged_executable.open("wb") as target:
                     shutil.copyfileobj(source, target)
-                    with bundle_path.open("rb") as bundle:
-                        shutil.copyfileobj(bundle, target)
+                if windows_icon is not None:
+                    update_windows_executable_icon(staged_executable, windows_icon)
+                with staged_executable.open("ab") as target, bundle_path.open("rb") as bundle:
+                    shutil.copyfileobj(bundle, target)
                 if platform in {"linux", "macos"}:
                     staged_executable.chmod(staged_executable.stat().st_mode | 0o111)
         except BadZipFile as error:
@@ -526,18 +571,28 @@ def export_project(
                     seen_names.add(destination_name)
                     if destination_name == executable_path:
                         found_main = True
-                        with template.open(item, "r") as source, archive.open(info, "w") as target:
+                        with staged_executable.open("rb") as source, archive.open(info, "w") as target:
                             shutil.copyfileobj(source, target)
-                            with bundle_path.open("rb") as bundle:
-                                shutil.copyfileobj(bundle, target)
                     else:
                         content = b"" if item.is_dir() else template.read(item)
                         if platform == "macos" and destination_name.endswith(".app/Contents/Info.plist"):
-                            content = _rewrite_bundle_info(content, name)
+                            content = _rewrite_bundle_info(
+                                content,
+                                name,
+                                "AppIcon.icns" if macos_icon is not None else None,
+                            )
+                        if destination_name == macos_icon_path and macos_icon is not None:
+                            content = macos_icon
                         archive.writestr(info, content)
 
                 if not found_main:
                     raise ValueError(f"Template is missing its main executable at {executable_path!r}.")
+
+                if macos_icon is not None and macos_icon_path not in seen_names:
+                    icon_info = ZipInfo(macos_icon_path)
+                    icon_info.compress_type = ZIP_DEFLATED
+                    archive.writestr(icon_info, macos_icon)
+                    seen_names.add(macos_icon_path)
 
                 shortcut_info = ZipInfo(shortcut_name)
                 shortcut_info.compress_type = ZIP_DEFLATED

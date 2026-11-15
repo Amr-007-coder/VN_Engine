@@ -14,6 +14,84 @@ from zipfile import ZIP_DEFLATED, ZipFile
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 BROWSERFS_SCRIPT_URL = "https://cdnjs.cloudflare.com/ajax/libs/BrowserFS/1.4.3/browserfs.min.js"
 PYGBAG_BROWSERFS_SCRIPT_URL = "https://pygame-web.github.io/cdn/0.9.3//browserfs.min.js"
+LOADER_STYLE = """
+<style id="vn-engine-loader">
+    html, body {
+        min-height: 100%;
+        margin: 0;
+        background: #000 !important;
+        color: #e7edf7;
+    }
+    #transfer {
+        position: fixed;
+        inset: 0;
+        z-index: 999998;
+        box-sizing: border-box;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 18px;
+        padding: 24px;
+        background: #000 !important;
+    }
+    #transfer[hidden] {
+        display: none !important;
+    }
+    #transfer::before {
+        content: "";
+        display: block;
+        width: min(220px, 48vw, 48vh);
+        aspect-ratio: 1;
+        margin-bottom: 12px;
+        background: url("logo.png") center / contain no-repeat;
+    }
+    #status {
+        display: block;
+        margin: 0;
+        color: #b8c2d2;
+        font-size: 14px;
+        font-weight: 400;
+        text-align: center;
+    }
+    #progress {
+        display: block;
+        width: min(340px, 72vw);
+        height: 6px;
+        overflow: hidden;
+        border: 0;
+        border-radius: 999px;
+        appearance: none;
+        -webkit-appearance: none;
+        background: #202633;
+    }
+    #progress::-webkit-progress-bar {
+        border-radius: 999px;
+        background: #202633;
+    }
+    #progress::-webkit-progress-value {
+        border-radius: 999px;
+        background: #278cff;
+        transition: width 0.2s ease;
+    }
+    #progress::-moz-progress-bar {
+        border-radius: 999px;
+        background: #278cff;
+    }
+    #infobox {
+        position: fixed !important;
+        top: auto !important;
+        left: 50% !important;
+        bottom: 24px !important;
+        transform: translateX(-50%);
+        max-width: calc(100vw - 32px);
+        background: #000 !important;
+        color: #d5dce7;
+        font-weight: 400;
+        text-align: center;
+    }
+</style>
+"""
 
 
 def _parse_args():
@@ -79,6 +157,7 @@ def _write_starter_project(app_root: Path) -> None:
         '{\n'
         '  "name": "My Visual Novel",\n'
         '  "story": "story.yaml",\n'
+        '  "icon": null,\n'
         '  "save_slots": 5,\n'
         '  "paths": {"data": "data", "assets": "assets", "user_data": "user_data"}\n'
         '}\n',
@@ -89,7 +168,7 @@ def _write_starter_project(app_root: Path) -> None:
 
 def build_template(output: Path) -> Path:
     if importlib.util.find_spec("pygbag") is None:
-        raise RuntimeError("Pygbag is not installed. Install requirements-web.txt first.")
+        raise RuntimeError("Pygbag is not installed. Install requirements.txt first.")
     output = output.expanduser()
     if not output.is_absolute():
         output = PROJECT_ROOT / output
@@ -125,12 +204,16 @@ def build_template(output: Path) -> Path:
         web_root = app_root / "build" / "web"
         if not (web_root / "index.html").is_file():
             raise FileNotFoundError(f"Pygbag did not create index.html under {web_root}.")
+        shutil.copy2(PROJECT_ROOT / "engine" / "assets" / "images" / "logo.png", web_root / "logo.png")
         index_path = web_root / "index.html"
         index_html = index_path.read_text(encoding="utf-8")
         if index_html.count(PYGBAG_BROWSERFS_SCRIPT_URL) != 1:
             raise RuntimeError("Pygbag's expected BrowserFS script reference was not found exactly once.")
+        index_html = index_html.replace(PYGBAG_BROWSERFS_SCRIPT_URL, BROWSERFS_SCRIPT_URL)
+        if index_html.count("</head>") != 1:
+            raise RuntimeError("Pygbag's expected closing head tag was not found exactly once.")
         index_path.write_text(
-            index_html.replace(PYGBAG_BROWSERFS_SCRIPT_URL, BROWSERFS_SCRIPT_URL),
+            index_html.replace("</head>", f"{LOADER_STYLE}\n</head>", 1),
             encoding="utf-8",
             newline="\n",
         )

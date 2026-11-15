@@ -1,7 +1,7 @@
 from copy import deepcopy
 import os
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from engine.loader import PATHS, loader
 
@@ -9,6 +9,7 @@ from engine.loader import PATHS, loader
 DEFAULT_PROJECT = {
     "name": "Visual Novel",
     "story": "story.yaml",
+    "icon": None,
     "save_slots": 5,
     "credits": [],
     "intro": {
@@ -113,6 +114,8 @@ class ProjectConfig:
             )
 
         self.story_file = self.values["story"]
+        icon = self.values["icon"]
+        self.icon = PurePosixPath(icon.replace("\\", "/")).as_posix() if icon else None
         self.window = self.values["window"]
         self.menus = self.values["menus"]
         self.theme = self.values.get("theme", {})
@@ -135,6 +138,18 @@ class ProjectConfig:
         values = self.values
         if not isinstance(values.get("name"), str) or not isinstance(values.get("story"), str):
             raise ValueError("Project config needs string values for 'name' and 'story'.")
+        icon = values.get("icon")
+        if icon is not None:
+            icon_path = PurePosixPath(icon.replace("\\", "/")) if isinstance(icon, str) else None
+            if (
+                icon_path is None
+                or not icon.strip()
+                or icon_path.is_absolute()
+                or re.match(r"^[A-Za-z]:", icon) is not None
+                or ".." in icon_path.parts
+                or icon_path.suffix.casefold() != ".png"
+            ):
+                raise ValueError("Project config 'icon' must be a relative PNG path inside the project's assets folder or null.")
         intro = values.get("intro")
         if (
             not isinstance(intro, dict)

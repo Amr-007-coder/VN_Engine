@@ -1,6 +1,6 @@
 # VN Engine
 
-The downloadable VN_Editor package is available for Windows, Linux, and macOS. Each platform ZIP contains its native editor app, the Windows/Linux/macOS game runtime templates, a starter `assets/` folder, `data/`, and the Markdown guides. Creators do not need Python, Pygame, Nuitka, or a compiler installed. A separate `template-web.zip` is available for web-enabled editor builds; download it from the matching GitHub release and place it in the editor package's `templates/` folder. Older editor executables need to be rebuilt before they show the Web export target.
+The downloadable VN_Editor package is available for Windows, Linux, and macOS. Each platform ZIP contains its native editor app, the game runtime templates selected for that release, a starter `assets/` folder, `data/`, and the Markdown guides. Creators do not need Python, Pygame, Nuitka, or a compiler installed. See the [release build guide](./releasing.md) for creating a release with selected desktop/web templates and optional editor packages.
 
 ## Start here
 
@@ -16,10 +16,10 @@ The extracted editor package has this layout; it contains one platform-specific 
 MyVisualNovel/
   VN_Editor.exe             # Windows; Linux uses VN_Editor, macOS uses VN_Editor.app/
   templates/
-    template-windows.zip
-    template-linux.zip
-    template-macos.zip
-    template-web.zip          # Optional browser export template, downloaded separately
+    template-windows.zip      # Included when selected for the release
+    template-linux.zip        # Included when selected for the release
+    template-macos.zip        # Included when selected for the release
+    template-web.zip          # Included when selected for the release
   assets/                   # Project art, sound, music, fonts, and character art
   data/
     project.json            # Project name, menus, settings, and theme
@@ -41,7 +41,7 @@ The editor and `templates/` are tools for authoring and running the project. Edi
 - Story validation and a character-asset inventory from the command line.
 - An editor export pipeline for Windows, Linux, macOS, and browser game archives using prebuilt templates.
 
-The [story format reference](./story-format.md) explains how to write each feature. The [project configuration reference](./project-config.md) explains `data/project.json` and the theme options.
+The [story format reference](./story-format.md) explains how to write each feature. The [project configuration reference](./project-config.md) explains `data/project.json`, application icons, and theme options.
 
 ## Built-in assets
 
@@ -53,7 +53,7 @@ The engine includes the following assets. Desktop builds embed them into the run
 | `engine/assets/images/` | `logo.png`, `content_warning.png`, `headphones.png`, `test.png` | `logo.png` is fixed in the opening splash. The warning and headphone images are the default notice-card images and can be replaced. `test.png` is available as a general image asset. |
 | `engine/assets/sounds/` | `intro.wav`, `hover_button.wav`, `click_button.wav` | Opening splash sound and default menu hover/click sounds. |
 
-The browser template converts its built-in WAV sounds to OGG. Projects exported for the browser must also use `.ogg` for all sound and music assets.
+The browser template converts its built-in WAV sounds to OGG. Projects exported for the browser must also use `.ogg` for all sound and music assets. Configure a project-specific game/window icon with the optional `icon` field in `data/project.json`; the browser loader continues to show the engine logo.
 
 Project assets are searched before these built-ins for normal asset lookups. The opening splash always uses the engine's own `logo.png`; a project image cannot replace it. Backgrounds and menu art go in `assets/images/`, sound effects in `assets/sounds/`, music in `assets/music/`, fonts in `assets/fonts/`, and character art in `assets/characters/`. See the [user guide](./guide_vn-engine.md#5-assets-and-built-in-art) for path examples.
 

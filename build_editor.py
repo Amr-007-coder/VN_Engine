@@ -5,7 +5,9 @@ import importlib.util
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 
+from engine.icon_utils import make_icns
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 EDITOR_SOURCE = PROJECT_ROOT / "editor.py"
@@ -69,11 +71,23 @@ def main() -> int:
     ]
     if platform == "windows":
         command.append("--windows-console-mode=disable")
+        command.append(
+            f"--windows-icon-from-ico={PROJECT_ROOT / 'engine' / 'assets' / 'images' / 'editor_logo.ico'}"
+        )
     elif platform == "macos":
         command.append("--macos-app-name=VN_Editor")
     command.append("editor.py")
 
-    result = subprocess.run(command, cwd=PROJECT_ROOT, check=False)
+    if platform == "macos":
+        with tempfile.TemporaryDirectory(prefix="vn_editor_icon_") as temporary:
+            icon_path = Path(temporary) / "editor.icns"
+            icon_path.write_bytes(
+                make_icns(PROJECT_ROOT / "engine" / "assets" / "images" / "editor_logo.png")
+            )
+            command.insert(command.index("editor.py"), f"--macos-app-icon={icon_path}")
+            result = subprocess.run(command, cwd=PROJECT_ROOT, check=False)
+    else:
+        result = subprocess.run(command, cwd=PROJECT_ROOT, check=False)
     if result.returncode:
         print(f"Nuitka failed with exit code {result.returncode}.", file=sys.stderr)
         return result.returncode
