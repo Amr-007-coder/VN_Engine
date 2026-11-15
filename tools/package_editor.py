@@ -19,10 +19,24 @@ DOCUMENTS = (
 
 
 def _find_editor_build(platform: str, build_root: Path) -> Path:
+    if platform == "macos":
+        direct = build_root / "VN_Editor.app"
+        if direct.is_dir():
+            return direct
+        matches = [
+            app_bundle
+            for app_bundle in build_root.rglob("*.app")
+            if (app_bundle / "Contents" / "MacOS" / "VN_Editor").is_file()
+        ]
+        if len(matches) != 1:
+            raise FileNotFoundError(
+                f"Expected one macOS app bundle containing Contents/MacOS/VN_Editor under {build_root}."
+            )
+        return matches[0]
+
     expected = {
         "windows": "VN_Editor.exe",
         "linux": "VN_Editor",
-        "macos": "VN_Editor.app",
     }[platform]
     direct = build_root / expected
     if direct.exists():

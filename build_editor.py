@@ -78,10 +78,26 @@ def main() -> int:
         print(f"Nuitka failed with exit code {result.returncode}.", file=sys.stderr)
         return result.returncode
 
-    expected = output_dir / ("VN_Editor.app" if platform == "macos" else output_name)
-    if not expected.exists():
-        print(f"Nuitka reported success, but the expected editor was not created: {expected}", file=sys.stderr)
-        return 1
+    if platform == "macos":
+        expected_binary = "VN_Editor"
+        app_bundles = [
+            app_bundle
+            for app_bundle in output_dir.rglob("*.app")
+            if (app_bundle / "Contents" / "MacOS" / expected_binary).is_file()
+        ]
+        if len(app_bundles) != 1:
+            print(
+                "Nuitka reported success, but an app bundle containing "
+                f"Contents/MacOS/{expected_binary} was not found exactly once under {output_dir}.",
+                file=sys.stderr,
+            )
+            return 1
+        expected = app_bundles[0]
+    else:
+        expected = output_dir / output_name
+        if not expected.is_file():
+            print(f"Nuitka reported success, but the expected editor was not created: {expected}", file=sys.stderr)
+            return 1
     print(f"Standalone {platform} editor built: {expected}")
     return 0
 
