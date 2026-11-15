@@ -146,23 +146,23 @@ To export in the editor:
 2. Choose Windows, Linux, or macOS.
 3. Choose the output ZIP and click **Export**.
 
-The editor saves its open YAML and JSON files, checks the project and story, then adds the project's configured `assets/` and `data/` files to the selected runtime executable. It rewrites the project paths to portable `assets/` and `data/` names inside that embedded bundle. The ZIP also contains a launcher beside the game folder:
+The editor saves its open YAML and JSON files, checks the project and story, then adds the project's configured `assets/` and `data/` files to the selected runtime executable. It rewrites the project paths to portable `assets/` and `data/` names inside that embedded bundle. The ZIP also contains a platform shortcut beside the game folder:
 
 ```text
 Windows:
-  <Game Name>.bat          # A Windows .lnk is also included when exported from Windows
   <Game Name>/
     <Game Name>.exe        # Project assets and data are embedded here
+    Shortcut.lnk
     ...runtime files...
 
 Linux:
-  <Game Name>.sh
   <Game Name>/
     <Game Name>            # Project assets and data are embedded here
+    Shortcut -> <Game Name>  # Relative symbolic link
     ...runtime files...
 
 macOS:
-  <Game Name>.command
+  <Game Name> Shortcut.app -> <Game Name>.app  # Relative symbolic link
   <Game Name>.app/
     Contents/
       MacOS/Runner

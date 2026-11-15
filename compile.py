@@ -364,14 +364,15 @@ def main() -> int:
 
             output_dir.mkdir(parents=True, exist_ok=True)
             if args.engine_only:
-                print("Compiling engine-only in standalone folder mode.")
+                build_mode = "macOS app bundle mode" if args.macos_app_bundle else "standalone folder mode"
+                print(f"Compiling engine-only in {build_mode}.")
             else:
                 print("Compiling in standalone folder mode. The source data/assets remain unchanged.")
             command = [
                 sys.executable,
                 "-m",
                 "nuitka",
-                "--mode=standalone",
+                f"--mode={'app' if args.macos_app_bundle else 'standalone'}",
                 "--assume-yes-for-downloads",
                 f"--output-dir={output_dir}",
                 f"--output-filename={output_name}",
@@ -382,7 +383,7 @@ def main() -> int:
             ]
             if args.macos_app_bundle:
                 app_name = Path(output_name).stem
-                command[-1:-1] = ("--macos-create-app-bundle", f"--macos-app-name={app_name}")
+                command[-1:-1] = (f"--macos-app-name={app_name}",)
             if WINDOWS_BUILD:
                 command.insert(
                     command.index(f"--output-dir={output_dir}"),

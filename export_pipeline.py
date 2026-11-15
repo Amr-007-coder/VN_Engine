@@ -8,10 +8,11 @@ import os
 from pathlib import Path, PurePosixPath
 import plistlib
 import re
-import shlex
 import shutil
 import stat
+import struct
 import tempfile
+from uuid import UUID
 from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile, ZipInfo
 
 
@@ -194,45 +195,45 @@ def _write_project_resource_bundle(
         bundle.writestr(config_key, project_json)
 
 
-def _create_windows_shortcut(workspace: Path, game_name: str, executable_path: Path) -> Path | None:
-    """Create a relocatable Windows shortcut beside the exported game folder."""
-    if os.name != "nt":
-        return None
-    from engine.windows_shortcut import create_shortcut
+def _windows_shortcut_bytes(relative_target: str, executable_size: int) -> bytes:
+    """Create a minimal Unicode Windows Shell Link with a portable relative target."""
+    encoded_target = relative_target.encode("utf-16-le")
+    character_count = len(encoded_target) // 2
+    if character_count > 260:
+        raise ValueError("The game name is too long for a Windows shortcut.")
 
-    shortcut_path = workspace / f"{game_name}.lnk"
-    create_shortcut(
-        executable_path,
-        shortcut_path,
-        executable_path.parent,
-        relative_link_path=shortcut_path,
+    # ShellLinkHeader, RelativePath StringData, and the required terminal block.
+    header = struct.pack(
+        "<I16sIIQQQIiIHHII",
+        0x4C,
+        UUID("00021401-0000-0000-C000-000000000046").bytes_le,
+        0x00000008 | 0x00000080,  # HasRelativePath | IsUnicode
+        0x00000020,  # FILE_ATTRIBUTE_ARCHIVE
+        0,
+        0,
+        0,
+        min(executable_size, 0xFFFFFFFF),
+        0,
+        1,  # SW_SHOWNORMAL
+        0,
+        0,
+        0,
+        0,
     )
-    return shortcut_path
+    return header + struct.pack("<H", character_count) + encoded_target + struct.pack("<I", 0)
 
 
-def _launcher_entry(platform: str, game_name: str) -> tuple[str, bytes]:
-    """Return a small clickable launcher placed beside the exported game folder."""
+def _shortcut_entry(platform: str, game_name: str, executable_size: int) -> tuple[str, bytes, bool]:
+    """Return the platform-native relative shortcut name, payload, and symlink flag."""
     if platform == "windows":
-        content = (
-            "@echo off\r\n"
-            "for %%F in (\"%~dp0\\*\\*.exe\") do (\r\n"
-            '  start "" "%%~fF" %*\r\n'
-            "  exit /b 0\r\n"
-            ")\r\n"
-            "echo The game executable was not found.\r\n"
-            "exit /b 1\r\n"
+        return (
+            f"{game_name}/Shortcut.lnk",
+            _windows_shortcut_bytes(f"{game_name}.exe", executable_size),
+            False,
         )
-        return f"{game_name}.bat", content.encode("utf-8")
-
-    root_line = 'ROOT="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"\n'
     if platform == "linux":
-        relative_target = shlex.quote(f"{game_name}/{game_name}")
-        command = f'exec "$ROOT"/{relative_target} "$@"\n'
-        return f"{game_name}.sh", ("#!/bin/sh\n" + root_line + command).encode("utf-8")
-
-    relative_app = shlex.quote(f"{game_name}.app")
-    command = f'exec open -W "$ROOT"/{relative_app} --args "$@"\n'
-    return f"{game_name}.command", ("#!/bin/sh\n" + root_line + command).encode("utf-8")
+        return f"{game_name}/Shortcut", game_name.encode("utf-8"), True
+    return f"{game_name} Shortcut.app", f"{game_name}.app".encode("utf-8"), True
 
 
 def export_project(
@@ -335,15 +336,16 @@ def export_project(
                         shutil.copyfileobj(bundle, target)
                 if platform in {"linux", "macos"}:
                     staged_executable.chmod(staged_executable.stat().st_mode | 0o111)
-                windows_shortcut = _create_windows_shortcut(workspace, name, staged_executable)
         except BadZipFile as error:
             raise ValueError(f"Export template is not a valid ZIP file: {template_file}") from error
 
-        launcher_name, launcher_content = _launcher_entry(platform, name)
-        launcher_path = workspace / launcher_name
-        launcher_path.write_bytes(launcher_content)
-        if platform in {"linux", "macos"}:
-            launcher_path.chmod(0o755)
+        shortcut_name, shortcut_content, shortcut_is_symlink = _shortcut_entry(
+            platform, name, staged_executable.stat().st_size
+        )
+        if not shortcut_is_symlink:
+            shortcut_path = workspace / shortcut_name
+            shortcut_path.parent.mkdir(parents=True, exist_ok=True)
+            shortcut_path.write_bytes(shortcut_content)
 
         temporary_zip = workspace / "export.zip"
         seen_names = set()
@@ -382,16 +384,14 @@ def export_project(
                 if not found_main:
                     raise ValueError(f"Template is missing its main executable at {executable_path!r}.")
 
-                launcher_info = ZipInfo(launcher_name)
-                launcher_info.compress_type = ZIP_DEFLATED
-                if platform in {"linux", "macos"}:
-                    launcher_info.create_system = 3
-                    launcher_info.external_attr = (stat.S_IFREG | 0o755) << 16
-                archive.writestr(launcher_info, launcher_path.read_bytes())
-                if windows_shortcut is not None:
-                    shortcut_info = ZipInfo(f"{name}.lnk")
-                    shortcut_info.compress_type = ZIP_DEFLATED
-                    archive.writestr(shortcut_info, windows_shortcut.read_bytes())
+                shortcut_info = ZipInfo(shortcut_name)
+                shortcut_info.compress_type = ZIP_DEFLATED
+                if shortcut_is_symlink:
+                    shortcut_info.create_system = 3
+                    shortcut_info.external_attr = (stat.S_IFLNK | 0o777) << 16
+                    archive.writestr(shortcut_info, shortcut_content)
+                else:
+                    archive.writestr(shortcut_info, (workspace / shortcut_name).read_bytes())
 
             os.replace(temporary_zip, output_file)
         except BadZipFile as error:

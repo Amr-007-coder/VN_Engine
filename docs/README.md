@@ -62,7 +62,7 @@ The editor opens the configured story, each YAML file named by `includes`, and `
 
 **Test Play** saves and checks the project, copies the current platform's game template and project files to a temporary folder, then launches that game. The temporary folder is removed when the game closes or the editor exits. Test Play stores settings and saves in that temporary folder, so it does not change the project's normal save data.
 
-**Export Game** saves and checks the project, then embeds its `assets/` and `data/` files in the exported game executable. The files travel inside the ZIP, so players do not need separate project folders beside the game. Each ZIP includes a launcher beside the game folder; a Windows `.lnk` is also created when exporting from Windows. Players need the matching OS to run the game. Browser/HTML5 exports are not supported.
+**Export Game** saves and checks the project, then embeds its `assets/` and `data/` files in the exported game executable. The files travel inside the ZIP, so players do not need separate project folders beside the game. Each ZIP also contains a platform shortcut: a Windows `.lnk`, a relative Linux symbolic link, or a macOS app-bundle symbolic link. Players need the matching OS to run the game. Browser/HTML5 exports are not supported.
 
 The command pane uses PowerShell on Windows and the available bash, zsh, or sh shell on Linux/macOS. It starts in the project folder and keeps its working directory as commands run. Use **Restart** to reopen the shell.
 

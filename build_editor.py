@@ -65,7 +65,6 @@ def main() -> int:
         "--jobs=4",
         "--include-package=yaml",
         "--include-module=export_pipeline",
-        "--include-module=engine.windows_shortcut",
         "--python-flag=no_docstrings",
     ]
     if platform == "windows":
