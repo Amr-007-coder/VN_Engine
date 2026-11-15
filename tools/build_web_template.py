@@ -98,6 +98,7 @@ def build_template(output: Path) -> Path:
         app_root = Path(temporary) / "vn-engine-web"
         app_root.mkdir()
         shutil.copytree(PROJECT_ROOT / "engine", app_root / "engine", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        # Pygbag requires its async browser entry point to be named main.py.
         shutil.copy2(PROJECT_ROOT / "web_main.py", app_root / "main.py")
         shutil.copy2(PROJECT_ROOT / "engine" / "assets" / "images" / "logo.png", app_root / "favicon.png")
         _copy_python_package("yaml", app_root / "yaml")
@@ -130,7 +131,7 @@ def build_template(output: Path) -> Path:
         try:
             with ZipFile(temporary_output, "w", compression=ZIP_DEFLATED, compresslevel=6) as archive:
                 for source in sorted(web_root.rglob("*"), key=lambda item: item.as_posix().casefold()):
-                    if source.is_file() and source.suffix.casefold() != ".gz":
+                    if source.is_file():
                         archive.write(source, source.relative_to(web_root).as_posix())
             os.replace(temporary_output, output)
         finally:
