@@ -1,6 +1,8 @@
 """Asynchronous entry point for Pygbag browser builds."""
 
 import asyncio
+import pygame
+import pygame.surface
 
 from engine.engine import Engine
 from engine.project import ProjectConfig

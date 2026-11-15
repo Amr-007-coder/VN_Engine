@@ -12,6 +12,8 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+BROWSERFS_SCRIPT_URL = "https://cdnjs.cloudflare.com/ajax/libs/BrowserFS/1.4.3/browserfs.min.js"
+PYGBAG_BROWSERFS_SCRIPT_URL = "https://pygame-web.github.io/cdn/0.9.3//browserfs.min.js"
 
 
 def _parse_args():
@@ -123,6 +125,15 @@ def build_template(output: Path) -> Path:
         web_root = app_root / "build" / "web"
         if not (web_root / "index.html").is_file():
             raise FileNotFoundError(f"Pygbag did not create index.html under {web_root}.")
+        index_path = web_root / "index.html"
+        index_html = index_path.read_text(encoding="utf-8")
+        if index_html.count(PYGBAG_BROWSERFS_SCRIPT_URL) != 1:
+            raise RuntimeError("Pygbag's expected BrowserFS script reference was not found exactly once.")
+        index_path.write_text(
+            index_html.replace(PYGBAG_BROWSERFS_SCRIPT_URL, BROWSERFS_SCRIPT_URL),
+            encoding="utf-8",
+            newline="\n",
+        )
         app_archives = list(web_root.glob("*.apk"))
         if len(app_archives) != 1:
             raise FileNotFoundError(f"Expected one Pygbag .apk archive under {web_root}; found {len(app_archives)}.")
