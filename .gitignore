@@ -1,0 +1,15 @@
+.vscode/
+__pycache__/
+assets/
+data/
+dist/
+editor.build/
+editor.dist/
+editor.onefile-build/
+tests/
+yaml-helper/
+feedback.email
+*.pyc
+
+!engine/assets/
+!engine/data/
