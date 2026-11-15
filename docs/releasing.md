@@ -20,4 +20,4 @@ python .\tools\release.py --dry-run
 
 The dry run still checks the version, branch, remote, and current worktree and asks for the same selections. If a local or remote `v<version>` tag already exists, update `engine/data/version.txt` before creating another release.
 
-Install the combined build dependencies locally with `python -m pip install -r requirements.txt` if needed. The web template build also needs `ffmpeg` available on `PATH`; GitHub Actions installs it automatically.
+Install the combined build dependencies locally with `python -m pip install -r requirements.txt` if needed. The web template build also needs `ffmpeg` available on `PATH`; GitHub Actions installs it automatically. While building the web template, the script downloads and bundles the Pygbag and BrowserFS runtime assets. The resulting web export serves these assets locally at runtime, without CDN requests.

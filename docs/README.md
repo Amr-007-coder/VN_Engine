@@ -65,7 +65,7 @@ The editor opens the configured story, each YAML file named by `includes`, and `
 
 **Test Play** saves and checks the project, copies the current platform's game template and project files to a temporary folder, then launches that game. The temporary folder is removed when the game closes or the editor exits. Test Play stores settings and saves in that temporary folder, so it does not change the project's normal save data.
 
-**Export Game** saves and checks the project, then embeds its `assets/` and `data/` files in a desktop game executable. Desktop ZIPs also contain a platform shortcut: a Windows `.lnk`, a relative Linux symbolic link, or a macOS app-bundle symbolic link. For a browser export, the ZIP contains a static website with an `index.html`; upload its contents to a web host, or serve it through a local HTTP server. The browser build loads the Pygbag runtime from its CDN, so players need an internet connection. Browser project audio must use OGG files (`.ogg`).
+**Export Game** saves and checks the project, then embeds its `assets/` and `data/` files in a desktop game executable. Desktop ZIPs also contain a platform shortcut: a Windows `.lnk`, a relative Linux symbolic link, or a macOS app-bundle symbolic link. For a browser export, the ZIP contains a static website with an `index.html` and its Pygbag runtime files; upload its contents to a web host, or serve it through a local HTTP server. The browser game does not need to fetch runtime assets from a CDN. Browser project audio must use OGG files (`.ogg`).
 
 The command pane uses PowerShell on Windows and the available bash, zsh, or sh shell on Linux/macOS. It starts in the project folder and keeps its working directory as commands run. Use **Restart** to reopen the shell.
 

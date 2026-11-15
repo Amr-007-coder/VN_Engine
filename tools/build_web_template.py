@@ -2,18 +2,66 @@
 
 import argparse
 import importlib.util
+import json
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
 import tempfile
+from urllib.request import Request, urlopen
 from zipfile import ZIP_DEFLATED, ZipFile
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PYGBAG_RUNTIME_VERSION = "0.9.3"
+PYGBAG_CDN_URL = f"https://pygame-web.github.io/cdn/{PYGBAG_RUNTIME_VERSION}/"
+PYGBAG_PACKAGE_INDEX = f"index-{PYGBAG_RUNTIME_VERSION}-cp312.json"
+PYGBAG_PYGAME_WHEEL = "cp312/pygame_ce-2.5.7-cp312-cp312-wasm32_bi_emscripten.whl"
 BROWSERFS_SCRIPT_URL = "https://cdnjs.cloudflare.com/ajax/libs/BrowserFS/1.4.3/browserfs.min.js"
-PYGBAG_BROWSERFS_SCRIPT_URL = "https://pygame-web.github.io/cdn/0.9.3//browserfs.min.js"
+PYGBAG_BROWSERFS_SCRIPT_URL = f"{PYGBAG_CDN_URL}/browserfs.min.js"
+LOCAL_RUNTIME_ROOT = f"./runtime/{PYGBAG_RUNTIME_VERSION}/"
+SERVICE_WORKER_BLOCK = f"""    <script>
+/*
+        if (navigator.serviceWorker)
+            navigator.serviceWorker.register("{PYGBAG_CDN_URL}pygbag{PYGBAG_RUNTIME_VERSION}.js")
+        else
+            console.warn("Service workers not supported")
+*/
+    </script>"""
+PYGBAG_VERSIONED_RUNTIME_FILES = (
+    "cpython312/main.data",
+    "cpython312/main.js",
+    "cpython312/main.wasm",
+    "cpythonrc.py",
+    "empty.html",
+    "empty.ogg",
+    "pythons.js",
+)
+PYGBAG_SHARED_RUNTIME_FILES = (
+    "vt.js",
+    "vtx.js",
+    "vt/xterm-addon-image.js",
+    "vt/xterm.css",
+    "vt/xterm.js",
+    "lib/dlfcn.js",
+    "lib/enginesound/engine.js",
+    "lib/enginesound/engine.ogg",
+    "lib/enginesound/index.html",
+    "lib/espeak/index.html",
+    "lib/espeak/speakClient.js",
+    "lib/espeak/speakGenerator.js",
+    "lib/espeak/speakWorker.js",
+    "lib/index.html",
+    "lib/main.html",
+    "lib/sub.html",
+)
+RUNTIME_LICENSES = {
+    "pygbag-cdn-MIT.txt": "https://raw.githubusercontent.com/pygame-web/cdn/main/LICENSE",
+    "browserfs-MIT.txt": "https://raw.githubusercontent.com/jvilk/BrowserFS/master/license.md",
+    "cpython-PSF.txt": "https://raw.githubusercontent.com/python/cpython/3.12/LICENSE",
+    "pygame-ce-LGPL-2.1.txt": "https://www.gnu.org/licenses/old-licenses/lgpl-2.1.txt",
+}
 LOADER_STYLE = """
 <style id="vn-engine-loader">
     html, body {
@@ -136,6 +184,112 @@ def _convert_engine_audio(app_root: Path) -> None:
         source.unlink()
 
 
+def _download_runtime_file(url: str, destination: Path) -> None:
+    request = Request(url, headers={"User-Agent": "VN-Engine web template builder"})
+    with urlopen(request, timeout=120) as response:
+        contents = response.read()
+    if not contents:
+        raise RuntimeError(f"Downloaded runtime file is empty: {url}")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(contents)
+
+
+def _vendor_web_runtime(web_root: Path) -> None:
+    versioned_root = web_root / LOCAL_RUNTIME_ROOT
+    for relative_path in PYGBAG_VERSIONED_RUNTIME_FILES:
+        _download_runtime_file(
+            f"{PYGBAG_CDN_URL}{relative_path}",
+            versioned_root / relative_path,
+        )
+
+    shared_root = web_root / "runtime"
+    for relative_path in PYGBAG_SHARED_RUNTIME_FILES:
+        destination_root = web_root / "cdn" if relative_path.startswith("lib/") else shared_root
+        _download_runtime_file(
+            f"https://pygame-web.github.io/cdn/{relative_path}",
+            destination_root / relative_path,
+        )
+
+    _download_runtime_file(
+        BROWSERFS_SCRIPT_URL,
+        versioned_root / "browserfs.min.js",
+    )
+    _download_runtime_file(
+        f"https://pygame-web.github.io/cdn/{PYGBAG_PACKAGE_INDEX}",
+        web_root / "cdn" / PYGBAG_PACKAGE_INDEX,
+    )
+    package_index_path = web_root / "cdn" / PYGBAG_PACKAGE_INDEX
+    try:
+        package_index = json.loads(package_index_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise RuntimeError("The downloaded Pygbag package index is invalid.") from error
+    if not isinstance(package_index, dict):
+        raise RuntimeError("The downloaded Pygbag package index is not a JSON object.")
+    indexed_pygame_wheel = package_index.get("pygame", "")
+    indexed_pygame_wheel = indexed_pygame_wheel.replace("<abi>", "cp312").replace(
+        "<api>",
+        "wasm32_bi_emscripten",
+    )
+    if indexed_pygame_wheel != PYGBAG_PYGAME_WHEEL:
+        raise RuntimeError("The Pygbag package index does not match the bundled Pygame wheel.")
+    package_index["-CDN-"] = "./cdn/"
+    package_index_path.write_text(
+        json.dumps(package_index, separators=(",", ":")),
+        encoding="utf-8",
+        newline="\n",
+    )
+    _download_runtime_file(
+        f"https://pygame-web.github.io/cdn/{PYGBAG_PYGAME_WHEEL}",
+        web_root / "cdn" / PYGBAG_PYGAME_WHEEL,
+    )
+    license_root = web_root / "runtime" / "licenses"
+    for filename, url in RUNTIME_LICENSES.items():
+        _download_runtime_file(url, license_root / filename)
+    (license_root / "THIRD_PARTY_NOTICES.txt").write_text(
+        "Pygbag CDN runtime 0.9.3: MIT License (pygbag-cdn-MIT.txt).\n"
+        "BrowserFS 1.4.3: MIT License (browserfs-MIT.txt).\n"
+        "CPython 3.12: PSF License (cpython-PSF.txt).\n"
+        "pygame-ce 2.5.7: LGPL v2.1 (pygame-ce-LGPL-2.1.txt); source: "
+        "https://github.com/pygame-community/pygame-ce/tree/2.5.7\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    cpythonrc_path = versioned_root / "cpythonrc.py"
+    cpythonrc_path.write_text(
+        'import os\nos.environ["PYGPI"] = "./cdn/"\n'
+        + cpythonrc_path.read_text(encoding="utf-8"),
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    vtx_path = shared_root / "vtx.js"
+    vtx_script = vtx_path.read_text(encoding="utf-8")
+    remote_configured_base = 'xterm_cdn = window.Module.config.cdn+"../vt/"'
+    if vtx_script.count(remote_configured_base) != 1:
+        raise RuntimeError("Pygbag's expected terminal CDN path was not found exactly once.")
+    vtx_script = vtx_script.replace(
+        remote_configured_base,
+        'xterm_cdn = new URL(window.Module.config.cdn+"../vt/", document.baseURI).href',
+        1,
+    )
+    remote_terminal_fallback = 'xterm_cdn = xterm_cdn || "https://pygame-web.github.io/cdn/vt/"'
+    if vtx_script.count(remote_terminal_fallback) != 1:
+        raise RuntimeError("Pygbag's expected terminal fallback URL was not found exactly once.")
+    vtx_path.write_text(
+        vtx_script.replace(
+            remote_terminal_fallback,
+            'xterm_cdn = xterm_cdn || new URL("./runtime/vt/", document.baseURI).href',
+            1,
+        ),
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    if not (versioned_root / "cpython312" / "main.wasm").read_bytes().startswith(b"\0asm"):
+        raise RuntimeError("The downloaded Pygbag WebAssembly runtime is invalid.")
+
+
 def _write_starter_project(app_root: Path) -> None:
     assets_root = app_root / "assets"
     data_root = app_root / "data"
@@ -205,11 +359,23 @@ def build_template(output: Path) -> Path:
         if not (web_root / "index.html").is_file():
             raise FileNotFoundError(f"Pygbag did not create index.html under {web_root}.")
         shutil.copy2(PROJECT_ROOT / "engine" / "assets" / "images" / "logo.png", web_root / "logo.png")
+        _vendor_web_runtime(web_root)
         index_path = web_root / "index.html"
         index_html = index_path.read_text(encoding="utf-8")
+        if index_html.count(SERVICE_WORKER_BLOCK) != 1:
+            raise RuntimeError("Pygbag's expected disabled service-worker block was not found exactly once.")
+        index_html = index_html.replace(SERVICE_WORKER_BLOCK, "", 1)
         if index_html.count(PYGBAG_BROWSERFS_SCRIPT_URL) != 1:
             raise RuntimeError("Pygbag's expected BrowserFS script reference was not found exactly once.")
-        index_html = index_html.replace(PYGBAG_BROWSERFS_SCRIPT_URL, BROWSERFS_SCRIPT_URL)
+        index_html = index_html.replace(
+            PYGBAG_BROWSERFS_SCRIPT_URL,
+            f"{LOCAL_RUNTIME_ROOT}browserfs.min.js",
+        )
+        if PYGBAG_CDN_URL not in index_html:
+            raise RuntimeError("Pygbag's expected CDN base URL was not found.")
+        index_html = index_html.replace(PYGBAG_CDN_URL, LOCAL_RUNTIME_ROOT)
+        if "https://" in index_html or "http://" in index_html:
+            raise RuntimeError("The generated web page still contains an external URL.")
         if index_html.count("</head>") != 1:
             raise RuntimeError("Pygbag's expected closing head tag was not found exactly once.")
         index_path.write_text(

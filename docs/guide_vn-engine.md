@@ -175,7 +175,7 @@ The editor's own starter `assets/` and `data/` stay as editable files beside VN_
 
 Linux and macOS archives preserve executable permissions for the main program and shared libraries. The macOS exporter removes the template bundle signature because it changes the app bundle; exported macOS apps are not signed or notarized. Players need the matching OS to run a desktop export.
 
-A Web export is a static website ZIP containing `index.html` and the packaged game data. Upload the ZIP contents to a static web host, or start an HTTP server in the extracted folder to preview it. Opening `index.html` directly as a `file://` URL is not supported. Pygbag loads its Python and Pygame runtime from its CDN, so the browser needs internet access. Project sound and music files must be OGG (`.ogg`) for browser exports; convert WAV, MP3, and AIFF files before exporting.
+A Web export is a static website ZIP containing `index.html`, the packaged game data, and the Pygbag runtime files. Upload the ZIP contents to a static web host, or start an HTTP server in the extracted folder to preview it. Opening `index.html` directly as a `file://` URL is not supported. The game loads its runtime from the exported files and does not need internet access after those files are available to the browser. Project sound and music files must be OGG (`.ogg`) for browser exports; convert WAV, MP3, and AIFF files before exporting.
 
 ### Command-line export
 
