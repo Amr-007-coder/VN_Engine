@@ -120,32 +120,26 @@ class Engine:
         self.credits_selected = 0
 
     def run(self):
-        self._initialize()
+        self.initialize()
         self.running = True
         try:
             self._play_intro()
             while self.running:
-                self._handle_events()
-                self._update()
-                self._render()
+                self.step()
                 self.clock.tick(self.fps)
         finally:
             self.shutdown()
 
-    async def run_async(self):
-        """Run the game loop while yielding control to an async host such as pygbag."""
-        self._initialize()
-        self.running = True
-        try:
-            await self._play_intro_async()
-            while self.running:
-                self._handle_events()
-                self._update()
-                self._render()
-                self.clock.tick(self.fps)
-                await asyncio.sleep(0)
-        finally:
-            self.shutdown()
+    def step(self):
+        """Advance and draw one frame; async hosts should yield after each call."""
+        self._handle_events()
+        self._update()
+        self._render()
+
+    def initialize(self):
+        """Load the project and open Pygame before starting a desktop or async loop."""
+        if not self.initialized:
+            self._initialize()
 
     def _make_menu(self, name):
         config = self.project.menus[name]
@@ -210,7 +204,7 @@ class Engine:
         for _ in self._intro_frames():
             self.clock.tick(self.fps)
 
-    async def _play_intro_async(self):
+    async def play_intro_async(self):
         for _ in self._intro_frames():
             self.clock.tick(self.fps)
             await asyncio.sleep(0)

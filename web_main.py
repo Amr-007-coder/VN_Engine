@@ -6,9 +6,22 @@ from engine.engine import Engine
 from engine.project import ProjectConfig
 
 
+project = ProjectConfig.load()
+engine = Engine(project_config=project)
+# Pygbag expects Pygame and the display to be ready before its async loop starts.
+engine.initialize()
+
+
 async def main():
-    project = ProjectConfig.load()
-    await Engine(project_config=project).run_async()
+    engine.running = True
+    try:
+        await engine.play_intro_async()
+        while engine.running:
+            engine.step()
+            engine.clock.tick(engine.fps)
+            await asyncio.sleep(0)
+    finally:
+        engine.shutdown()
 
 
 asyncio.run(main())
