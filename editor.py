@@ -94,6 +94,11 @@ BUILTIN_ASSETS = {
     },
 }
 ASSET_FOLDER = {"image": "images", "sound": "sounds", "music": "music", "font": "fonts"}
+EDITOR_DOCUMENTS = (
+    Path("docs/guide_vn-engine.md"),
+    Path("docs/project-config.md"),
+    Path("docs/story-format.md"),
+)
 
 
 def _literal_from_engine(relative_file: str, variable: str):
@@ -113,10 +118,15 @@ def _literal_from_engine(relative_file: str, variable: str):
     return None
 
 
-DEFAULT_PROJECT = _literal_from_engine("engine/project.py", "DEFAULT_PROJECT") or {
+FALLBACK_DEFAULT_PROJECT = {
     "name": "Visual Novel",
     "story": "story.yaml",
     "icon": None,
+    "android": {
+        "app_name": "VN Engine",
+        "app_id": "com.example.vnengine",
+        "orientation": "landscape",
+    },
     "save_slots": 5,
     "credits": [],
     "intro": {
@@ -174,6 +184,8 @@ DEFAULT_PROJECT = _literal_from_engine("engine/project.py", "DEFAULT_PROJECT") o
     },
     "theme": {},
 }
+DEFAULT_PROJECT = _literal_from_engine("engine/project.py", "DEFAULT_PROJECT") or FALLBACK_DEFAULT_PROJECT
+DEFAULT_PROJECT.setdefault("android", dict(FALLBACK_DEFAULT_PROJECT["android"]))
 DEFAULT_THEME = _literal_from_engine("engine/theme.py", "DEFAULT_THEME") or {
     "colors": {"background": [30, 30, 45], "text": [230, 230, 230], "muted": [170, 170, 180],
                "normal": [18, 18, 29], "hover": [73, 50, 65],
@@ -261,6 +273,15 @@ def _editor_release_tag(package_root: Path) -> str | None:
             raise ValueError(f"Invalid editor version in {version_file}: {version!r}")
         return f"v{version}"
     return None
+
+
+def _editor_markdown_paths(editor_home: Path) -> list[Path]:
+    readme = editor_home / "readme.md"
+    if not readme.is_file():
+        readme = editor_home / "docs" / "README.md"
+    paths = [readme] if readme.is_file() else []
+    paths.extend(editor_home / relative_path for relative_path in EDITOR_DOCUMENTS)
+    return [path.resolve() for path in paths if path.is_file()]
 
 
 def _editor_settings_path() -> Path:
@@ -1658,29 +1679,8 @@ class VNEditorApp:
         self.markdown_texts.clear()
         self.markdown_paths.clear()
 
-        paths = []
-        seen = set()
-        for folder in (self.editor_home, self.editor_home / "docs", self.project_root, self.project_root / "docs"):
-            if not folder.is_dir():
-                continue
-            try:
-                children = sorted(folder.iterdir(), key=lambda item: item.name.casefold())
-            except OSError:
-                continue
-            for path in children:
-                if path.is_file() and path.suffix.casefold() == ".md":
-                    resolved = path.resolve()
-                    if resolved not in seen:
-                        paths.append(resolved)
-                        seen.add(resolved)
-
+        paths = _editor_markdown_paths(self.editor_home)
         labels = [path.name for path in paths]
-        for index, path in enumerate(paths):
-            if labels.count(path.name) > 1:
-                try:
-                    labels[index] = path.relative_to(self.editor_home).as_posix()
-                except ValueError:
-                    labels[index] = path.relative_to(self.project_root).as_posix()
 
         for path, label in zip(paths, labels):
             try:
