@@ -16,6 +16,7 @@ jobs:
       platforms: ${{ steps.options.outputs.platforms }}
       platform_csv: ${{ steps.options.outputs.platform_csv }}
       build_editor: ${{ steps.options.outputs.build_editor }}
+      matrix: ${{ steps.options.outputs.matrix }}
     steps:
       - uses: actions/checkout@v4
 
@@ -26,19 +27,9 @@ jobs:
   build-template:
     name: Build ${{ matrix.platform }} template
     needs: release-options
-    if: contains(fromJSON(needs.release-options.outputs.platforms), matrix.platform)
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - os: windows-latest
-            platform: windows
-          - os: ubuntu-22.04
-            platform: linux
-          - os: macos-latest
-            platform: macos
-          - os: ubuntu-22.04
-            platform: web
+      matrix: ${{ fromJSON(needs.release-options.outputs.matrix) }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4

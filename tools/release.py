@@ -11,6 +11,24 @@ import sys
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PLATFORMS = ("windows", "linux", "macos", "web")
 DEFAULT_PLATFORMS = PLATFORMS
+PLATFORM_RUNNERS = {
+    "windows": "windows-latest",
+    "linux": "ubuntu-22.04",
+    "macos": "macos-latest",
+    "web": "ubuntu-22.04",
+}
+
+
+def _build_matrix(platforms: list[str]) -> str:
+    return json.dumps(
+        {
+            "include": [
+                {"os": PLATFORM_RUNNERS[platform], "platform": platform}
+                for platform in platforms
+            ]
+        },
+        separators=(",", ":"),
+    )
 
 
 def _git(*arguments: str, capture_output: bool = False) -> subprocess.CompletedProcess:
@@ -180,6 +198,7 @@ def _read_tag_options(tag: str) -> dict[str, str]:
         "platforms": json.dumps(selected, separators=(",", ":")),
         "platform_csv": ",".join(selected),
         "build_editor": "true" if include_editor else "false",
+        "matrix": _build_matrix(selected),
     }
 
 
