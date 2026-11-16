@@ -1,6 +1,7 @@
 """Standalone authoring editor for VN Engine projects.
 
 Run ``python editor.py`` from a project folder, or pass ``--project-dir``.
+Without a project folder, the editor installs a starter project in Documents.
 The interface uses Tkinter; PyYAML enables YAML parsing and live diagnostics.
 """
 
@@ -29,6 +30,7 @@ from typing import Any
 from zipfile import ZipFile
 
 from export_pipeline import PLATFORMS, export_project, safe_project_name
+from template_repository import install_starter_project, list_template_release_tags
 
 try:
     import yaml
@@ -211,9 +213,16 @@ def project_root_from(path: Path) -> Path:
     if path.is_file():
         path = path.parent
     for candidate in (path, *path.parents):
-        if (candidate / "data").is_dir() or (candidate / "assets").is_dir():
+        if _contains_project(candidate):
             return candidate
     return path
+
+
+def _contains_project(root: Path) -> bool:
+    return (
+        (root / "data" / "project.json").is_file()
+        or (root / "data" / "story.yaml").is_file()
+    )
 
 
 def editor_package_root(path: Path) -> Path:
@@ -225,6 +234,98 @@ def editor_package_root(path: Path) -> Path:
         if candidate.suffix.casefold() == ".app":
             return candidate.parent
     return path
+
+
+def _is_standalone_editor_package(root: Path) -> bool:
+    return (
+        (root / "VN_Editor.exe").is_file()
+        or (root / "VN_Editor").is_file()
+        or (root / "VN_Editor.app" / "Contents" / "MacOS" / "VN_Editor").is_file()
+    )
+
+
+def _starter_project_directory() -> Path:
+    return Path.home() / "Documents" / "VN Engine Projects" / "My Visual Novel"
+
+
+def _editor_release_tag(package_root: Path) -> str | None:
+    version_files = (
+        package_root / "engine-version.txt",
+        Path(__file__).resolve().parent / "engine" / "data" / "version.txt",
+    )
+    for version_file in version_files:
+        if not version_file.is_file():
+            continue
+        version = version_file.read_text(encoding="utf-8").strip()
+        if not re.fullmatch(r"\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?", version):
+            raise ValueError(f"Invalid editor version in {version_file}: {version!r}")
+        return f"v{version}"
+    return None
+
+
+def _editor_settings_path() -> Path:
+    if sys.platform == "win32":
+        base = Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming")
+    elif sys.platform == "darwin":
+        base = Path.home() / "Library" / "Application Support"
+    else:
+        base = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+    return base / "VN_Engine" / "editor.json"
+
+
+def _load_last_project() -> Path | None:
+    settings_path = _editor_settings_path()
+    try:
+        settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except json.JSONDecodeError as error:
+        raise ValueError(f"Could not read editor settings from {settings_path}: {error}") from error
+    if not isinstance(settings, dict) or not isinstance(settings.get("last_project"), str):
+        raise ValueError(f"Editor settings do not contain a valid last project path: {settings_path}")
+    project = Path(settings["last_project"]).expanduser()
+    return project.resolve() if project.is_dir() else None
+
+
+def _save_last_project(project: Path) -> None:
+    settings_path = _editor_settings_path()
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(prefix=".editor-settings.", dir=settings_path.parent)
+    os.close(descriptor)
+    temporary_path = Path(temporary_name)
+    try:
+        temporary_path.write_text(
+            json.dumps({"last_project": str(project.resolve())}, ensure_ascii=True) + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        os.replace(temporary_path, settings_path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+
+def _initial_project_root(
+    project_dir: Path | None,
+    current_directory: Path,
+    package_root: Path,
+    last_project: Path | None,
+) -> Path:
+    if project_dir is not None:
+        return project_root_from(project_dir)
+
+    current = project_root_from(current_directory)
+    package = editor_package_root(package_root)
+    if _contains_project(current) and (
+        current != package or not _is_standalone_editor_package(package)
+    ):
+        return current
+    if last_project is not None and _contains_project(last_project):
+        return last_project
+    if _contains_project(package):
+        return package
+    if _contains_project(current):
+        return current
+    return _starter_project_directory()
 
 
 @dataclass
@@ -1881,7 +1982,7 @@ while ($true) {{
     def choose_project(self):
         selected = filedialog.askdirectory(title="Choose VN Engine project folder", initialdir=self.project_root)
         if selected:
-            if not self._confirm_discard_or_save():
+            if not self._confirm_discard_or_save("switching projects"):
                 return
             self.load_project(Path(selected))
 
@@ -1898,12 +1999,7 @@ while ($true) {{
             try:
                 raw_text = self.project_file.read_text(encoding="utf-8")
                 raw_project = json.loads(raw_text)
-                if isinstance(raw_project, dict):
-                    complete = merge_defaults(DEFAULT_PROJECT, raw_project)
-                    project_dirty = complete != raw_project
-                    self.project_buffer = json.dumps(complete, ensure_ascii=False, indent=2) + "\n"
-                else:
-                    self.project_buffer = raw_text
+                self.project_buffer = raw_text
             except json.JSONDecodeError:
                 self.project_buffer = raw_text
             except OSError as error:
@@ -1943,6 +2039,10 @@ while ($true) {{
             self.set_status("Default project values were filled in memory. Save project.json to write them.")
         else:
             self.set_status("Ready. Ctrl+Space shows suggestions; F5 runs the engine validator.")
+        try:
+            _save_last_project(self.project_root)
+        except OSError as error:
+            self.set_status(f"Could not remember the last project folder: {error}")
 
     def _clear_included_story_tabs(self):
         if not self.story_editors:
@@ -2982,10 +3082,10 @@ while ($true) {{
         self._update_tab_labels()
         self._sync_included_story_tabs()
 
-    def _confirm_discard_or_save(self):
+    def _confirm_discard_or_save(self, action: str):
         if not (any(editor.dirty for editor in self.story_editors.values()) or self.project_editor.dirty):
             return True
-        answer = messagebox.askyesnocancel(APP_TITLE, "Save your changes before switching projects?", parent=self.root)
+        answer = messagebox.askyesnocancel(APP_TITLE, f"Save your changes before {action}?", parent=self.root)
         if answer is None:
             return False
         if answer:
@@ -3103,6 +3203,18 @@ while ($true) {{
             (path for path in candidates if path.is_dir() and any(path.glob("template-*.zip"))),
             next((path for path in candidates if path.is_dir()), candidates[0]),
         )
+
+    def _editor_release_tag(self):
+        candidates = (
+            self.editor_home / "engine-version.txt",
+            Path(__file__).resolve().parent / "engine" / "data" / "version.txt",
+        )
+        for version_file in candidates:
+            if not version_file.is_file():
+                continue
+            version = version_file.read_text(encoding="utf-8").strip()
+            return version if version.startswith("v") else f"v{version}"
+        return None
 
     @staticmethod
     def _current_platform():
@@ -3237,7 +3349,7 @@ while ($true) {{
             self.test_play_process = subprocess.Popen(
                 [str(executable)], cwd=executable.parent, env=environment
             )
-        except (OSError, ValueError, json.JSONDecodeError, subprocess.SubprocessError) as error:
+        except (OSError, ValueError, RuntimeError, json.JSONDecodeError, subprocess.SubprocessError) as error:
             self._cleanup_test_play()
             messagebox.showerror("Cannot Start Test Play", f"Could not prepare or start the game: {error}", parent=self.root)
             return
@@ -3271,26 +3383,8 @@ while ($true) {{
             body, textvariable=platform_var, values=sorted(PLATFORMS), state="readonly", width=18
         )
         platform_box.grid(row=0, column=1, columnspan=2, sticky="ew", pady=(0, 7))
-        ttk.Label(body, text="Templates folder").grid(row=1, column=0, sticky="w", pady=7)
+        ttk.Label(body, text="Local templates folder").grid(row=1, column=0, sticky="w", pady=7)
         templates_var = tk.StringVar(value=str(template_dir))
-
-        def update_platform_choices(*_args):
-            available = sorted(
-                platform
-                for platform in PLATFORMS
-                if (
-                    (Path(templates_var.get()) / "template-web.zip").is_file()
-                    if platform == "android"
-                    else (Path(templates_var.get()) / f"template-{platform}.zip").is_file()
-                )
-            )
-            choices = available or sorted(PLATFORMS)
-            platform_box.configure(values=choices)
-            if platform_var.get() not in choices:
-                platform_var.set(choices[0])
-
-        update_platform_choices()
-        templates_var.trace_add("write", update_platform_choices)
         ttk.Entry(body, textvariable=templates_var, width=52).grid(row=1, column=1, sticky="ew", pady=7)
         ttk.Button(
             body,
@@ -3309,11 +3403,62 @@ while ($true) {{
         ).grid(row=2, column=2, padx=(6, 0), pady=7)
         ttk.Label(
             body,
-            text="Android creates a fresh project-specific web archive from template-web.zip, then builds a Capacitor APK. It does not reuse a previously exported web.zip. Android export requires Node.js/npm, a Java JDK, the Android SDK, and an internet connection.",
+            text="Templates download from GitHub Releases on demand and are cached. Android uses the selected release (the editor's version is recommended) to build a fresh project-specific archive; it requires Node.js/npm, a Java JDK, the Android SDK, and internet access.",
             foreground="#707987",
         ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(2, 10))
+        android_options = ttk.LabelFrame(body, text="Android options", padding=8)
+        android_options.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(0, 8))
+        android_release_label = ttk.Label(android_options, text="Runtime release")
+        android_release_label.grid(row=0, column=0, sticky="w", padx=(0, 8))
+        android_release_var = tk.StringVar()
+        android_release_box = ttk.Combobox(
+            android_options,
+            textvariable=android_release_var,
+            values=(),
+            state="readonly",
+            width=24,
+        )
+        android_release_box.grid(row=0, column=1, sticky="ew")
+        android_options.columnconfigure(1, weight=1)
+        android_options.grid_remove()
+        release_tags = None
+
+        def update_android_runtime_choices(*_args):
+            nonlocal release_tags
+            if platform_var.get() != "android":
+                android_options.grid_remove()
+                return
+            android_options.grid()
+            if release_tags is None:
+                try:
+                    release_tags = list_template_release_tags()
+                except (OSError, ValueError, RuntimeError) as error:
+                    messagebox.showerror(
+                        "Android Runtime Versions",
+                        f"Could not load VN Engine releases from GitHub:\n{error}",
+                        parent=dialog,
+                    )
+                    android_release_box.configure(values=())
+                    android_release_var.set("")
+                    return
+            if not release_tags:
+                android_release_box.configure(values=())
+                android_release_var.set("")
+                messagebox.showerror(
+                    "Android Runtime Versions",
+                    "No published GitHub release contains a Web runtime template.",
+                    parent=dialog,
+                )
+                return
+            android_release_box.configure(values=release_tags)
+            editor_tag = self._editor_release_tag()
+            recommended = editor_tag if editor_tag in release_tags else release_tags[0]
+            android_release_label.configure(text=f"Runtime release (recommended: {recommended})")
+            if android_release_var.get() not in release_tags:
+                android_release_var.set(recommended)
+
         button_row = ttk.Frame(body)
-        button_row.grid(row=4, column=0, columnspan=3, sticky="e")
+        button_row.grid(row=5, column=0, columnspan=3, sticky="e")
         ttk.Button(button_row, text="Cancel", command=dialog.destroy).pack(side="right")
 
         def run_export():
@@ -3322,6 +3467,14 @@ while ($true) {{
             platform = platform_var.get()
             if not output_value or not template_value:
                 messagebox.showerror("Export Game", "Choose a templates folder and output file.", parent=dialog)
+                return
+            android_release_tag = android_release_var.get() if platform == "android" else None
+            if platform == "android" and not android_release_tag:
+                messagebox.showerror(
+                    "Export Game",
+                    "Select an available Android runtime release.",
+                    parent=dialog,
+                )
                 return
             target = Path(output_value)
             output_extension = ".apk" if platform == "android" else ".zip"
@@ -3340,6 +3493,7 @@ while ($true) {{
                     Path(template_value),
                     platform,
                     target,
+                    android_release_tag,
                 )
             except (OSError, ValueError, RuntimeError, json.JSONDecodeError, subprocess.SubprocessError) as error:
                 messagebox.showerror("Export Game", str(error), parent=dialog)
@@ -3357,6 +3511,7 @@ while ($true) {{
             output_var.set(str(current.with_name(f"{game_name}-{platform_var.get()}{extension}")))
 
         platform_var.trace_add("write", update_output_name)
+        platform_var.trace_add("write", update_android_runtime_choices)
         platform_box.bind("<<ComboboxSelected>>", update_output_name)
         dialog.bind("<Return>", lambda _event: run_export())
         dialog.bind("<Escape>", lambda _event: dialog.destroy())
@@ -3365,10 +3520,11 @@ while ($true) {{
         dialog.grab_set()
         dialog.wait_visibility()
         dialog.focus_set()
+        update_android_runtime_choices()
 
     def _browse_export_folder(self, parent, variable):
         selected = filedialog.askdirectory(
-            title="Choose templates folder",
+            title="Choose local templates folder",
             initialdir=variable.get() or self.project_root,
             parent=parent,
         )
@@ -3390,7 +3546,7 @@ while ($true) {{
             variable.set(selected)
 
     def close(self):
-        if not self._confirm_discard_or_save():
+        if not self._confirm_discard_or_save("closing the editor"):
             return
         self._stop_test_play()
         self._stop_terminal()
@@ -3406,18 +3562,29 @@ def main():
     parser = argparse.ArgumentParser(description="VN Engine story and project editor")
     parser.add_argument("--project-dir", type=Path, help="Project folder containing data/ and assets/")
     args = parser.parse_args()
-    if args.project_dir is not None:
-        root_path = project_root_from(args.project_dir)
-    else:
-        root_path = project_root_from(Path.cwd())
-        if not ((root_path / "data").is_dir() or (root_path / "assets").is_dir()):
-            root_path = project_root_from(editor_package_root(Path(sys.argv[0])))
+    package_root = editor_package_root(Path(sys.argv[0]))
+    try:
+        last_project = None if args.project_dir is not None else _load_last_project()
+        root_path = _initial_project_root(args.project_dir, Path.cwd(), package_root, last_project)
+        if args.project_dir is None and not _contains_project(root_path):
+            install_starter_project(root_path, _editor_release_tag(package_root))
+    except (OSError, RuntimeError, ValueError) as error:
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showerror(
+            APP_TITLE,
+            f"Could not prepare the project:\n{error}",
+            parent=root,
+        )
+        root.destroy()
+        return 1
     root = tk.Tk()
     VNEditorApp(root, root_path)
     root.mainloop()
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
 
 

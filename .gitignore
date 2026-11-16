@@ -18,6 +18,7 @@ tests/
 yaml-helper/
 feedback.email
 *.pyc
+docs/releasing.md
 
 !engine/assets/
 !engine/data/

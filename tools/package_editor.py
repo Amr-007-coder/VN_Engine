@@ -1,9 +1,9 @@
-"""Package a platform-native VN_Editor build with a starter project and game templates."""
+"""Package a platform-native VN_Editor build."""
 
 import argparse
-import json
 import os
 from pathlib import Path, PurePosixPath
+import re
 import shutil
 import stat
 import tempfile
@@ -11,7 +11,7 @@ from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 
 PLATFORMS = {"windows", "linux", "macos"}
-TEMPLATE_PLATFORMS = PLATFORMS | {"web"}
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DOCUMENTS = (
     (Path("docs/guide_vn-engine.md"), "docs/guide_vn-engine.md"),
     (Path("docs/project-config.md"), "docs/project-config.md"),
@@ -48,41 +48,6 @@ def _find_editor_build(platform: str, build_root: Path) -> Path:
     return matches[0]
 
 
-def _write_starter_project(root: Path) -> None:
-    (root / "assets").mkdir()
-    data = root / "data"
-    data.mkdir()
-    (data / "story.yaml").write_text(
-        "title: My Visual Novel\n"
-        "start: opening\n"
-        "dialogues:\n"
-        "  opening:\n"
-        "    chapter: Chapter 1\n"
-        "    speaker: Narrator\n"
-        "    active_character: null\n"
-        "    text: Replace this line with your opening dialogue.\n",
-        encoding="utf-8",
-        newline="\n",
-    )
-    project = {
-        "name": "My Visual Novel",
-        "story": "story.yaml",
-        "icon": None,
-        "android": {
-            "app_name": "VN Engine",
-            "app_id": "com.example.vnengine",
-            "orientation": "landscape",
-        },
-        "save_slots": 5,
-        "paths": {"data": "data", "assets": "assets", "user_data": "user_data"},
-    }
-    (data / "project.json").write_text(
-        json.dumps(project, ensure_ascii=True, indent=2) + "\n",
-        encoding="utf-8",
-        newline="\n",
-    )
-
-
 def _copy_docs(root: Path) -> None:
     readme = Path("docs/README.md")
     if readme.is_file():
@@ -95,15 +60,15 @@ def _copy_docs(root: Path) -> None:
         shutil.copy2(source, target)
 
 
-def _copy_game_templates(templates_dir: Path, root: Path, template_platforms: set[str]) -> None:
-    destination = root / "templates"
-    destination.mkdir()
-    for platform in sorted(template_platforms):
-        name = f"template-{platform}.zip"
-        source = templates_dir / name
-        if not source.is_file():
-            raise FileNotFoundError(f"Required game template is missing: {source}")
-        shutil.copy2(source, destination / name)
+def _write_editor_version(root: Path) -> None:
+    version_file = PROJECT_ROOT / "engine" / "data" / "version.txt"
+    try:
+        version = version_file.read_text(encoding="utf-8").strip()
+    except OSError as error:
+        raise RuntimeError(f"Could not read the editor version from {version_file}: {error}") from error
+    if not re.fullmatch(r"\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?", version):
+        raise ValueError(f"Invalid editor version in {version_file}: {version!r}")
+    (root / "engine-version.txt").write_text(f"{version}\n", encoding="utf-8", newline="\n")
 
 
 def _main_executable_path(platform: str) -> str:
@@ -148,20 +113,11 @@ def _write_zip_entry(archive: ZipFile, path: Path, root: Path, platform: str) ->
 def package_editor(
     platform: str,
     build_root: Path,
-    templates_dir: Path,
     output: Path,
-    template_platforms: set[str] | None = None,
 ) -> Path:
     if platform not in PLATFORMS:
         raise ValueError(f"Platform must be one of: {', '.join(sorted(PLATFORMS))}.")
-    if template_platforms is None:
-        template_platforms = set(PLATFORMS)
-        if (templates_dir / "template-web.zip").is_file():
-            template_platforms.add("web")
-    if not template_platforms or not template_platforms <= TEMPLATE_PLATFORMS:
-        raise ValueError(f"Template platforms must be selected from: {', '.join(sorted(TEMPLATE_PLATFORMS))}.")
     build_root = build_root.resolve()
-    templates_dir = templates_dir.resolve()
     output = output.resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     editor_build = _find_editor_build(platform, build_root)
@@ -173,8 +129,7 @@ def package_editor(
             shutil.copytree(editor_build, staging / "VN_Editor.app", symlinks=True)
         else:
             shutil.copy2(editor_build, staging / editor_build.name)
-        _copy_game_templates(templates_dir, staging, template_platforms)
-        _write_starter_project(staging)
+        _write_editor_version(staging)
         _copy_docs(staging)
 
         temporary_output = output.with_name(f".{output.name}.tmp")
@@ -192,26 +147,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--platform", choices=sorted(PLATFORMS), required=True)
     parser.add_argument("--build-dir", type=Path, default=Path("dist/editor-build"))
-    parser.add_argument("--templates-dir", type=Path, default=Path("templates"))
-    parser.add_argument(
-        "--template-platforms",
-        help="Comma-separated templates to include (windows,linux,macos,web; default: available templates).",
-    )
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
-    template_platforms = None
-    if args.template_platforms:
-        template_platforms = {value.strip() for value in args.template_platforms.split(",") if value.strip()}
-        if len(template_platforms) != len(args.template_platforms.split(",")):
-            parser.error("--template-platforms must be a comma-separated list without empty entries.")
-        if not template_platforms <= TEMPLATE_PLATFORMS:
-            parser.error(f"--template-platforms choices are: {', '.join(sorted(TEMPLATE_PLATFORMS))}.")
     output = package_editor(
         args.platform,
         args.build_dir,
-        args.templates_dir,
         args.output,
-        template_platforms,
     )
     print(f"Created {output}")
     return 0

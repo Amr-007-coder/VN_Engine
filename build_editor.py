@@ -78,6 +78,7 @@ def main() -> int:
         "--jobs=4",
         "--include-package=yaml",
         "--include-module=export_pipeline",
+        "--include-module=template_repository",
         "--include-module=engine.validator",
         "--python-flag=no_docstrings",
     ]

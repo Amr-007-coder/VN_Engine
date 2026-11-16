@@ -1,34 +1,26 @@
 # VN Engine
 
-The downloadable VN_Editor package is available for Windows, Linux, and macOS. Each platform ZIP contains its native editor app, the game runtime templates included with that package, a starter `assets/` folder, `data/`, and the user guides. The Web runtime template is included for browser and Android exports. Creators do not need Python, Pygame, Pygbag, Nuitka, or a compiler installed to use the editor.
+The downloadable VN_Editor package is available for Windows, Linux, and macOS. Each platform ZIP contains its native editor app, the editor version, and the user guides. The starter project is a separate GitHub Release asset and is installed under `Documents/VN Engine Projects/My Visual Novel` only if that folder does not already exist. Existing projects and their configuration are left untouched. Game runtime templates download from GitHub Releases on first use and are cached locally. Creators do not need Python, Pygame, Pygbag, Nuitka, or a compiler installed to use the editor.
 
 ## Start here
 
 1. Extract the ZIP for your computer to a folder you can write to.
-2. Launch the editor for that platform: `VN_Editor.exe` on Windows, `VN_Editor` on Linux, or `VN_Editor.app` on macOS.
-3. Edit `data/story.yaml`, `data/project.json`, and files under `assets/`. The starter project is ready to edit.
+2. Launch the editor for that platform: `VN_Editor.exe` on Windows, `VN_Editor` on Linux, or `VN_Editor.app` on macOS. If the default starter-project folder does not exist, the editor downloads and installs the released starter project.
+3. Edit `data/story.yaml`, `data/project.json`, and files under `assets/` in the project folder. The starter project is ready to edit.
 4. Click **Test Play** to run the project with a temporary copy of the engine runtime for your current OS.
 5. Click **Export Game** to create a Windows, Linux, macOS, browser, or Android build.
 
-The extracted editor package has this layout; it contains one platform-specific editor app:
+The extracted editor package contains one platform-specific editor app and does not contain project data:
 
 ```text
-MyVisualNovel/
+VN_Editor/
   VN_Editor.exe             # Windows; Linux uses VN_Editor, macOS uses VN_Editor.app/
-  templates/
-    template-windows.zip      # Optional target supplied with this editor package
-    template-linux.zip        # Optional target supplied with this editor package
-    template-macos.zip        # Optional target supplied with this editor package
-    template-web.zip          # Pygbag runtime used for Web and Android exports
-  assets/                   # Project art, sound, music, fonts, and character art
-  data/
-    project.json            # Project name, menus, settings, and theme
-    story.yaml              # Starter story
+  engine-version.txt        # Version used to recommend a matching Android runtime release
   readme.md
   docs/                     # The included Markdown guides
 ```
 
-The editor and `templates/` are tools for authoring and running the project. Edit `assets/` and `data/`; Test Play and game export use temporary or output folders and do not require moving files into the editor app.
+The starter project is stored separately at `Documents/VN Engine Projects/My Visual Novel`. The editor initializes it only if that folder does not exist; later launches preserve its `data/project.json` and all other user files. Use **Open Project** to work on another project folder. Test Play and game export use temporary or output folders. Runtime templates are downloaded on demand from GitHub Releases and cached in the user's local cache.
 
 ## What the engine provides
 
@@ -40,7 +32,7 @@ The editor and `templates/` are tools for authoring and running the project. Edi
 - A touch-friendly pause button during gameplay, alongside the Escape key on desktop.
 - Project-level menu labels, window size, intro cards, credits, textbox image/color, and a declarative menu theme.
 - Story validation and a character-asset inventory from the command line.
-- An editor export pipeline for Windows, Linux, macOS, and browser game archives using prebuilt templates, plus Android APKs built from the bundled Web runtime template.
+- An editor export pipeline for Windows, Linux, macOS, and browser game archives using downloaded prebuilt templates, plus Android APKs built from a selected GitHub release.
 
 The [story format reference](./story-format.md) explains how to write each feature. The [project configuration reference](./project-config.md) explains `data/project.json`, application icons, and theme options.
 
@@ -66,9 +58,9 @@ The dialogue textbox can use a project image, a project color, or both. Configur
 
 The editor opens the configured story, each YAML file named by `includes`, and `data/project.json` in separate tabs. It provides YAML/JSON highlighting, engine-specific key and asset suggestions (`Ctrl+Space`), live diagnostics, an expandable Asset hierarchy, and read-only tabs for Markdown guides. `Ctrl+F` searches the selected tab. `Ctrl+S` saves the current file; `Ctrl+Shift+S` saves the open story files and project configuration.
 
-**Test Play** saves and checks the project, prepares a temporary game using the current platform's runtime template and project files, then launches it. The temporary folder is removed when the game closes or the editor exits. Test Play stores settings and saves in that temporary folder, so it does not change the project's normal save data. The editor package needs the matching Windows, Linux, or macOS template for Test Play on that computer.
+**Test Play** saves and checks the project, downloads the current platform's runtime template if needed, prepares a temporary game using the template and project files, then launches it. The temporary game folder is removed when the game closes or the editor exits. Test Play stores settings and saves in that temporary folder, so it does not change the project's normal save data.
 
-**Export Game** saves and checks the project. Desktop exports embed the project's `assets/` and `data/` files in the game executable and include a platform shortcut: a Windows `.lnk`, a relative Linux symbolic link, or a macOS app-bundle symbolic link. Web exports create a static website ZIP. Android exports create a new project-specific Web archive from the bundled `template-web.zip`, then package it as a Capacitor APK; they do not reuse a previously exported `web.zip`. Android export requires Node.js/npm, a Java JDK, the Android SDK, and an internet connection for Android build dependencies. Web and Android project audio must use OGG files (`.ogg`).
+**Export Game** saves and checks the project. Desktop exports embed the project's `assets/` and `data/` files in the game executable and include a platform shortcut: a Windows `.lnk`, a relative Linux symbolic link, or a macOS app-bundle symbolic link. Web exports create a static website ZIP. Runtime templates download from GitHub Releases on demand and remain cached locally. Android exports let you choose a published runtime release, recommend the version matching the editor, fetch the matching engine source temporarily, and create a fresh project-specific Web archive before packaging it as a Capacitor APK; they do not reuse a previously exported `web.zip`. Android export requires Node.js/npm, a Java JDK, the Android SDK, and an internet connection. Web and Android project audio must use OGG files (`.ogg`).
 
 The command pane uses PowerShell on Windows and the available bash, zsh, or sh shell on Linux/macOS. It starts in the project folder and keeps its working directory as commands run. Use **Restart** to reopen the shell.
 

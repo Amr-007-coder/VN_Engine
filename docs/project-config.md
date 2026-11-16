@@ -6,18 +6,12 @@ The project configuration is optional. If it is missing, the engine loads its bu
 
 ## Project folder and path rules
 
-The project root is the folder containing `assets/` and `data/`. In the downloadable editor package, the starter project is beside the platform-specific editor app and its `templates/` folder. You can also open any other project folder from VN_Editor.
+The project root is the folder containing `assets/` and `data/`. If `Documents/VN Engine Projects/My Visual Novel` does not exist when VN_Editor starts without another project selected, the editor installs the starter project from its GitHub Release archive there. It leaves an existing folder and its `data/project.json` untouched. You can also open any other project folder from VN_Editor.
 
-The editor package includes `templates/template-web.zip`. Keep it with the editor: it supplies the Pygbag runtime for Web and Android exports. It is an editor runtime template, not part of your project’s `assets/` or `data/`.
+Runtime templates are downloaded from the public GitHub Releases on demand and cached in the user's local cache. They are editor runtime files, not part of your project's `assets/` or `data/`.
 
 ```text
-MyVisualNovel/
-  VN_Editor.exe                 # Windows; Linux uses VN_Editor, macOS uses VN_Editor.app/
-  templates/
-    template-windows.zip
-    template-linux.zip
-    template-macos.zip
-    template-web.zip              # Editor package runtime for Web and Android exports
+My Visual Novel/
   assets/
   data/
     project.json
@@ -172,7 +166,7 @@ The default Windows game executable uses `engine/assets/images/logo.ico`; the VN
 
 ## Android export
 
-Choose **Android** in the editor's **Export Game** dialog to create a new project-specific Web archive from the bundled `template-web.zip`, then build it as a Capacitor debug APK. The editor does not reuse a previously exported `web.zip` and does not require Python or Pygbag to be installed. The Pygbag runtime is the version bundled with the editor package; Node.js/npm, a Java JDK, and the Android SDK are still required, and Android build dependencies are downloaded from the internet. The temporary Web archive and Capacitor project are removed after export; the output is just the `.apk`. The standalone engine CLI also uses `template-web.zip` by default.
+Choose **Android** in the editor's **Export Game** dialog to create a new project-specific Web archive, then build it as a Capacitor debug APK. The editor offers published runtime releases and recommends the release matching its own version. It downloads that release's Web template and temporarily fetches the matching engine source from GitHub; it does not reuse a previously exported `web.zip` or require Python or Pygbag to be installed. Node.js/npm, a Java JDK, the Android SDK, and an internet connection are required. The temporary Web archive, downloaded source, and Capacitor project are removed after export; the output is just the `.apk`. The standalone engine CLI uses the latest published runtime release by default.
 
 ```json
 "android": {

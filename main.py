@@ -40,7 +40,10 @@ def main():
     argument_parser.add_argument(
         "--templates-dir",
         type=Path,
-        help="Folder containing the selected platform template (default: engine/project templates folder)",
+        help=(
+            "Folder containing local platform templates (default: engine/project templates folder); "
+            "missing desktop/Web templates download from GitHub Releases"
+        ),
     )
     argument_parser.add_argument("--story", help="Override the YAML story filename from data/project.json")
     argument_parser.add_argument("--validate", action="store_true", help="Validate the story and exit")

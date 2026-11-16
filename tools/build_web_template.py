@@ -1,17 +1,13 @@
 """Build a reusable Pygbag static-site template for VN Engine projects."""
 
 import argparse
-from copy import copy
 import importlib.util
-from io import BytesIO
 import json
 import os
 from pathlib import Path
-import py_compile
 import shutil
 import subprocess
 import sys
-import tarfile
 import tempfile
 from urllib.request import Request, urlopen
 from zipfile import ZIP_DEFLATED, ZipFile
@@ -25,8 +21,6 @@ PYGBAG_PYGAME_WHEEL = "cp312/pygame_ce-2.5.7-cp312-cp312-wasm32_bi_emscripten.wh
 BROWSERFS_SCRIPT_URL = "https://cdnjs.cloudflare.com/ajax/libs/BrowserFS/1.4.3/browserfs.min.js"
 PYGBAG_BROWSERFS_SCRIPT_URL = f"{PYGBAG_CDN_URL}/browserfs.min.js"
 LOCAL_RUNTIME_ROOT = f"./runtime/{PYGBAG_RUNTIME_VERSION}/"
-WEB_MAIN_ARCHIVE_PATH = "assets/main.py"
-WEB_MAIN_STUB = "import engine._web_main\n"
 SERVICE_WORKER_BLOCK = f"""    <script>
 /*
         if (navigator.serviceWorker)
@@ -190,124 +184,6 @@ def _convert_engine_audio(app_root: Path) -> None:
         source.unlink()
 
 
-def _require_cpython_312() -> None:
-    if sys.implementation.name != "cpython" or sys.version_info[:2] != (3, 12):
-        raise RuntimeError(
-            "The Web template must be built with CPython 3.12 so its bytecode matches the bundled runtime."
-        )
-
-
-def _compile_runtime_bytecode(app_root: Path) -> dict[str, bytes]:
-    _require_cpython_312()
-    compiled_files = {}
-    for package_root in (app_root / "engine", app_root / "yaml"):
-        for source in sorted(package_root.rglob("*.py"), key=lambda item: item.as_posix().casefold()):
-            if "__pycache__" in source.parts:
-                continue
-            relative = source.relative_to(app_root).as_posix()
-            bytecode = source.with_suffix(".pyc")
-            py_compile.compile(
-                str(source),
-                cfile=str(bytecode),
-                dfile=relative,
-                doraise=True,
-            )
-            compiled_files[f"assets/{bytecode.relative_to(app_root).as_posix()}"] = bytecode.read_bytes()
-
-    entrypoint_bytecode = app_root / "engine" / "_web_main.pyc"
-    py_compile.compile(
-        str(PROJECT_ROOT / "web_main.py"),
-        cfile=str(entrypoint_bytecode),
-        dfile="engine/_web_main.py",
-        doraise=True,
-    )
-    compiled_files[f"assets/{entrypoint_bytecode.relative_to(app_root).as_posix()}"] = (
-        entrypoint_bytecode.read_bytes()
-    )
-    return compiled_files
-
-
-def _compiled_source_names(compiled_files: dict[str, bytes]) -> set[str]:
-    return {name[:-1] for name in compiled_files if name.endswith(".pyc")}
-
-
-def _rewrite_runtime_zip(
-    archive_data: bytes,
-    compiled_files: dict[str, bytes],
-) -> bytes:
-    compiled_sources = _compiled_source_names(compiled_files)
-    buffer = BytesIO()
-    main_found = False
-    with ZipFile(BytesIO(archive_data), "r") as source:
-        existing_names = {item.filename.replace("\\", "/") for item in source.infolist()}
-        collisions = existing_names.intersection(compiled_files)
-        if collisions:
-            raise RuntimeError(f"The Pygbag archive already contains compiled modules: {', '.join(sorted(collisions))}.")
-        with ZipFile(buffer, "w", compression=ZIP_DEFLATED, compresslevel=6) as destination:
-            for item in source.infolist():
-                name = item.filename.replace("\\", "/")
-                if name in compiled_sources:
-                    continue
-                if name == WEB_MAIN_ARCHIVE_PATH:
-                    main_found = True
-                    content = WEB_MAIN_STUB.encode("utf-8")
-                elif name.casefold().startswith("assets/") and name.casefold().endswith(".py"):
-                    raise RuntimeError(f"Uncompiled Python source remains in the Pygbag archive: {name}")
-                else:
-                    content = source.read(item) if not item.is_dir() else b""
-                destination.writestr(item, content)
-            if not main_found:
-                raise RuntimeError(f"The Pygbag archive does not contain {WEB_MAIN_ARCHIVE_PATH}.")
-            for name, content in sorted(compiled_files.items()):
-                destination.writestr(name, content, compress_type=ZIP_DEFLATED)
-    return buffer.getvalue()
-
-
-def _rewrite_runtime_tar_gz(
-    archive_data: bytes,
-    compiled_files: dict[str, bytes],
-) -> bytes:
-    compiled_sources = _compiled_source_names(compiled_files)
-    buffer = BytesIO()
-    main_found = False
-    with tarfile.open(fileobj=BytesIO(archive_data), mode="r:gz") as source:
-        members = source.getmembers()
-        existing_names = {member.name.replace("\\", "/") for member in members}
-        collisions = existing_names.intersection(compiled_files)
-        if collisions:
-            raise RuntimeError(f"The Pygbag archive already contains compiled modules: {', '.join(sorted(collisions))}.")
-        with tarfile.open(fileobj=buffer, mode="w:gz", format=tarfile.PAX_FORMAT) as destination:
-            for member in members:
-                name = member.name.replace("\\", "/")
-                if name in compiled_sources:
-                    continue
-                if name == WEB_MAIN_ARCHIVE_PATH:
-                    if not member.isfile():
-                        raise RuntimeError(f"The Pygbag archive entry {name} is not a regular file.")
-                    main_found = True
-                    content = BytesIO(WEB_MAIN_STUB.encode("utf-8"))
-                    replacement = copy(member)
-                    replacement.size = content.getbuffer().nbytes
-                    destination.addfile(replacement, content)
-                elif name.casefold().startswith("assets/") and name.casefold().endswith(".py"):
-                    raise RuntimeError(f"Uncompiled Python source remains in the Pygbag archive: {name}")
-                elif member.isfile():
-                    content = source.extractfile(member)
-                    if content is None:
-                        raise RuntimeError(f"Could not read Pygbag archive entry: {name}")
-                    destination.addfile(copy(member), content)
-                else:
-                    destination.addfile(copy(member))
-            if not main_found:
-                raise RuntimeError(f"The Pygbag archive does not contain {WEB_MAIN_ARCHIVE_PATH}.")
-            for name, payload in sorted(compiled_files.items()):
-                info = tarfile.TarInfo(name)
-                info.size = len(payload)
-                info.mode = 0o644
-                destination.addfile(info, BytesIO(payload))
-    return buffer.getvalue()
-
-
 def _download_runtime_file(url: str, destination: Path) -> None:
     request = Request(url, headers={"User-Agent": "VN-Engine web template builder"})
     with urlopen(request, timeout=120) as response:
@@ -447,7 +323,6 @@ def _write_starter_project(app_root: Path) -> None:
 def build_template(output: Path) -> Path:
     if importlib.util.find_spec("pygbag") is None:
         raise RuntimeError("Pygbag is not installed. Install requirements.txt first.")
-    _require_cpython_312()
     output = output.expanduser()
     if not output.is_absolute():
         output = PROJECT_ROOT / output
@@ -493,16 +368,6 @@ def build_template(output: Path) -> Path:
         else:
             _vendor_web_runtime(web_root)
 
-        runtime_archive = web_root / "vn-engine-web.tar.gz"
-        app_archives = list(web_root.glob("*.apk"))
-        if not runtime_archive.is_file():
-            raise FileNotFoundError(f"Pygbag did not create its application archive: {runtime_archive}")
-        if len(app_archives) != 1:
-            raise FileNotFoundError(f"Expected one Pygbag .apk archive under {web_root}; found {len(app_archives)}.")
-        compiled_files = _compile_runtime_bytecode(app_root)
-        app_archives[0].write_bytes(_rewrite_runtime_zip(app_archives[0].read_bytes(), compiled_files))
-        runtime_archive.write_bytes(_rewrite_runtime_tar_gz(runtime_archive.read_bytes(), compiled_files))
-
         index_path = web_root / "index.html"
         index_html = index_path.read_text(encoding="utf-8")
         if SERVICE_WORKER_BLOCK in index_html:
@@ -531,6 +396,9 @@ def build_template(output: Path) -> Path:
         else:
             index_html += f"\n{LOADER_STYLE}\n"
         index_path.write_text(index_html, encoding="utf-8", newline="\n")
+        app_archives = list(web_root.glob("*.apk"))
+        if len(app_archives) != 1:
+            raise FileNotFoundError(f"Expected one Pygbag .apk archive under {web_root}; found {len(app_archives)}.")
 
         temporary_output = output.with_name(f".{output.name}.tmp")
         try:

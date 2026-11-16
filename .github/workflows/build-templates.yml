@@ -1,4 +1,4 @@
-name: Build selected game templates and editor packages
+name: Build selected release templates and editor packages
 
 on:
   push:
@@ -15,10 +15,7 @@ jobs:
     outputs:
       platforms: ${{ steps.options.outputs.platforms }}
       platform_csv: ${{ steps.options.outputs.platform_csv }}
-      editor_template_csv: ${{ steps.options.outputs.editor_template_csv }}
-      internal_web_template: ${{ steps.options.outputs.internal_web_template }}
       build_editor: ${{ steps.options.outputs.build_editor }}
-      build_android_apk: ${{ steps.options.outputs.build_android_apk }}
       matrix: ${{ steps.options.outputs.matrix }}
     steps:
       - uses: actions/checkout@v4
@@ -82,66 +79,33 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.platform == 'web' && needs.release-options.outputs.internal_web_template == 'true' && 'vn-android-web-template' || format('template-{0}', matrix.platform) }}
+          name: template-${{ matrix.platform }}
           path: templates/template-${{ matrix.platform }}.zip
           if-no-files-found: error
 
-  build-android-apk:
-    name: Build Android APK
-    needs: [release-options, build-template]
-    if: needs.release-options.outputs.build_android_apk == 'true'
+  build-starter-project:
+    name: Package starter project
+    needs: release-options
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
-          cache: pip
-          cache-dependency-path: requirements.txt
+          python-version: "3.12"
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '21'
-
-      - uses: android-actions/setup-android@v4
-
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: template-*
-          path: templates
-          merge-multiple: true
-
-      - uses: actions/download-artifact@v4
-        if: needs.release-options.outputs.internal_web_template == 'true'
-        with:
-          name: vn-android-web-template
-          path: templates
-
-      - name: Install Android SDK platform
-        run: |
-          sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0"
-
-      - name: Install build dependencies
-        run: python -m pip install -r requirements.txt
-
-      - name: Build fresh Android app
-        run: python main.py --build-game --platform android --templates-dir templates --output-dir exports
+      - name: Package starter project
+        run: python tools/package_starter_project.py --output exports/VN_Engine-Starter-Project.zip
 
       - uses: actions/upload-artifact@v4
         with:
-          name: vn-engine-android-apk
-          path: exports/*.apk
+          name: vn-engine-starter-project
+          path: exports/VN_Engine-Starter-Project.zip
           if-no-files-found: error
 
   build-editor:
     name: Build VN_Editor for ${{ matrix.platform }}
-    needs: [release-options, build-template]
+    needs: release-options
     if: needs.release-options.outputs.build_editor == 'true'
     strategy:
       fail-fast: false
@@ -176,18 +140,6 @@ jobs:
         if: runner.os != 'Linux'
         run: python -m pip install -r requirements.txt
 
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: template-*
-          path: templates
-          merge-multiple: true
-
-      - uses: actions/download-artifact@v4
-        if: needs.release-options.outputs.internal_web_template == 'true'
-        with:
-          name: vn-android-web-template
-          path: templates
-
       - name: Build Linux editor
         if: matrix.platform == 'linux'
         run: .editor-venv/bin/python build_editor.py --output-dir build/editor
@@ -200,16 +152,14 @@ jobs:
         if: matrix.platform == 'linux'
         run: >-
           .editor-venv/bin/python tools/package_editor.py --platform linux
-          --build-dir build/editor --templates-dir templates
-          --template-platforms "${{ needs.release-options.outputs.editor_template_csv }}"
+          --build-dir build/editor
           --output exports/VN_Editor-linux.zip
 
       - name: Package Windows or macOS editor
         if: matrix.platform != 'linux'
         run: >-
           python tools/package_editor.py --platform ${{ matrix.platform }}
-          --build-dir build/editor --templates-dir templates
-          --template-platforms "${{ needs.release-options.outputs.editor_template_csv }}"
+          --build-dir build/editor
           --output exports/VN_Editor-${{ matrix.platform }}.zip
 
       - uses: actions/upload-artifact@v4
@@ -219,14 +169,14 @@ jobs:
           if-no-files-found: error
 
   publish-release-assets:
-    name: Attach selected templates and editor packages to release
-    needs: [release-options, build-template, build-editor, build-android-apk]
+    name: Attach selected templates, starter project, and editor packages
+    needs: [release-options, build-template, build-starter-project, build-editor]
     if: >-
       always() &&
       needs.release-options.result == 'success' &&
       needs.build-template.result == 'success' &&
-      (needs.build-editor.result == 'success' || needs.build-editor.result == 'skipped') &&
-      (needs.build-android-apk.result == 'success' || needs.build-android-apk.result == 'skipped')
+      needs.build-starter-project.result == 'success' &&
+      (needs.build-editor.result == 'success' || needs.build-editor.result == 'skipped')
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/download-artifact@v4
@@ -236,17 +186,16 @@ jobs:
           merge-multiple: true
 
       - uses: actions/download-artifact@v4
+        with:
+          name: vn-engine-starter-project
+          path: release-assets
+
+      - uses: actions/download-artifact@v4
         if: needs.release-options.outputs.build_editor == 'true'
         with:
           pattern: vn-editor-*
           path: release-assets
           merge-multiple: true
-
-      - uses: actions/download-artifact@v4
-        if: needs.release-options.outputs.build_android_apk == 'true'
-        with:
-          name: vn-engine-android-apk
-          path: release-assets
 
       - uses: softprops/action-gh-release@v2
         with:

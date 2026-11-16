@@ -1,30 +1,22 @@
 # VN Engine user guide
 
-This guide takes you from the platform-specific VN_Editor download to a playable project and a shareable game. Editor packages include selected Windows, Linux, and macOS runtime templates, plus the Web runtime template for browser and Android exports. Creators do not need Python, Pygame, Pygbag, Nuitka, or a compiler installed to use the editor.
+This guide takes you from the platform-specific VN_Editor download to a playable project and a shareable game. Runtime templates download from the public GitHub Releases on demand and are cached locally. Creators do not need Python, Pygame, Pygbag, Nuitka, or a compiler installed to use the editor.
 
 ## 1. Extract and open the editor package
 
-Extract the ZIP for your computer to a folder you can write to. Keep its project folders together. Launch the platform-specific editor app: `VN_Editor.exe` on Windows, `VN_Editor` on Linux, or `VN_Editor.app` on macOS.
+Extract the ZIP for your computer to a folder you can write to. Launch the platform-specific editor app: `VN_Editor.exe` on Windows, `VN_Editor` on Linux, or `VN_Editor.app` on macOS. If `Documents/VN Engine Projects/My Visual Novel` does not exist, the editor downloads and installs the released starter project there.
 
 The macOS editor app is not signed or notarized. If macOS blocks it on first launch, Control-click `VN_Editor.app` in Finder and choose **Open**.
 
 ```text
-MyVisualNovel/                 # Project and editor package root
+VN_Editor/                     # Editor package root
   VN_Editor.exe                # Windows; Linux uses VN_Editor, macOS uses VN_Editor.app/
-  templates/
-    template-windows.zip       # Prebuilt game runtimes used by Test Play and Export Game
-    template-linux.zip
-    template-macos.zip
-    template-web.zip           # Pygbag runtime used for Web and Android exports
-  assets/                      # Project art and audio
-  data/
-    project.json               # Project settings
-    story.yaml                 # Starter story
+  engine-version.txt           # Used to recommend a matching Android runtime release
   readme.md
   docs/                        # This guide and the other Markdown references
 ```
 
-The folder containing `assets/` and `data/` is the project root. The editor opens this packaged starter project automatically. Keep the `templates/` folder with the editor; its `template-web.zip` supplies the runtime for browser and Android exports. Use **Open Project** to select another project folder.
+The starter project is separate from the editor package. Its folder containing `assets/` and `data/` is the project root. The editor installs it only when the default project folder does not already exist; if that folder is present, all of its files remain untouched. VN_Editor remembers the last project folder and reopens it on the next launch. A project folder you launch from or pass with `--project-dir` takes precedence. Use **Open Project** to select another project folder. Runtime templates are downloaded from GitHub Releases when needed; local or custom templates can still be selected in the export dialog.
 
 ## 2. Write a story and add assets
 
@@ -133,15 +125,15 @@ The credits menu lists the project’s configured `credits` and also includes th
 
 ## 7. Share the editable project
 
-To let someone play or continue editing, share the complete project folder with `data/project.json`, the configured `data/` and `assets/` folders, and every YAML file named by `includes`. Recipients can open that folder from VN_Editor. Include the editor package when they also need the authoring tools; its `templates/` folder provides Test Play and desktop/Web/Android exports for the platforms included in the package.
+To let someone play or continue editing, share the complete project folder with `data/project.json`, the configured `data/` and `assets/` folders, and every YAML file named by `includes`. Recipients can open that folder from VN_Editor. Include the editor package when they also need the authoring tools; its editor downloads the required runtime templates from GitHub Releases.
 
-The editor ZIP includes its available game runtime templates under `templates/`. Test Play requires the template for the computer's current OS; desktop exports require the template for the selected target. Web and Android exports use `template-web.zip`, which is included with the editor package.
+Templates download only when needed and are cached locally. Test Play downloads the runtime template for the computer's current OS; desktop and Web exports download the selected target template. Android downloads the selected release's Web template.
 
 ## 8. Export a desktop, browser, or Android game
 
-Windows, Linux, and macOS exports use a prebuilt runtime template. Built-in engine assets and data are compiled into each template executable. The project's own `assets/` and `data/` files are embedded in the exported game executable, so the computer doing the export needs no compiler. You can export for another desktop OS when that target's template is included in the editor package.
+Windows, Linux, and macOS exports use a prebuilt runtime template. Built-in engine assets and data are compiled into each template executable. The project's own `assets/` and `data/` files are embedded in the exported game executable, so the computer doing the export needs no compiler. The selected template downloads from GitHub Releases on first use and is cached locally.
 
-An editor package contains only the runtime templates supplied with it. If a desktop or Web target is unavailable in the export dialog, its template is not present. The editor also searches beside its application and in the project folder. If you move templates, use **Browse** in the export dialog to select their folder.
+The editor also searches local folders for custom templates. If you have your own template ZIPs, use **Browse** in the export dialog to select their folder; otherwise the editor retrieves templates from GitHub Releases.
 
 To export in the editor:
 
@@ -173,13 +165,13 @@ macOS:
 
 The optional `icon` field in `data/project.json` sets the exported game's window icon and native app/file icon where supported. See [project configuration](./project-config.md#application-icon) for path and platform details.
 
-The editor's own starter `assets/` and `data/` stay as editable files beside VN_Editor. Only exported game archives embed the project files in the game executable.
+The starter project's `assets/` and `data/` live separately from the editor package under `Documents/VN Engine Projects/My Visual Novel`. The release provides a ready-to-use starter-project ZIP; the editor installs it only when that folder does not exist. Only exported game archives embed the project files in the game executable.
 
 Linux and macOS archives preserve executable permissions for the main program and shared libraries. The macOS exporter removes the template bundle signature because it changes the app bundle; exported macOS apps are not signed or notarized. Players need the matching OS to run a desktop export.
 
-A Web export uses `template-web.zip` from the editor package or selected templates folder. It creates a static website ZIP containing `index.html`, the packaged game data, and the Pygbag runtime files. Engine modules are included as CPython 3.12 bytecode rather than readable Python source. Upload the ZIP contents to a static web host, or start an HTTP server in the extracted folder to preview it; opening `index.html` directly as a `file://` URL is not supported. The exported files include the game's runtime; project sound and music files must be OGG (`.ogg`). Convert WAV, MP3, and AIFF files before exporting.
+A Web export uses `template-web.zip` from a selected local templates folder or downloads it from GitHub Releases. It creates a static website ZIP containing `index.html`, the packaged game data, and the Pygbag runtime files. Upload the ZIP contents to a static web host, or start an HTTP server in the extracted folder to preview it; opening `index.html` directly as a `file://` URL is not supported. The exported files include the game's runtime; project sound and music files must be OGG (`.ogg`). Convert WAV, MP3, and AIFF files before exporting.
 
-An Android export creates a new project-specific Web archive from the editor package's `template-web.zip`, then packages it as a Capacitor debug APK. It does not reuse a previously exported `web.zip` or need Python/Pygbag installed; the Web runtime is bundled with the editor. Engine modules are included as CPython 3.12 bytecode rather than readable Python source. The template's Pygbag version is set when that editor package is built. Install Node.js/npm, a Java JDK, and the Android SDK (for example, through Android Studio) on the export computer. The build downloads Capacitor and Android build dependencies, so it needs an internet connection. The APK uses `android.app_name`, `android.app_id`, and `android.orientation` from `data/project.json`; `icon` sets its launcher icon. The orientation defaults to landscape. Debug APKs are for testing and sideloading; Play Store distribution requires a signed release build.
+An Android export lets you choose a published runtime release and recommends the release matching the editor's version. It downloads that release's Web template and temporarily fetches its matching engine source from GitHub, then creates a new project-specific Web archive and packages it as a Capacitor debug APK. It does not reuse a previously exported `web.zip` or require Python/Pygbag. Install Node.js/npm, a Java JDK, and the Android SDK (for example, through Android Studio) on the export computer. The build downloads Capacitor and Android build dependencies, so it needs an internet connection. The APK uses `android.app_name`, `android.app_id`, and `android.orientation` from `data/project.json`; `icon` sets its launcher icon. The orientation defaults to landscape. Debug APKs are for testing and sideloading; Play Store distribution requires a signed release build.
 
 ### Command-line export
 
@@ -193,7 +185,7 @@ The editor ZIP is a graphical application and does not include the command-line 
 .\VN_Engine\engine.exe --build-game --platform android --templates-dir "D:\vn-templates" --output-dir output
 ```
 
-The source engine defaults to `engine/templates/` and also checks `templates/` in the project folder. Pass `--templates-dir` to select another folder. For example, the Linux command creates `output/<Game Name>-linux.zip`. The editor's Android export uses the bundled Web runtime template and does not require an installed Python interpreter; it does require Node.js/npm, a Java JDK, the Android SDK, and internet access.
+The source engine checks `engine/templates/` and the project folder for local templates before downloading a missing desktop or Web template from the latest GitHub release. Pass `--templates-dir` to select another folder. Android uses the latest published Web template and matching source from GitHub. For example, the Linux command creates `output/<Game Name>-linux.zip`. Editor exports do not require Python or Pygbag; Android still requires Node.js/npm, a Java JDK, the Android SDK, and internet access.
 
 ## 9. User data and common fixes
 
