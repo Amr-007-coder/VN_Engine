@@ -8,6 +8,8 @@ The project configuration is optional. If it is missing, the engine loads its bu
 
 The project root is the folder containing `assets/` and `data/`. In the downloadable editor package, the starter project is beside the platform-specific editor app and its `templates/` folder. You can also open any other project folder from VN_Editor.
 
+The editor package includes `templates/template-web.zip`. Keep it with the editor: it supplies the Pygbag runtime for Web and Android exports. It is an editor runtime template, not part of your project’s `assets/` or `data/`.
+
 ```text
 MyVisualNovel/
   VN_Editor.exe                 # Windows; Linux uses VN_Editor, macOS uses VN_Editor.app/
@@ -15,7 +17,7 @@ MyVisualNovel/
     template-windows.zip
     template-linux.zip
     template-macos.zip
-    template-web.zip              # Optional browser export template
+    template-web.zip              # Editor package runtime for Web and Android exports
   assets/
   data/
     project.json
@@ -170,7 +172,7 @@ The default Windows game executable uses `engine/assets/images/logo.ico`; the VN
 
 ## Android export
 
-Choose **Android** in the editor's **Export Game** dialog to build a debug APK from a fresh Pygbag web build of the current engine source and project. The editor does not use `template-web.zip` for Android and does not require Python to be installed. The build downloads current Pygbag runtime and Android dependencies, so it needs an internet connection. The temporary web build and Capacitor project are removed after export; the output is just the `.apk`. The standalone engine CLI uses `template-web.zip` by default; use `--fresh-android-web` when building from the source repository to generate a fresh web app instead.
+Choose **Android** in the editor's **Export Game** dialog to create a new project-specific Web archive from the bundled `template-web.zip`, then build it as a Capacitor debug APK. The editor does not reuse a previously exported `web.zip` and does not require Python or Pygbag to be installed. The Pygbag runtime is the version bundled with the editor package; Node.js/npm, a Java JDK, and the Android SDK are still required, and Android build dependencies are downloaded from the internet. The temporary Web archive and Capacitor project are removed after export; the output is just the `.apk`. The standalone engine CLI also uses `template-web.zip` by default.
 
 ```json
 "android": {
@@ -279,6 +281,7 @@ The `theme` object is merged over a full set of engine defaults. You can set onl
 | `background` | Game background when no background image is shown; fallback screen fill. |
 | `text` | Dialogue and menu text. |
 | `accent` | Speaker name and highlighted dialogue text. |
+| `muted` | Defined as a default color but not currently used by the menu renderer. |
 | `panel` | Dialogue textbox panel; can include alpha as a fourth value. |
 | `normal` | Unselected menu rows. |
 | `hover` | Selected menu row. |
@@ -337,7 +340,7 @@ Use `fonts` for menus:
 
 Font names can refer to files in `assets/fonts/` or the built-in font folder. The built-in files are `standard.ttf`, `Joystix.ttf`, `MS Gothic.ttf`, `PermanentMarker.ttf`, `rpg-maker-2k.ttf`, `Toriko.ttf`, and `VCR_OSD_Mono.ttf`. Missing or unreadable fonts fall back to a system font.
 
-Dialogue text, speaker names, and choice-button text use fixed sizes of 24, 28, and 20 pixels respectively. `game_fonts` changes their font files, not their sizes. Menu title, item, and detail sizes can be changed with the `fonts` values above.
+Dialogue text, speaker names, and choice-button text have base sizes of 24, 28, and 20 design pixels respectively. The player's UI Size setting scales these and other interface elements together. `game_fonts` changes their font files, not their base sizes. Menu title, item, and detail base sizes can be changed with the `fonts` values above and are also scaled by UI Size.
 
 ### Standard menu layout
 
@@ -371,9 +374,9 @@ Dialogue text, speaker names, and choice-button text use fixed sizes of 24, 28, 
 
 If no theme values are configured, the engine uses a simple built-in renderer with system fonts and the default colors. Setting a `theme` enables the configurable renderer while keeping defaults for omitted theme values.
 
-### Slot layout (to be removed)
+### Save-slot layout and artwork
 
-By default, save slots use the standard menu rows. Set `theme.slot.layout` to `tape` to draw tape artwork at the left of each slot row:
+By default, save slots use the standard menu rows. Set `theme.slot.layout` to `tape` to draw tape artwork at the left of each slot row. Put both images in the project `assets/` folder; paths are relative to that folder:
 
 ```json
 "slot": {
@@ -389,7 +392,15 @@ By default, save slots use the standard menu rows. Set `theme.slot.layout` to `t
 }
 ```
 
-Both `normal` and `hovered` images are needed for tape artwork. If either image is missing, the engine falls back to standard rows. The remaining values control row dimensions and the tape/text spacing.
+| Key | Default | Use |
+| --- | --- | --- |
+| `layout` | `list` | Use `list` for normal rows or `tape` for artwork rows. |
+| `normal`, `hovered` | `null` | Image paths for the unselected and selected tape. Both are required for tape artwork. |
+| `width`, `row_height`, `row_gap` | `900`, `82`, `8` | Row dimensions and spacing. |
+| `icon_width`, `icon_height` | `30`, `72` | Size of the tape artwork area. |
+| `text_offset` | `62` | Horizontal offset for the slot text. |
+
+If either tape image is missing, the engine falls back to standard rows. The UI Size setting scales these dimensions.
 
 ### Menu sounds
 

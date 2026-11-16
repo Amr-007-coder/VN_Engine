@@ -3,7 +3,6 @@
 from copy import copy, deepcopy
 from contextlib import contextmanager
 from io import BytesIO
-import asyncio
 import gzip
 import html
 import json
@@ -339,6 +338,68 @@ def _replace_pygbag_project_files(apk_data: bytes, project_bundle: Path) -> byte
         return buffer.getvalue()
 
 
+def _replace_pygbag_project_files_tar(tar_data: bytes, project_bundle: Path) -> bytes:
+    with tarfile.open(fileobj=BytesIO(tar_data), mode="r:gz") as source:
+        buffer = BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w:gz", format=tarfile.PAX_FORMAT) as destination:
+            for item in source.getmembers():
+                name = item.name.replace("\\", "/")
+                if name.startswith(("assets/assets/", "assets/data/")):
+                    continue
+                contents = source.extractfile(item) if item.isfile() else None
+                destination.addfile(copy(item), contents)
+            with ZipFile(project_bundle, "r") as project_files:
+                for item in project_files.infolist():
+                    if item.is_dir():
+                        continue
+                    name = f"assets/{item.filename}"
+                    contents = project_files.read(item)
+                    info = tarfile.TarInfo(name)
+                    info.size = len(contents)
+                    info.mode = 0o644
+                    destination.addfile(info, BytesIO(contents))
+        return buffer.getvalue()
+
+
+def _validate_web_runtime_template(app_data: bytes, tar_data: bytes) -> None:
+    main_stub = b"import engine._web_main"
+    required_bytecode = {
+        "assets/engine/_web_main.pyc",
+        "assets/engine/android_web_main.pyc",
+        "assets/engine/engine.pyc",
+    }
+    for label, payload, archive_type in (
+        ("Pygbag APK", app_data, "zip"),
+        ("Pygbag runtime tarball", tar_data, "tar"),
+    ):
+        if archive_type == "zip":
+            with ZipFile(BytesIO(payload), "r") as archive:
+                names = {item.filename.replace("\\", "/") for item in archive.infolist()}
+                main_source = archive.read("assets/main.py") if "assets/main.py" in names else b""
+        else:
+            with tarfile.open(fileobj=BytesIO(payload), mode="r:gz") as archive:
+                members = archive.getmembers()
+                names = {item.name.replace("\\", "/") for item in members}
+                main_item = next((item for item in members if item.name == "assets/main.py"), None)
+                main_file = archive.extractfile(main_item) if main_item is not None else None
+                main_source = main_file.read() if main_file is not None else b""
+        if any(name.casefold().startswith("assets/engine/") and name.casefold().endswith(".py") for name in names):
+            raise ValueError(
+                "The Web runtime template contains readable engine Python sources. "
+                "Rebuild template-web.zip with the updated Web template builder."
+            )
+        if main_source.strip() != main_stub:
+            raise ValueError(
+                "The Web runtime template contains a readable Python entry point. "
+                "Rebuild template-web.zip with the updated Web template builder."
+            )
+        if not required_bytecode.issubset(names):
+            raise ValueError(
+                f"The {label} is missing compiled engine modules. "
+                "Rebuild template-web.zip with the updated Web template builder."
+            )
+
+
 def export_web_project(
     project_root: Path,
     project_file: Path,
@@ -404,14 +465,30 @@ def export_web_project(
                 ]
                 if len(app_archives) != 1:
                     raise ValueError("The web template must contain exactly one Pygbag .apk app archive.")
+                runtime_archives = [
+                    item for item in template.infolist()
+                    if not item.is_dir() and item.filename.casefold() == "vn-engine-web.tar.gz"
+                ]
+                if len(runtime_archives) != 1:
+                    raise ValueError("The web template must contain exactly one vn-engine-web.tar.gz runtime archive.")
                 app_item = app_archives[0]
+                runtime_item = runtime_archives[0]
+                app_data = template.read(app_item)
+                tar_data = template.read(runtime_item)
+                _validate_web_runtime_template(app_data, tar_data)
                 updated_app = _replace_pygbag_project_files(template.read(app_item), project_bundle)
+                updated_tar = _replace_pygbag_project_files_tar(tar_data, project_bundle)
 
                 with ZipFile(temporary_output, "w", compression=ZIP_DEFLATED, compresslevel=6) as archive:
                     for item in template.infolist():
                         if item.is_dir():
                             continue
-                        content = updated_app if item.filename == app_item.filename else template.read(item)
+                        if item.filename == app_item.filename:
+                            content = updated_app
+                        elif item.filename == runtime_item.filename:
+                            content = updated_tar
+                        else:
+                            content = template.read(item)
                         if item.filename.casefold() == "index.html":
                             page = content.decode("utf-8")
                             page, _ = re.subn(
@@ -541,115 +618,31 @@ def _adapt_android_runtime_archive(archive_contents: bytes) -> bytes:
             main_files = [item for item in members if item.name == "assets/main.py" and item.isfile()]
             if len(main_files) != 1:
                 raise ValueError("Pygbag runtime archive must contain exactly one assets/main.py entry.")
-            engine_files = [
-                item for item in members if item.name == "assets/engine/engine.py" and item.isfile()
-            ]
-            if len(engine_files) != 1:
-                raise ValueError("Pygbag runtime archive must contain exactly one assets/engine/engine.py entry.")
             main_file = source.extractfile(main_files[0])
-            engine_file = source.extractfile(engine_files[0])
-            if main_file is None or engine_file is None:
+            if main_file is None:
                 raise ValueError("Could not read the Pygbag runtime entrypoint.")
-            main_source = main_file.read().decode("utf-8")
-            engine_source = engine_file.read().decode("utf-8")
-            replacements = (
-                (
-                    "import pygame.surface\n",
-                    "import pygame.surface\nimport platform\n",
-                    "Pygbag runtime platform imports",
-                ),
-                (
-                    "engine = Engine(project_config=project)\n",
-                    "# Convert the WebView's CSS-sized game canvas to device pixels at runtime.\n"
-                    "device_pixel_ratio = max(1.0, float(getattr(platform.window, 'devicePixelRatio', 1.0) or 1.0))\n"
-                    "viewport_width = max(1, round(float(platform.window.canvas.clientWidth) * device_pixel_ratio))\n"
-                    "viewport_height = max(1, round(float(platform.window.canvas.clientHeight) * device_pixel_ratio))\n"
-                    "viewport_size = (viewport_width, viewport_height)\n"
-                    "platform.window.canvas.width = viewport_width\n"
-                    "platform.window.canvas.height = viewport_height\n"
-                    "platform.window.config.gui_divider = 1\n"
-                    "platform.window.config.gui_debug = 1\n"
-                    "platform.window.config.fb_ar = viewport_width / viewport_height\n"
-                    "platform.window.config.fb_width = viewport_width\n"
-                    "platform.window.config.fb_height = viewport_height\n"
-                    "project.values['window']['width'] = viewport_width\n"
-                    "project.values['window']['height'] = viewport_height\n"
-                    "menu_theme = project.values.setdefault('theme', {}).get('menu')\n"
-                    "if not isinstance(menu_theme, dict):\n"
-                    "    menu_theme = {}\n"
-                    "    project.values['theme']['menu'] = menu_theme\n"
-                    "row_height_value = menu_theme.get('row_height', 56)\n"
-                    "row_gap_value = menu_theme.get('row_gap', 9)\n"
-                    "menu_top_value = menu_theme.get('top', 190)\n"
-                    "menu_title_value = menu_theme.get('title_y', 112)\n"
-                    "row_height_value = 56 if row_height_value is None else row_height_value\n"
-                    "row_gap_value = 9 if row_gap_value is None else row_gap_value\n"
-                    "menu_top_value = 190 if menu_top_value is None else menu_top_value\n"
-                    "menu_title_value = 112 if menu_title_value is None else menu_title_value\n"
-                    "menu_items = project.menus['main']['items']\n"
-                    "row_height = max(1, int(row_height_value))\n"
-                    "row_gap = max(0, int(row_gap_value))\n"
-                    "menu_height = len(menu_items) * row_height + max(0, len(menu_items) - 1) * row_gap\n"
-                    "centered_top = max(0, (viewport_height - menu_height) // 2)\n"
-                    "menu_theme['top'] = min(int(menu_top_value), centered_top)\n"
-                    "menu_theme['title_y'] = min(int(menu_title_value), max(30, centered_top // 2))\n"
-                    "project.menus['settings']['items'] = [\n"
-                    "    item for item in project.menus['settings']['items']\n"
-                    "    if not isinstance(item, dict) or item.get('setting') != 'fullscreen'\n"
-                    "]\n"
-                    "engine = Engine(project_config=project, window_size=viewport_size)\n",
-                    "Pygbag viewport-sized Android display",
-                ),
-                (
-                    "engine.initialize()\n",
-                    "engine.initialize()\n"
-                    "actual_width, actual_height = engine.screen.get_size()\n"
-                    "engine.windowed_size = (actual_width, actual_height)\n"
-                    "platform.window.canvas.width = actual_width\n"
-                    "platform.window.canvas.height = actual_height\n"
-                    "platform.window.config.fb_ar = actual_width / actual_height\n"
-                    "platform.window.config.fb_width = actual_width\n"
-                    "platform.window.config.fb_height = actual_height\n"
-                    "centered_top = max(0, (actual_height - menu_height) // 2)\n"
-                    "engine.theme['menu']['top'] = min(int(engine.theme['menu'].get('top', 190)), centered_top)\n"
-                    "engine.theme['menu']['title_y'] = min(int(engine.theme['menu'].get('title_y', 112)), max(30, centered_top // 2))\n"
-                    "platform.window.console.info(\n"
-                    "    f'VN Android canvas: {viewport_width}x{viewport_height} device px; '\n"
-                    "    f'Pygame: {actual_width}x{actual_height}; DPR: {device_pixel_ratio}'\n"
-                    ")\n"
-                    "platform.window.window_resize()\n",
-                    "Pygbag Android canvas layout",
-                ),
-            )
-            for old, new, description in replacements:
-                if main_source.count(old) != 1:
-                    raise ValueError(
-                        f"Could not adapt Android export: expected one {description} in assets/main.py."
-                    )
-                main_source = main_source.replace(old, new, 1)
-            main_contents = main_source.encode("utf-8")
-
-            display_flags = "flags = pygame.FULLSCREEN if self.settings.values[\"fullscreen\"] else 0\n"
-            if engine_source.count(display_flags) != 2:
-                raise ValueError(
-                    "Could not adapt Android export: expected both display mode flag assignments "
-                    "in assets/engine/engine.py."
-                )
-            engine_source = engine_source.replace(
-                display_flags,
-                "flags = 0\n",
-            )
-            engine_contents = engine_source.encode("utf-8")
+            if main_file.read().strip() != b"import engine._web_main":
+                raise ValueError("Pygbag runtime archive contains an unexpected assets/main.py entry.")
+            names = {item.name.replace("\\", "/") for item in members}
+            if any(
+                name.casefold().startswith("assets/engine/") and name.casefold().endswith(".py")
+                for name in names
+            ):
+                raise ValueError("Pygbag runtime archive must not contain readable engine Python sources.")
+            required_bytecode = {
+                "assets/engine/android_web_main.pyc",
+                "assets/engine/engine.pyc",
+            }
+            if not required_bytecode.issubset(names):
+                raise ValueError("Pygbag runtime archive is missing the compiled Android engine modules.")
+            android_main = b"import engine.android_web_main\n"
 
             with tarfile.open(fileobj=output_buffer, mode="w") as destination:
                 for item in members:
                     member = copy(item)
                     if item.name == "assets/main.py":
-                        member.size = len(main_contents)
-                        destination.addfile(member, BytesIO(main_contents))
-                    elif item.name == "assets/engine/engine.py":
-                        member.size = len(engine_contents)
-                        destination.addfile(member, BytesIO(engine_contents))
+                        member.size = len(android_main)
+                        destination.addfile(member, BytesIO(android_main))
                     elif item.isfile():
                         contents = source.extractfile(item)
                         if contents is None:
@@ -719,11 +712,6 @@ def _prepare_android_web_site(web_directory: Path, window_size: tuple[int, int])
         canvas_tag = attribute_pattern.sub(lambda match: f'{match.group(1)}"{dimension}"', canvas_tag, count=1)
     page = page[:canvas_matches[0].start()] + canvas_tag + page[canvas_matches[0].end():]
     framebuffer_settings = (
-        (
-            re.compile(r"(?m)^([ \t]*gui_divider[ \t]*:[ \t]*)\d+([ \t]*,?[ \t]*)$"),
-            "1",
-            "Pygbag initial canvas scale",
-        ),
         (
             re.compile(r"(?m)^([ \t]*fb_ar[ \t]*:[ \t]*)\d+(?:\.\d+)?([ \t]*,?[ \t]*)$"),
             f"{width / height:.6g}",
@@ -839,145 +827,6 @@ public class MainActivity extends BridgeActivity {{
     )
 
 
-def _android_web_source_root() -> Path:
-    """Find web-build sources beside the editor package or in the source checkout."""
-    candidates = []
-    if sys.argv:
-        executable_parent = Path(sys.argv[0]).expanduser().resolve().parent
-        candidates.extend(parent / "android-web-source" for parent in (executable_parent, *executable_parent.parents))
-        candidates.append(executable_parent)
-    candidates.append(Path(__file__).resolve().parent)
-    for candidate in dict.fromkeys(candidates):
-        main_script = candidate / "main.py"
-        if not main_script.is_file():
-            main_script = candidate / "web_main.py"
-        if (candidate / "engine" / "engine.py").is_file() and main_script.is_file():
-            return candidate
-    raise FileNotFoundError(
-        "Fresh Android export sources are missing. Reinstall the editor package with its "
-        "android-web-source folder, or run from the VN Engine source checkout."
-    )
-
-
-def _copy_python_sources(source_root: Path, destination: Path) -> None:
-    destination.mkdir(parents=True, exist_ok=True)
-    for source in source_root.rglob("*.py"):
-        if "__pycache__" in source.parts:
-            continue
-        target = destination / source.relative_to(source_root)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, target)
-
-
-def _build_fresh_android_web_archive(
-    project_root: Path,
-    project_file: Path,
-    output_archive: Path,
-    workspace: Path,
-) -> None:
-    """Build a project-specific Pygbag archive from the current engine source."""
-    name, data_root, assets_root, story_path, project_json, project_icon = _prepare_project_export(
-        project_root, project_file
-    )
-    unsupported_audio = sorted(
-        path.relative_to(assets_root).as_posix()
-        for path in assets_root.rglob("*")
-        if path.is_file() and path.suffix.casefold() in {".wav", ".mp3", ".aiff"}
-    )
-    if unsupported_audio:
-        files = ", ".join(unsupported_audio[:8])
-        more = "..." if len(unsupported_audio) > 8 else ""
-        raise ValueError(
-            "Pygbag Android builds require OGG audio. Convert these project assets to .ogg: "
-            f"{files}{more}"
-        )
-
-    source_root = _android_web_source_root()
-    from engine.loader import loader
-    from engine.validator import StoryValidator
-
-    try:
-        story = loader.load_project_yaml(story_path.as_posix(), data_root)
-    except (OSError, ValueError) as error:
-        errors = [f"Could not read story {story_path.as_posix()!r}: {error}"]
-    else:
-        errors = StoryValidator.validate(story, assets_root, source_root / "engine" / "assets")
-    if errors:
-        raise ValueError("Story validation failed:\n" + "\n".join(f"- {error}" for error in errors))
-
-    app_root = workspace / "vn-engine-web"
-    app_root.mkdir()
-    shutil.copytree(
-        source_root / "engine",
-        app_root / "engine",
-        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
-    )
-    source_main = source_root / "web_main.py"
-    if not source_main.is_file():
-        source_main = source_root / "main.py"
-    shutil.copy2(source_main, app_root / "main.py")
-
-    yaml_source = source_root / "yaml"
-    if yaml_source.is_dir():
-        _copy_python_sources(yaml_source, app_root / "yaml")
-    else:
-        import yaml
-
-        _copy_python_sources(Path(yaml.__file__).resolve().parent, app_root / "yaml")
-
-    shutil.copytree(data_root, app_root / "data", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
-    shutil.copytree(assets_root, app_root / "assets", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
-    (app_root / "data" / "project.json").write_bytes(project_json)
-
-    # Web builds use the OGG counterparts bundled with the engine. Remove the
-    # desktop WAV copies so Pygame selects the browser-compatible files.
-    for wav_file in (app_root / "engine").rglob("*.wav"):
-        if wav_file.with_suffix(".ogg").is_file():
-            wav_file.unlink()
-        else:
-            raise FileNotFoundError(
-                f"The fresh Android build needs a browser-compatible engine sound: {wav_file.name}"
-            )
-
-    engine_logo = app_root / "engine" / "assets" / "images" / "logo.png"
-    shutil.copy2(project_icon or engine_logo, app_root / "favicon.png")
-
-    # Run Pygbag in this process. The standalone editor bundles this package,
-    # so Android export does not need an installed Python interpreter.
-    from pygbag.app import main_run, set_args
-
-    previous_argv = sys.argv
-    sys.argv = [
-        "pygbag",
-        "--build",
-        "--PYBUILD=3.12",
-        f"--title={name}",
-        f"--icon={app_root / 'favicon.png'}",
-        str(app_root),
-    ]
-    try:
-        app_folder, main_script = set_args(str(app_root))
-        asyncio.run(main_run(app_folder, main_script))
-    finally:
-        sys.argv = previous_argv
-
-    web_root = app_root / "build" / "web"
-    if not (web_root / "index.html").is_file():
-        raise FileNotFoundError(f"Pygbag did not create index.html under {web_root}.")
-    if not (web_root / "vn-engine-web.tar.gz").is_file():
-        raise FileNotFoundError(
-            "Pygbag did not create the fresh vn-engine-web.tar.gz application archive."
-        )
-    if not (web_root / "logo.png").is_file():
-        shutil.copy2(engine_logo, web_root / "logo.png")
-
-    output_archive.parent.mkdir(parents=True, exist_ok=True)
-    with ZipFile(output_archive, "w", compression=ZIP_DEFLATED, compresslevel=6) as archive:
-        for source in sorted(web_root.rglob("*"), key=lambda item: item.as_posix().casefold()):
-            if source.is_file():
-                archive.write(source, source.relative_to(web_root).as_posix())
-
-
 def _set_android_orientation(manifest_path: Path, orientation: str) -> None:
     android_namespace = "http://schemas.android.com/apk/res/android"
     ET.register_namespace("android", android_namespace)
@@ -1036,14 +885,13 @@ def export_android_project(
     project_file: Path,
     templates_dir: Path,
     output_file: Path,
-    fresh_web_build: bool = False,
 ) -> Path:
-    """Build a Capacitor APK from a selected web template or fresh sources."""
+    """Build a Capacitor APK from a new project-specific archive and web template."""
     project_root = Path(project_root).resolve()
     project_file = Path(project_file).resolve()
     templates_dir = Path(templates_dir).resolve()
     output_file = Path(output_file).expanduser().resolve().with_suffix(".apk")
-    if not fresh_web_build and output_file == (templates_dir / "template-web.zip").resolve():
+    if output_file == (templates_dir / "template-web.zip").resolve():
         raise ValueError("The Android APK cannot overwrite the web export template.")
 
     project_values = json.loads(project_file.read_text(encoding="utf-8"))
@@ -1075,10 +923,7 @@ def export_android_project(
         web_directory = wrapper / "www"
         web_directory.mkdir(parents=True)
         web_archive = workspace / "web-export.zip"
-        if fresh_web_build:
-            _build_fresh_android_web_archive(project_root, project_file, web_archive, workspace)
-        else:
-            export_web_project(project_root, project_file, templates_dir, web_archive)
+        export_web_project(project_root, project_file, templates_dir, web_archive)
         _extract_web_site(web_archive, web_directory)
         _prepare_android_web_site(web_directory, window_size)
 
@@ -1116,11 +961,12 @@ def export_android_project(
 
         from engine.icon_utils import install_android_launcher_icons
 
-        engine_icon = (
-            _android_web_source_root() / "engine" / "assets" / "images" / "logo.png"
-            if fresh_web_build
-            else Path(__file__).resolve().parent / "engine" / "assets" / "images" / "logo.png"
-        )
+        engine_icon = workspace / "engine-logo.png"
+        with _open_template_archive(templates_dir / "template-web.zip") as template:
+            try:
+                engine_icon.write_bytes(template.read("logo.png"))
+            except KeyError as error:
+                raise ValueError("The Web runtime template does not contain its default logo.png icon.") from error
         install_android_launcher_icons(
             project_icon or engine_icon,
             wrapper / "android" / "app" / "src" / "main" / "res",
@@ -1145,7 +991,6 @@ def export_project(
     templates_dir: Path,
     platform: str,
     output_file: Path,
-    fresh_android_web: bool = False,
 ) -> Path:
     """Create a standalone desktop/web ZIP or Android APK for the project."""
     if platform not in PLATFORMS:
@@ -1154,13 +999,7 @@ def export_project(
     if platform == "web":
         return export_web_project(project_root, project_file, templates_dir, output_file)
     if platform == "android":
-        return export_android_project(
-            project_root,
-            project_file,
-            templates_dir,
-            output_file,
-            fresh_web_build=fresh_android_web,
-        )
+        return export_android_project(project_root, project_file, templates_dir, output_file)
 
     project_root = Path(project_root).resolve()
     project_file = Path(project_file).resolve()

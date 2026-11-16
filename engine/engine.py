@@ -61,6 +61,7 @@ class Engine:
         window = self.project.window
         self.window_size = window_size or (int(window["width"]), int(window["height"]))
         self.windowed_size = self.window_size
+        self.allow_fullscreen: bool = True
         self.caption = caption or window["caption"]
         self.fps = fps
 
@@ -167,7 +168,7 @@ class Engine:
                 self.assets, self.story_data.get("character_defaults", {})
             )
             load_assets(self.assets, self.theme)
-            flags = pygame.FULLSCREEN if self.settings.values["fullscreen"] else 0
+            flags = pygame.FULLSCREEN if self.allow_fullscreen and self.settings.values["fullscreen"] else 0
             self.screen = pygame.display.set_mode(self.windowed_size, flags)
             window_icon = self.assets.load_image(self.project.icon) if self.project.icon else loader.load_image("logo.png")
             pygame.display.set_icon(window_icon)
@@ -1342,7 +1343,7 @@ class Engine:
     def _apply_display_settings(self):
         if self.screen is None:
             return
-        flags = pygame.FULLSCREEN if self.settings.values["fullscreen"] else 0
+        flags = pygame.FULLSCREEN if self.allow_fullscreen and self.settings.values["fullscreen"] else 0
         self.screen = pygame.display.set_mode(self.windowed_size, flags)
         new_size = self.screen.get_size()
         if new_size != self.window_size:

@@ -15,6 +15,8 @@ jobs:
     outputs:
       platforms: ${{ steps.options.outputs.platforms }}
       platform_csv: ${{ steps.options.outputs.platform_csv }}
+      editor_template_csv: ${{ steps.options.outputs.editor_template_csv }}
+      internal_web_template: ${{ steps.options.outputs.internal_web_template }}
       build_editor: ${{ steps.options.outputs.build_editor }}
       build_android_apk: ${{ steps.options.outputs.build_android_apk }}
       matrix: ${{ steps.options.outputs.matrix }}
@@ -80,13 +82,13 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: template-${{ matrix.platform }}
+          name: ${{ matrix.platform == 'web' && needs.release-options.outputs.internal_web_template == 'true' && 'vn-android-web-template' || format('template-{0}', matrix.platform) }}
           path: templates/template-${{ matrix.platform }}.zip
           if-no-files-found: error
 
   build-android-apk:
     name: Build Android APK
-    needs: release-options
+    needs: [release-options, build-template]
     if: needs.release-options.outputs.build_android_apk == 'true'
     runs-on: ubuntu-22.04
     steps:
@@ -109,6 +111,18 @@ jobs:
 
       - uses: android-actions/setup-android@v4
 
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: template-*
+          path: templates
+          merge-multiple: true
+
+      - uses: actions/download-artifact@v4
+        if: needs.release-options.outputs.internal_web_template == 'true'
+        with:
+          name: vn-android-web-template
+          path: templates
+
       - name: Install Android SDK platform
         run: |
           sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0"
@@ -117,7 +131,7 @@ jobs:
         run: python -m pip install -r requirements.txt
 
       - name: Build fresh Android app
-        run: python main.py --build-game --platform android --fresh-android-web --output-dir exports
+        run: python main.py --build-game --platform android --templates-dir templates --output-dir exports
 
       - uses: actions/upload-artifact@v4
         with:
@@ -168,6 +182,12 @@ jobs:
           path: templates
           merge-multiple: true
 
+      - uses: actions/download-artifact@v4
+        if: needs.release-options.outputs.internal_web_template == 'true'
+        with:
+          name: vn-android-web-template
+          path: templates
+
       - name: Build Linux editor
         if: matrix.platform == 'linux'
         run: .editor-venv/bin/python build_editor.py --output-dir build/editor
@@ -181,7 +201,7 @@ jobs:
         run: >-
           .editor-venv/bin/python tools/package_editor.py --platform linux
           --build-dir build/editor --templates-dir templates
-          --template-platforms "${{ needs.release-options.outputs.platform_csv }}"
+          --template-platforms "${{ needs.release-options.outputs.editor_template_csv }}"
           --output exports/VN_Editor-linux.zip
 
       - name: Package Windows or macOS editor
@@ -189,7 +209,7 @@ jobs:
         run: >-
           python tools/package_editor.py --platform ${{ matrix.platform }}
           --build-dir build/editor --templates-dir templates
-          --template-platforms "${{ needs.release-options.outputs.platform_csv }}"
+          --template-platforms "${{ needs.release-options.outputs.editor_template_csv }}"
           --output exports/VN_Editor-${{ matrix.platform }}.zip
 
       - uses: actions/upload-artifact@v4

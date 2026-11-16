@@ -1,6 +1,6 @@
 # VN Engine user guide
 
-This guide takes you from the platform-specific VN_Editor download to a playable project and a shareable game. Editor packages include the game runtime templates selected for that release, which can include Windows, Linux, macOS, and Web. Creators do not need Python, Pygame, Nuitka, or a compiler installed.
+This guide takes you from the platform-specific VN_Editor download to a playable project and a shareable game. Editor packages include selected Windows, Linux, and macOS runtime templates, plus the Web runtime template for browser and Android exports. Creators do not need Python, Pygame, Pygbag, Nuitka, or a compiler installed to use the editor.
 
 ## 1. Extract and open the editor package
 
@@ -15,8 +15,7 @@ MyVisualNovel/                 # Project and editor package root
     template-windows.zip       # Prebuilt game runtimes used by Test Play and Export Game
     template-linux.zip
     template-macos.zip
-    template-web.zip           # Present when Web was selected for the release
-  android-web-source/          # Current engine and YAML sources used for fresh APK exports
+    template-web.zip           # Pygbag runtime used for Web and Android exports
   assets/                      # Project art and audio
   data/
     project.json               # Project settings
@@ -25,7 +24,7 @@ MyVisualNovel/                 # Project and editor package root
   docs/                        # This guide and the other Markdown references
 ```
 
-The folder containing `assets/` and `data/` is the project root. The editor opens this packaged starter project automatically. Keep `android-web-source/` beside the editor; Android export uses it to build a fresh web app and does not read `template-web.zip`. Use **Open Project** to select another project folder.
+The folder containing `assets/` and `data/` is the project root. The editor opens this packaged starter project automatically. Keep the `templates/` folder with the editor; its `template-web.zip` supplies the runtime for browser and Android exports. Use **Open Project** to select another project folder.
 
 ## 2. Write a story and add assets
 
@@ -57,11 +56,13 @@ Set the project title, window size, menus, credits, intro message, and visual th
 
 ## 3. Validate and test the project
 
-The editor opens `data/project.json`, the selected story, and every YAML file listed by `includes`. Its live diagnostics check YAML syntax, story structure, supported keys and actions, project values, and asset references while you edit. Press `Ctrl+Space` for suggestions and `Ctrl+F` to search the active tab.
+The editor opens `data/project.json`, the selected story, and every YAML file listed by `includes`. Its live diagnostics check YAML syntax, story structure, supported keys and actions, project values, and asset references while you edit. Press `Ctrl+Space` for context-aware YAML keys, action names, character looks, expressions, asset paths, or JSON values. Use `Ctrl+F` to search the active tab; press `Enter` for the next match and `Shift+Enter` for the previous match. The expandable **Asset hierarchy** panel on the left shows project images, sounds, music, fonts, and character/look/expression folders; double-click a file to insert its reference at the cursor. The Markdown guide tabs are read-only.
 
-Press `F5` to save the open files and run the engine validator. The editor uses an installed engine runtime if the project has one. Otherwise, it prepares the current OS runtime template in a temporary folder and validates the packaged project there.
+`Ctrl+S` saves the active file; `Ctrl+Shift+S` saves the project configuration and all open story files. Included YAML files open in their own tabs after they are listed in `includes` and saved.
 
-Click **Test Play** to save and check the project, place a copy of the current platform template with the project's `assets/` and `data/` in a temporary folder, and launch the game. Test Play uses a temporary `user_data/` folder. When the game closes, the editor removes the temporary build and its temporary saves. Closing the editor also stops an active test game and removes its temporary folder.
+Press `F5` to save the open files and run the engine validator. The editor uses a project-local engine executable or source checkout when available. Otherwise, it temporarily prepares the current OS runtime template and runs its validator. This engine-level validation complements the editor's live diagnostics.
+
+Click **Test Play** to save and check the project, prepare a temporary game using the current platform template, and launch it. The project’s `assets/` and `data/` are embedded in the temporary game executable. Test Play uses a temporary `user_data/` folder. When the game closes, the editor removes the temporary build and its temporary saves. Closing the editor also stops an active test game and removes its temporary folder.
 
 The editor command pane starts in the project folder. It uses PowerShell on Windows and the available bash, zsh, or sh shell on Linux/macOS. Commands can change the working folder; use **Restart** to start a fresh shell in the project root.
 
@@ -132,15 +133,15 @@ The credits menu lists the project’s configured `credits` and also includes th
 
 ## 7. Share the editable project
 
-To let someone play or continue editing, share the complete project folder with `assets/`, `data/`, and all YAML files named by `includes`. Recipients can open that folder from VN_Editor. Include the editor package and its `templates/` folder when they also need the authoring and Test Play tools.
+To let someone play or continue editing, share the complete project folder with `data/project.json`, the configured `data/` and `assets/` folders, and every YAML file named by `includes`. Recipients can open that folder from VN_Editor. Include the editor package when they also need the authoring tools; its `templates/` folder provides Test Play and desktop/Web/Android exports for the platforms included in the package.
 
-The platform editor ZIP includes the game runtime templates selected for that release under `templates/`; the editor uses the current platform template for Test Play and any available selected platform template for export.
+The editor ZIP includes its available game runtime templates under `templates/`. Test Play requires the template for the computer's current OS; desktop exports require the template for the selected target. Web and Android exports use `template-web.zip`, which is included with the editor package.
 
 ## 8. Export a desktop, browser, or Android game
 
-The editor packages games for any supported desktop OS from a prebuilt runtime template. Built-in engine assets and data are compiled into each template executable as native constants. When you export a project, its own `assets/` and `data/` files are bundled into the game executable; the computer doing the export needs no compiler.
+Windows, Linux, and macOS exports use a prebuilt runtime template. Built-in engine assets and data are compiled into each template executable. The project's own `assets/` and `data/` files are embedded in the exported game executable, so the computer doing the export needs no compiler. You can export for another desktop OS when that target's template is included in the editor package.
 
-The release determines which `template-*.zip` files are included in each editor package. If a target is missing, it was not selected for that release; the editor also searches beside its application and in the project folder. If you move the templates, use **Browse** in the export dialog to select their folder. See the [release build guide](./releasing.md) for selecting targets.
+An editor package contains only the runtime templates supplied with it. If a desktop or Web target is unavailable in the export dialog, its template is not present. The editor also searches beside its application and in the project folder. If you move templates, use **Browse** in the export dialog to select their folder.
 
 To export in the editor:
 
@@ -148,7 +149,7 @@ To export in the editor:
 2. Choose Windows, Linux, macOS, Web, or Android.
 3. Choose the output file and click **Export**.
 
-The editor saves its open YAML and JSON files, checks the project and story, then adds the project's configured `assets/` and `data/` files to the selected runtime executable. It rewrites the project paths to portable `assets/` and `data/` names inside that embedded bundle. The ZIP also contains a platform shortcut beside the game folder:
+For desktop targets, the editor saves its open YAML and JSON files, checks the project and story, then adds the configured project data and assets to the selected runtime executable. The archive rewrites those paths to portable `assets/` and `data/` names inside the embedded bundle. Each desktop ZIP also contains a platform shortcut beside the game folder:
 
 ```text
 Windows:
@@ -176,13 +177,13 @@ The editor's own starter `assets/` and `data/` stay as editable files beside VN_
 
 Linux and macOS archives preserve executable permissions for the main program and shared libraries. The macOS exporter removes the template bundle signature because it changes the app bundle; exported macOS apps are not signed or notarized. Players need the matching OS to run a desktop export.
 
-A Web export is a static website ZIP containing `index.html`, the packaged game data, and the Pygbag runtime files. Upload the ZIP contents to a static web host, or start an HTTP server in the extracted folder to preview it. Opening `index.html` directly as a `file://` URL is not supported. The game loads its runtime from the exported files and does not need internet access after those files are available to the browser. Project sound and music files must be OGG (`.ogg`) for browser exports; convert WAV, MP3, and AIFF files before exporting.
+A Web export uses `template-web.zip` from the editor package or selected templates folder. It creates a static website ZIP containing `index.html`, the packaged game data, and the Pygbag runtime files. Engine modules are included as CPython 3.12 bytecode rather than readable Python source. Upload the ZIP contents to a static web host, or start an HTTP server in the extracted folder to preview it; opening `index.html` directly as a `file://` URL is not supported. The exported files include the game's runtime; project sound and music files must be OGG (`.ogg`). Convert WAV, MP3, and AIFF files before exporting.
 
-An Android export creates a fresh Pygbag web build from the current engine source and project, then packages it as a Capacitor debug APK. It does not use `template-web.zip` or need Python installed; the editor includes the Pygbag build package and the engine source used for this build. Install Node.js/npm, a Java JDK, and the Android SDK (for example, through Android Studio) on the export computer. The build downloads current Pygbag runtime and Android dependencies, so it needs an internet connection. The APK uses `android.app_name`, `android.app_id`, and `android.orientation` from `data/project.json`; `icon` sets its launcher icon. The orientation defaults to landscape. Debug APKs are for testing and sideloading; Play Store distribution requires a signed release build.
+An Android export creates a new project-specific Web archive from the editor package's `template-web.zip`, then packages it as a Capacitor debug APK. It does not reuse a previously exported `web.zip` or need Python/Pygbag installed; the Web runtime is bundled with the editor. Engine modules are included as CPython 3.12 bytecode rather than readable Python source. The template's Pygbag version is set when that editor package is built. Install Node.js/npm, a Java JDK, and the Android SDK (for example, through Android Studio) on the export computer. The build downloads Capacitor and Android build dependencies, so it needs an internet connection. The APK uses `android.app_name`, `android.app_id`, and `android.orientation` from `data/project.json`; `icon` sets its launcher icon. The orientation defaults to landscape. Debug APKs are for testing and sideloading; Play Store distribution requires a signed release build.
 
 ### Command-line export
 
-The editor ZIP does not include a command-line engine executable. These commands apply when you also have a separate compiled engine distribution; from the source repository, run `python main.py` with the same flags. Without `--platform`, `--build-game` makes a native package. With `--platform`, it creates a ZIP from the selected prebuilt template in `--output-dir`, which defaults to the project `output/` folder. The Android CLI normally builds an APK from `template-web.zip`. When running from the source repository, add `--fresh-android-web` to build the web app from current Pygbag and engine sources instead:
+The editor ZIP is a graphical application and does not include the command-line engine executable. These commands apply if you also have a compiled engine distribution; when using the source checkout, run `python main.py` with the same flags. Without `--platform`, `--build-game` makes a native package. With `--platform`, it creates a ZIP from the selected prebuilt template in `--output-dir`, which defaults to the project `output/` folder. Android builds an APK from `template-web.zip`:
 
 ```powershell
 .\VN_Engine\engine.exe --build-game --platform windows
@@ -190,12 +191,9 @@ The editor ZIP does not include a command-line engine executable. These commands
 .\VN_Engine\engine.exe --build-game --platform macos --templates-dir "D:\vn-templates" --output-dir output
 .\VN_Engine\engine.exe --build-game --platform web --templates-dir "D:\vn-templates" --output-dir output
 .\VN_Engine\engine.exe --build-game --platform android --templates-dir "D:\vn-templates" --output-dir output
-python main.py --build-game --platform android --fresh-android-web --output-dir output
 ```
 
-The source engine defaults to `engine/templates/` and also checks `templates/` in the project folder. Pass `--templates-dir` to select another folder. For example, the Linux command creates `output/<Game Name>-linux.zip`.
-
-To publish a release, run `python .\tools\release.py` from the repository root. It reads `engine/data/version.txt`, asks which templates and editor packages to build, then pushes the branch and an annotated version tag. One GitHub Actions workflow builds and attaches the selected assets. It uses Git directly and does not require `gh`; see the [release build guide](./releasing.md). A released editor can export without Python, Pygame, Pygbag, Nuitka, or a compiler installed.
+The source engine defaults to `engine/templates/` and also checks `templates/` in the project folder. Pass `--templates-dir` to select another folder. For example, the Linux command creates `output/<Game Name>-linux.zip`. The editor's Android export uses the bundled Web runtime template and does not require an installed Python interpreter; it does require Node.js/npm, a Java JDK, the Android SDK, and internet access.
 
 ## 9. User data and common fixes
 

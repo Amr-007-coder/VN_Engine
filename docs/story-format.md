@@ -74,7 +74,7 @@ dialogues:
     text: "The train arrives."
 ```
 
-You can copy this into `data/story.yaml`, save it, then run `--validate` and the shortcut.
+You can copy this into `data/story.yaml`, save it, then press `F5` to validate or click **Test Play** to run it.
 
 ## Story structure and dialogue fields
 

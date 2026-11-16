@@ -168,9 +168,9 @@ def _release(dry_run: bool = False) -> int:
         )
     print(f"Release {tag} pushed. GitHub Actions will build: {', '.join(platforms)}.")
     if include_editor:
-        print("The Windows, Linux, and macOS editor packages will include those selected templates.")
+        print("Editor packages will include selected templates and the Web runtime needed for Android export.")
     if include_android_apk:
-        print("A fresh Android APK will be built from the current engine source.")
+        print("An Android APK will be built from a project-specific Web archive using the current Web runtime template.")
     return 0
 
 
@@ -207,12 +207,24 @@ def _read_tag_options(tag: str) -> dict[str, str]:
             raise ValueError(f"Release tag {tag} has invalid build_android_apk metadata.")
         include_android_apk = android_apk == "true"
 
+    workflow_platforms = list(selected)
+    if (include_editor or include_android_apk) and "web" not in workflow_platforms:
+        # The current Pygbag Web runtime is an internal template dependency for
+        # editor Android exports and optional release APKs. Do not publish it
+        # unless Web itself was selected as a release asset.
+        workflow_platforms.append("web")
+    editor_template_platforms = list(selected)
+    if include_editor and "web" not in editor_template_platforms:
+        editor_template_platforms.append("web")
+
     return {
         "platforms": json.dumps(selected, separators=(",", ":")),
         "platform_csv": ",".join(selected),
+        "editor_template_csv": ",".join(editor_template_platforms),
+        "internal_web_template": "true" if "web" not in selected and "web" in workflow_platforms else "false",
         "build_editor": "true" if include_editor else "false",
         "build_android_apk": "true" if include_android_apk else "false",
-        "matrix": _build_matrix(selected),
+        "matrix": _build_matrix(workflow_platforms),
     }
 
 

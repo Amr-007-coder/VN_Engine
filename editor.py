@@ -3278,9 +3278,11 @@ while ($true) {{
             available = sorted(
                 platform
                 for platform in PLATFORMS
-                if platform == "android" or (
-                    Path(templates_var.get()) / f"template-{platform}.zip"
-                ).is_file()
+                if (
+                    (Path(templates_var.get()) / "template-web.zip").is_file()
+                    if platform == "android"
+                    else (Path(templates_var.get()) / f"template-{platform}.zip").is_file()
+                )
             )
             choices = available or sorted(PLATFORMS)
             platform_box.configure(values=choices)
@@ -3307,7 +3309,7 @@ while ($true) {{
         ).grid(row=2, column=2, padx=(6, 0), pady=7)
         ttk.Label(
             body,
-            text="Android builds a fresh web app from the current engine source; it does not use template-web.zip. Android export requires Node.js/npm, a Java JDK, the Android SDK, and an internet connection.",
+            text="Android creates a fresh project-specific web archive from template-web.zip, then builds a Capacitor APK. It does not reuse a previously exported web.zip. Android export requires Node.js/npm, a Java JDK, the Android SDK, and an internet connection.",
             foreground="#707987",
         ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(2, 10))
         button_row = ttk.Frame(body)
@@ -3318,7 +3320,7 @@ while ($true) {{
             output_value = output_var.get().strip()
             template_value = templates_var.get().strip()
             platform = platform_var.get()
-            if not output_value or (platform != "android" and not template_value):
+            if not output_value or not template_value:
                 messagebox.showerror("Export Game", "Choose a templates folder and output file.", parent=dialog)
                 return
             target = Path(output_value)
@@ -3338,7 +3340,6 @@ while ($true) {{
                     Path(template_value),
                     platform,
                     target,
-                    fresh_android_web=(platform == "android"),
                 )
             except (OSError, ValueError, RuntimeError, json.JSONDecodeError, subprocess.SubprocessError) as error:
                 messagebox.showerror("Export Game", str(error), parent=dialog)

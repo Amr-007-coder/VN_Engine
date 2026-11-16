@@ -77,8 +77,6 @@ def main() -> int:
         f"--output-filename={output_name}",
         "--jobs=4",
         "--include-package=yaml",
-        "--include-package=pygbag",
-        "--include-package-data=pygbag",
         "--include-module=export_pipeline",
         "--include-module=engine.validator",
         "--python-flag=no_docstrings",
