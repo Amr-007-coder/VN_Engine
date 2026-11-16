@@ -76,7 +76,7 @@ def _ask_yes_no(prompt: str, default: bool) -> bool:
         print("Enter y or n.")
 
 
-def _select_builds() -> tuple[list[str], bool]:
+def _select_builds() -> tuple[list[str], bool, bool]:
     print("Choose the game templates to build:")
     selected = [
         platform
@@ -86,7 +86,8 @@ def _select_builds() -> tuple[list[str], bool]:
     if not selected:
         raise ValueError("Select at least one game template.")
     include_editor = _ask_yes_no("Build editor packages for Windows, Linux, and macOS?", True)
-    return selected, include_editor
+    include_android_apk = _ask_yes_no("Build an Android APK for the starter project too?", False)
+    return selected, include_editor, include_android_apk
 
 
 def _tag_exists(tag: str) -> bool:
@@ -114,7 +115,7 @@ def _release(dry_run: bool = False) -> int:
 
     version = tag[1:]
     print(f"Preparing VN Engine release {version} from branch {branch}.")
-    platforms, include_editor = _select_builds()
+    platforms, include_editor, include_android_apk = _select_builds()
     status = _git_output("status", "--short", "--untracked-files=all")
     commit_message = None
     if status:
@@ -129,7 +130,11 @@ def _release(dry_run: bool = False) -> int:
     if dry_run:
         print(f"Dry run: git add -A && git commit -m {commit_message!r}" if commit_message else "Dry run: no commit needed.")
         print(f"Dry run: git push -u origin {branch}")
-        print(f"Dry run: create annotated tag {tag} with build_platforms={','.join(platforms)}")
+        print(
+            f"Dry run: create annotated tag {tag} with build_platforms={','.join(platforms)}, "
+            f"build_editor={'true' if include_editor else 'false'}, "
+            f"build_android_apk={'true' if include_android_apk else 'false'}"
+        )
         print(f"Dry run: git push origin refs/tags/{tag}")
         return 0
 
@@ -149,7 +154,8 @@ def _release(dry_run: bool = False) -> int:
 
     tag_message = (
         f"build_platforms={','.join(platforms)}\n"
-        f"build_editor={'true' if include_editor else 'false'}"
+        f"build_editor={'true' if include_editor else 'false'}\n"
+        f"build_android_apk={'true' if include_android_apk else 'false'}"
     )
     result = _git("tag", "-a", tag, "-m", tag_message)
     if result.returncode:
@@ -163,6 +169,8 @@ def _release(dry_run: bool = False) -> int:
     print(f"Release {tag} pushed. GitHub Actions will build: {', '.join(platforms)}.")
     if include_editor:
         print("The Windows, Linux, and macOS editor packages will include those selected templates.")
+    if include_android_apk:
+        print("A fresh Android APK will be built from the current engine source.")
     return 0
 
 
@@ -178,10 +186,12 @@ def _read_tag_options(tag: str) -> dict[str, str]:
 
     targets = metadata.get("build_platforms")
     editor = metadata.get("build_editor")
+    android_apk = metadata.get("build_android_apk", "false")
     if targets is None and editor is None:
         print("::warning::Tag has no build selection metadata; building all templates and editors.", file=sys.stderr)
         selected = list(DEFAULT_PLATFORMS)
         include_editor = True
+        include_android_apk = False
     else:
         if targets is None or editor not in {"true", "false"}:
             raise ValueError(f"Release tag {tag} has incomplete build selection metadata.")
@@ -193,11 +203,15 @@ def _read_tag_options(tag: str) -> dict[str, str]:
         ):
             raise ValueError(f"Release tag {tag} has invalid build_platforms metadata.")
         include_editor = editor == "true"
+        if android_apk not in {"true", "false"}:
+            raise ValueError(f"Release tag {tag} has invalid build_android_apk metadata.")
+        include_android_apk = android_apk == "true"
 
     return {
         "platforms": json.dumps(selected, separators=(",", ":")),
         "platform_csv": ",".join(selected),
         "build_editor": "true" if include_editor else "false",
+        "build_android_apk": "true" if include_android_apk else "false",
         "matrix": _build_matrix(selected),
     }
 

@@ -2,6 +2,7 @@ import pygame
 
 from engine.config import COLORS, FONTS
 from engine.parser import parse
+from engine.ui_scale import ui_size
 
 
 class UIElement:
@@ -126,11 +127,11 @@ class Textbox(UIElement):
             name_surf = FONTS.char_name.render(
                 f" {self.current_speaker} ", True, COLORS.text_highlight
             )
-            self.surface.blit(name_surf, (40, 15))
+            self.surface.blit(name_surf, (ui_size(40), ui_size(15)))
 
         font = FONTS.normal_text
-        cursor_x = 40
-        cursor_y = 55
+        cursor_x = ui_size(40)
+        cursor_y = ui_size(55)
         line_height = font.get_linesize()
 
         old_bold = font.get_bold()
@@ -140,7 +141,7 @@ class Textbox(UIElement):
             font.set_italic(is_italic)
 
             if char == "\n":
-                cursor_x = 40
+                cursor_x = ui_size(40)
                 cursor_y += line_height
                 continue
             if char == " ":
@@ -148,8 +149,8 @@ class Textbox(UIElement):
                 continue
 
             char_surf = font.render(char, True, color)
-            if cursor_x + char_surf.get_width() > self.rect.w - 40:
-                cursor_x = 40
+            if cursor_x + char_surf.get_width() > self.rect.w - ui_size(40):
+                cursor_x = ui_size(40)
                 cursor_y += line_height
 
             if strike:

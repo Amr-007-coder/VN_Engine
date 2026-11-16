@@ -81,7 +81,7 @@ MENU_ACTIONS = {
     "open_credits", "quit", "resume", "return_to_main_menu", "back", "adjust_setting",
     "toggle_setting", "save_slot", "load_slot", "delete_selected_slot",
 }
-SETTING_NAMES = {"type_speed", "music_volume", "sfx_volume", "fullscreen"}
+SETTING_NAMES = {"type_speed", "music_volume", "sfx_volume", "fullscreen", "ui_scale"}
 BUILTIN_ASSETS = {
     "image": {"logo.png", "content_warning.png", "headphones.png", "test.png"},
     "sound": {"intro.wav", "hover_button.wav", "click_button.wav"},
@@ -157,6 +157,7 @@ DEFAULT_PROJECT = _literal_from_engine("engine/project.py", "DEFAULT_PROJECT") o
             {"label": "Text Speed", "action": "adjust_setting", "setting": "type_speed"},
             {"label": "Music Volume", "action": "adjust_setting", "setting": "music_volume"},
             {"label": "Sound Effects Volume", "action": "adjust_setting", "setting": "sfx_volume"},
+            {"label": "UI Size", "action": "adjust_setting", "setting": "ui_scale"},
             {"label": "Display Mode", "action": "toggle_setting", "setting": "fullscreen"},
             {"label": "Back", "action": "back"},
         ]},
@@ -914,6 +915,19 @@ def _validate_project_object(values, raw, source, diagnostics):
             diagnostics.append(Diagnostic("error", "window.caption must be a string.", _line_of_key(source, "caption", _line_of_key(source, "window"))))
     else:
         diagnostics.append(Diagnostic("error", "window must be an object.", _line_of_key(source, "window")))
+    android = values.get("android")
+    android_line = _line_of_key(source, "android")
+    if not isinstance(android, dict):
+        diagnostics.append(Diagnostic("error", "android must be an object.", android_line))
+    else:
+        if not isinstance(android.get("app_name"), str) or not android["app_name"].strip():
+            diagnostics.append(Diagnostic("error", "android.app_name must be a non-empty string.", _line_of_key(source, "app_name", android_line)))
+        app_id = android.get("app_id")
+        if not isinstance(app_id, str) or re.fullmatch(r"[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+", app_id) is None:
+            diagnostics.append(Diagnostic("error", "android.app_id must be a lowercase reverse-DNS identifier.", _line_of_key(source, "app_id", android_line)))
+        orientation = android.get("orientation")
+        if not isinstance(orientation, str) or orientation not in {"landscape", "portrait"}:
+            diagnostics.append(Diagnostic("error", "android.orientation must be landscape or portrait.", _line_of_key(source, "orientation", android_line)))
 
     menus = values.get("menus", {})
     if not isinstance(menus, dict):
@@ -946,7 +960,7 @@ def _validate_project_object(values, raw, source, diagnostics):
                 if action == "adjust_setting" and setting == "fullscreen":
                     diagnostics.append(Diagnostic("warning", "Use toggle_setting for fullscreen; adjust_setting does not change it.", _line_of_key(source, "action", item_line)))
                 if action == "toggle_setting" and setting != "fullscreen":
-                    diagnostics.append(Diagnostic("warning", "toggle_setting only changes fullscreen; use adjust_setting for speed or volume.", _line_of_key(source, "action", item_line)))
+                    diagnostics.append(Diagnostic("warning", "toggle_setting only changes fullscreen; use adjust_setting for speed, volume, or UI size.", _line_of_key(source, "action", item_line)))
 
         slot_menu = menus.get("slots")
         if not isinstance(slot_menu, dict):
@@ -3264,7 +3278,9 @@ while ($true) {{
             available = sorted(
                 platform
                 for platform in PLATFORMS
-                if (Path(templates_var.get()) / f"template-{platform}.zip").is_file()
+                if platform == "android" or (
+                    Path(templates_var.get()) / f"template-{platform}.zip"
+                ).is_file()
             )
             choices = available or sorted(PLATFORMS)
             platform_box.configure(values=choices)
@@ -3279,7 +3295,7 @@ while ($true) {{
             text="Browse…",
             command=lambda: self._browse_export_folder(dialog, templates_var),
         ).grid(row=1, column=2, padx=(6, 0), pady=7)
-        ttk.Label(body, text="Output ZIP").grid(row=2, column=0, sticky="w", pady=7)
+        ttk.Label(body, text="Output file").grid(row=2, column=0, sticky="w", pady=7)
         output_var = tk.StringVar(
             value=str(self.project_root / "exports" / f"{game_name}-{platform_var.get()}.zip")
         )
@@ -3287,11 +3303,11 @@ while ($true) {{
         ttk.Button(
             body,
             text="Browse…",
-            command=lambda: self._browse_export_zip(dialog, output_var, game_name, platform_var.get()),
+            command=lambda: self._browse_export_output(dialog, output_var, game_name, platform_var.get()),
         ).grid(row=2, column=2, padx=(6, 0), pady=7)
         ttk.Label(
             body,
-            text="Templates are detected in the editor, engine, or project folder; you can also browse to another folder.",
+            text="Android builds a fresh web app from the current engine source; it does not use template-web.zip. Android export requires Node.js/npm, a Java JDK, the Android SDK, and an internet connection.",
             foreground="#707987",
         ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(2, 10))
         button_row = ttk.Frame(body)
@@ -3301,16 +3317,17 @@ while ($true) {{
         def run_export():
             output_value = output_var.get().strip()
             template_value = templates_var.get().strip()
-            if not output_value or not template_value:
-                messagebox.showerror("Export Game", "Choose a templates folder and output ZIP.", parent=dialog)
-                return
             platform = platform_var.get()
+            if not output_value or (platform != "android" and not template_value):
+                messagebox.showerror("Export Game", "Choose a templates folder and output file.", parent=dialog)
+                return
             target = Path(output_value)
-            if target.suffix.casefold() != ".zip":
-                target = target.with_suffix(".zip")
+            output_extension = ".apk" if platform == "android" else ".zip"
+            if target.suffix.casefold() != output_extension:
+                target = target.with_suffix(output_extension)
             if target.exists() and not messagebox.askyesno(
                 "Replace Export",
-                f"Replace the existing archive?\n{target}",
+                f"Replace the existing export?\n{target}",
                 parent=dialog,
             ):
                 return
@@ -3321,20 +3338,24 @@ while ($true) {{
                     Path(template_value),
                     platform,
                     target,
+                    fresh_android_web=(platform == "android"),
                 )
             except (OSError, ValueError, RuntimeError, json.JSONDecodeError, subprocess.SubprocessError) as error:
                 messagebox.showerror("Export Game", str(error), parent=dialog)
                 return
             dialog.destroy()
             self.set_status(f"Exported {platform} game: {exported}")
-            messagebox.showinfo("Export Complete", f"Game ZIP created:\n{exported}", parent=self.root)
+            output_description = "Android APK created" if platform == "android" else "Game ZIP created"
+            messagebox.showinfo("Export Complete", f"{output_description}:\n{exported}", parent=self.root)
 
         ttk.Button(button_row, text="Export", command=run_export).pack(side="right", padx=(0, 7))
 
-        def update_output_name(_event=None):
+        def update_output_name(*_args):
             current = Path(output_var.get())
-            output_var.set(str(current.with_name(f"{game_name}-{platform_var.get()}.zip")))
+            extension = ".apk" if platform_var.get() == "android" else ".zip"
+            output_var.set(str(current.with_name(f"{game_name}-{platform_var.get()}{extension}")))
 
+        platform_var.trace_add("write", update_output_name)
         platform_box.bind("<<ComboboxSelected>>", update_output_name)
         dialog.bind("<Return>", lambda _event: run_export())
         dialog.bind("<Escape>", lambda _event: dialog.destroy())
@@ -3353,13 +3374,15 @@ while ($true) {{
         if selected:
             variable.set(selected)
 
-    def _browse_export_zip(self, parent, variable, game_name, platform):
+    def _browse_export_output(self, parent, variable, game_name, platform):
+        extension = ".apk" if platform == "android" else ".zip"
+        file_type = "Android APK" if platform == "android" else "ZIP archive"
         selected = filedialog.asksaveasfilename(
-            title="Save exported game ZIP",
+            title="Save exported game",
             initialdir=self.project_root,
-            initialfile=f"{game_name}-{platform}.zip",
-            defaultextension=".zip",
-            filetypes=(("ZIP archive", "*.zip"),),
+            initialfile=f"{game_name}-{platform}{extension}",
+            defaultextension=extension,
+            filetypes=((file_type, f"*{extension}"),),
             parent=parent,
         )
         if selected:

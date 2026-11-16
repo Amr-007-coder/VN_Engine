@@ -37,6 +37,11 @@ This example changes the project name, window, credits, menu labels, intro text,
   "name": "Moonlight at Noon",
   "story": "story.yaml",
   "icon": null,
+  "android": {
+    "app_name": "VN Engine",
+    "app_id": "com.example.vnengine",
+    "orientation": "landscape"
+  },
   "save_slots": 8,
   "paths": {
     "data": "data",
@@ -127,6 +132,7 @@ If you copy this example, add `assets/images/menu-background.jpg` or set `theme.
 | `name` | `Visual Novel` | Project/game display name. Used for the built game filename and the per-project user-data folder. |
 | `story` | `story.yaml` | YAML story file inside `paths.data`. |
 | `icon` | `null` | Optional PNG path inside project `assets/`, used for the game window and native/browser app icon where supported. |
+| `android` | See [Android export](#android-export) | Android app name, application ID, and screen orientation. |
 | `save_slots` | `5` | Number of save/load slots. Must be a positive integer. |
 | `paths` | See [paths](#paths) | Project data, asset, and user-data locations. |
 | `window` | `1920` × `1200`, caption `VN Engine` | Initial window size and operating-system window caption. Fullscreen can also be toggled in Settings. |
@@ -158,9 +164,31 @@ Launch VN_Editor and open the folder containing `assets/` and `data/`. The edito
 
 Set the optional top-level `icon` field to a PNG in the project's assets folder. Paths are relative to `assets/`; for example, `"icon": "images/game-icon.png"`. The default `null` uses the engine's built-in `logo.png` for the game window.
 
-The configured PNG is used as the Windows executable icon and macOS app icon in desktop exports and direct builds, as well as the browser tab favicon. Linux executables do not have an embedded file icon, so the PNG is used for the game's window icon. To export a Windows game with a project-specific executable icon, run the editor on Windows. The opening splash always keeps the engine's built-in logo.
+The configured PNG is used as the Windows executable icon and macOS app icon in desktop exports and direct builds, as well as the browser tab favicon and Android launcher icon. Linux executables do not have an embedded file icon, so the PNG is used for the game's window icon. To export a Windows game with a project-specific executable icon, run the editor on Windows. The opening splash always keeps the engine's built-in logo. When `icon` is `null`, Android uses the engine's built-in `logo.png`.
 
 The default Windows game executable uses `engine/assets/images/logo.ico`; the VN_Editor executable uses `engine/assets/images/editor_logo.ico`. macOS app icons are generated from the matching PNG assets.
+
+## Android export
+
+Choose **Android** in the editor's **Export Game** dialog to build a debug APK from a fresh Pygbag web build of the current engine source and project. The editor does not use `template-web.zip` for Android and does not require Python to be installed. The build downloads current Pygbag runtime and Android dependencies, so it needs an internet connection. The temporary web build and Capacitor project are removed after export; the output is just the `.apk`. The standalone engine CLI uses `template-web.zip` by default; use `--fresh-android-web` when building from the source repository to generate a fresh web app instead.
+
+```json
+"android": {
+  "app_name": "VN Engine",
+  "app_id": "com.example.vnengine",
+  "orientation": "landscape"
+}
+```
+
+| Key | Default | Description |
+| --- | --- | --- |
+| `app_name` | `VN Engine` | Name shown for the installed Android app. |
+| `app_id` | `com.example.vnengine` | Lowercase reverse-DNS application ID. Choose an ID you control before distributing the app. |
+| `orientation` | `landscape` | Lock the app to `landscape` or `portrait`. |
+
+Android export requires Node.js/npm, a Java JDK, and the Android SDK (installable through Android Studio). The Android app uses the project's top-level `icon` field for its launcher icon, falling back to the engine logo.
+
+Android APKs run immersive full-screen and fit the game display to the device viewport while preserving the aspect ratio from the configured project window dimensions. A swipe from a screen edge can temporarily reveal Android's system bars. The app requests that Android keep the display awake while the game is active.
 
 ## Intro cards
 
@@ -195,12 +223,12 @@ The engine has a main menu, pause menu, settings menu, generated save/load slot 
 | `resume` | Return from the pause menu to the current game. |
 | `return_to_main_menu` | Leave the current game and show the main menu. |
 | `back` | Return to the previous menu. |
-| `adjust_setting` | Adjust a setting. Provide `setting` as `type_speed`, `music_volume`, or `sfx_volume`. |
+| `adjust_setting` | Adjust a setting. Provide `setting` as `type_speed`, `music_volume`, `sfx_volume`, or `ui_scale`. |
 | `toggle_setting` | Toggle a setting. Provide `setting: fullscreen`. |
 
 The default main menu provides New Game, Continue, Load Game, Settings, Credits, and Quit. The default pause menu provides Resume, Save Game, Load Game, Settings, and Main Menu. You can replace their labels or item lists in `menus.main.items` and `menus.pause.items`.
 
-Setting items display their current value. `Left`/`Right` changes the selected setting; clicking an `adjust_setting` row increases it. Type speed ranges from `0.25x` to `4x` in `0.25x` steps. Music and SFX volume range from `0%` to `100%` in `10%` steps. Fullscreen toggles between windowed and fullscreen mode.
+Setting items display their current value. `Left`/`Right` changes the selected setting; clicking the left or right half of an `adjust_setting` row decreases or increases it. Type speed ranges from `0.25x` to `4x` in `0.25x` steps. Music and SFX volume range from `0%` to `100%` in `10%` steps. UI Size ranges from `80%` to `160%` in `10%` steps and scales the engine's dialogue, menus, choices, and other interface controls. The engine adds this setting automatically if a custom settings menu does not include it. Fullscreen toggles between windowed and fullscreen mode.
 
 Slot rows are created by the engine according to `save_slots`; do not add them manually to `menus.main.items`. The `save_slot` and `load_slot` IDs are used internally for generated slot rows and require a slot number supplied by the engine. The slot screen has built-in Delete, Save/Load, and Back buttons.
 
@@ -404,4 +432,4 @@ The engine writes user settings and saves outside its bundled resources. On Wind
 
 Settings are stored in `settings.json`; numbered saves are stored under `saves/slot_1.json`, `saves/slot_2.json`, and so on. Story `autosave` actions overwrite `saves/autosave.json` and do not take a numbered slot. The engine appends a project-specific folder and the configured `paths.user_data` value to the platform root. On macOS, the root is `~/Library/Application Support/Visual Novel Engine/`; on Linux it is `$XDG_DATA_HOME/visual-novel-engine/`, or `~/.local/share/visual-novel-engine/` when `XDG_DATA_HOME` is unset. Set `paths.user_data` to an absolute path to choose a different location. Relative `paths.user_data` values are resolved from this platform-specific root.
 
-The settings menu controls type speed (`0.25x`–`4x`), music/SFX volume (`0`–`1`), and fullscreen mode. Numbered saves and autosaves store the current dialogue, story variables, background, music, visible character portraits, and dialogue history. Increasing `save_slots` exposes additional slots; reducing it hides higher-numbered slots but does not automatically delete their files.
+The settings menu controls type speed (`0.25x`–`4x`), music/SFX volume (`0`–`1`), UI size (`0.8`–`1.6`), and fullscreen mode. Numbered saves and autosaves store the current dialogue, story variables, background, music, visible character portraits, and dialogue history. Increasing `save_slots` exposes additional slots; reducing it hides higher-numbered slots but does not automatically delete their files.

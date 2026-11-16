@@ -1,8 +1,10 @@
 """Package a project with a prebuilt VN Engine runtime template."""
 
-from copy import deepcopy
+from copy import copy, deepcopy
 from contextlib import contextmanager
 from io import BytesIO
+import asyncio
+import gzip
 import html
 import json
 import os
@@ -12,16 +14,20 @@ import re
 import shutil
 import stat
 import struct
+import subprocess
 import sys
 import tempfile
+import tarfile
+import xml.etree.ElementTree as ET
 from uuid import UUID
 from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile, ZipInfo
 
 from engine.icon_utils import make_icns, make_ico, update_windows_executable_icon
 
 
-PLATFORMS = {"windows", "linux", "macos", "web"}
+PLATFORMS = {"windows", "linux", "macos", "web", "android"}
 PROJECT_BUNDLE_COMMENT = b"VN_ENGINE_GAME_BUNDLE_V1"
+ANDROID_APP_ID_PATTERN = re.compile(r"[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+")
 
 
 @contextmanager
@@ -425,19 +431,736 @@ def export_web_project(
     return output_file
 
 
+def _android_export_settings(project_values: dict) -> tuple[str, str, str]:
+    settings = project_values.get("android", {})
+    if not isinstance(settings, dict):
+        raise ValueError("Project configuration 'android' must be an object.")
+
+    app_name = settings.get("app_name", "VN Engine")
+    if not isinstance(app_name, str) or not app_name.strip():
+        raise ValueError("Project configuration 'android.app_name' must be a non-empty string.")
+
+    app_id = settings.get("app_id", "com.example.vnengine")
+    if not isinstance(app_id, str) or ANDROID_APP_ID_PATTERN.fullmatch(app_id) is None:
+        raise ValueError(
+            "Project configuration 'android.app_id' must be a lowercase reverse-DNS identifier, "
+            "for example 'com.example.vnengine'."
+        )
+
+    orientation = settings.get("orientation", "landscape")
+    if not isinstance(orientation, str) or orientation not in {"landscape", "portrait"}:
+        raise ValueError("Project configuration 'android.orientation' must be 'landscape' or 'portrait'.")
+    return app_name.strip(), app_id, orientation
+
+
+def _android_sdk_directory() -> Path:
+    candidates = [
+        os.environ.get("ANDROID_HOME"),
+        os.environ.get("ANDROID_SDK_ROOT"),
+    ]
+    if sys.platform == "win32":
+        local_app_data = os.environ.get("LOCALAPPDATA")
+        if local_app_data:
+            candidates.append(str(Path(local_app_data) / "Android" / "Sdk"))
+    elif sys.platform == "darwin":
+        candidates.append(str(Path.home() / "Library" / "Android" / "sdk"))
+    else:
+        candidates.append(str(Path.home() / "Android" / "Sdk"))
+
+    for candidate in candidates:
+        if candidate and Path(candidate).is_dir():
+            return Path(candidate).resolve()
+    raise RuntimeError(
+        "Android export requires the Android SDK. Install it with Android Studio or set "
+        "ANDROID_HOME/ANDROID_SDK_ROOT to its directory."
+    )
+
+
+def _android_tool(name: str) -> str:
+    candidates = (f"{name}.cmd", name) if sys.platform == "win32" else (name,)
+    for candidate in candidates:
+        executable = shutil.which(candidate)
+        if executable:
+            return executable
+    raise RuntimeError(f"Android export requires {name} on PATH.")
+
+
+def _run_android_command(command: list[str], working_directory: Path) -> None:
+    use_shell = sys.platform == "win32" and Path(command[0]).suffix.casefold() in {".bat", ".cmd"}
+    invocation = subprocess.list2cmdline(command) if use_shell else command
+    try:
+        result = subprocess.run(
+            invocation,
+            cwd=working_directory,
+            check=False,
+            capture_output=True,
+            text=True,
+            shell=use_shell,
+        )
+    except OSError as error:
+        raise RuntimeError(f"Could not run Android export command {command[0]!r}: {error}") from error
+    if result.returncode:
+        details = (result.stderr or result.stdout).strip()
+        if len(details) > 4000:
+            details = details[-4000:]
+        message = f"Android export command failed: {Path(command[0]).name}"
+        if details:
+            message += f"\n{details}"
+        raise RuntimeError(message)
+
+
+def _extract_web_site(archive_path: Path, destination: Path) -> None:
+    root = destination.resolve()
+    try:
+        with ZipFile(archive_path, "r") as archive:
+            for item in archive.infolist():
+                relative = PurePosixPath(item.filename.replace("\\", "/"))
+                if relative.is_absolute() or ".." in relative.parts or not relative.parts:
+                    raise ValueError(f"Web export contains an unsafe path: {item.filename!r}.")
+                target = (root / Path(*relative.parts)).resolve()
+                if not target.is_relative_to(root):
+                    raise ValueError(f"Web export contains an unsafe path: {item.filename!r}.")
+                if item.is_dir():
+                    target.mkdir(parents=True, exist_ok=True)
+                    continue
+                if (item.external_attr >> 16) & 0o170000 == stat.S_IFLNK:
+                    raise ValueError(f"Web export contains an unsupported symbolic link: {item.filename!r}.")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with archive.open(item, "r") as source, target.open("wb") as output:
+                    shutil.copyfileobj(source, output)
+    except BadZipFile as error:
+        raise ValueError(f"Generated web export is not a valid ZIP file: {archive_path}") from error
+
+
+def _adapt_android_runtime_archive(archive_contents: bytes) -> bytes:
+    source_buffer = BytesIO(archive_contents)
+    output_buffer = BytesIO()
+    try:
+        with tarfile.open(fileobj=source_buffer, mode="r:") as source:
+            members = source.getmembers()
+            main_files = [item for item in members if item.name == "assets/main.py" and item.isfile()]
+            if len(main_files) != 1:
+                raise ValueError("Pygbag runtime archive must contain exactly one assets/main.py entry.")
+            engine_files = [
+                item for item in members if item.name == "assets/engine/engine.py" and item.isfile()
+            ]
+            if len(engine_files) != 1:
+                raise ValueError("Pygbag runtime archive must contain exactly one assets/engine/engine.py entry.")
+            main_file = source.extractfile(main_files[0])
+            engine_file = source.extractfile(engine_files[0])
+            if main_file is None or engine_file is None:
+                raise ValueError("Could not read the Pygbag runtime entrypoint.")
+            main_source = main_file.read().decode("utf-8")
+            engine_source = engine_file.read().decode("utf-8")
+            replacements = (
+                (
+                    "import pygame.surface\n",
+                    "import pygame.surface\nimport platform\n",
+                    "Pygbag runtime platform imports",
+                ),
+                (
+                    "engine = Engine(project_config=project)\n",
+                    "# Convert the WebView's CSS-sized game canvas to device pixels at runtime.\n"
+                    "device_pixel_ratio = max(1.0, float(getattr(platform.window, 'devicePixelRatio', 1.0) or 1.0))\n"
+                    "viewport_width = max(1, round(float(platform.window.canvas.clientWidth) * device_pixel_ratio))\n"
+                    "viewport_height = max(1, round(float(platform.window.canvas.clientHeight) * device_pixel_ratio))\n"
+                    "viewport_size = (viewport_width, viewport_height)\n"
+                    "platform.window.canvas.width = viewport_width\n"
+                    "platform.window.canvas.height = viewport_height\n"
+                    "platform.window.config.gui_divider = 1\n"
+                    "platform.window.config.gui_debug = 1\n"
+                    "platform.window.config.fb_ar = viewport_width / viewport_height\n"
+                    "platform.window.config.fb_width = viewport_width\n"
+                    "platform.window.config.fb_height = viewport_height\n"
+                    "project.values['window']['width'] = viewport_width\n"
+                    "project.values['window']['height'] = viewport_height\n"
+                    "menu_theme = project.values.setdefault('theme', {}).get('menu')\n"
+                    "if not isinstance(menu_theme, dict):\n"
+                    "    menu_theme = {}\n"
+                    "    project.values['theme']['menu'] = menu_theme\n"
+                    "row_height_value = menu_theme.get('row_height', 56)\n"
+                    "row_gap_value = menu_theme.get('row_gap', 9)\n"
+                    "menu_top_value = menu_theme.get('top', 190)\n"
+                    "menu_title_value = menu_theme.get('title_y', 112)\n"
+                    "row_height_value = 56 if row_height_value is None else row_height_value\n"
+                    "row_gap_value = 9 if row_gap_value is None else row_gap_value\n"
+                    "menu_top_value = 190 if menu_top_value is None else menu_top_value\n"
+                    "menu_title_value = 112 if menu_title_value is None else menu_title_value\n"
+                    "menu_items = project.menus['main']['items']\n"
+                    "row_height = max(1, int(row_height_value))\n"
+                    "row_gap = max(0, int(row_gap_value))\n"
+                    "menu_height = len(menu_items) * row_height + max(0, len(menu_items) - 1) * row_gap\n"
+                    "centered_top = max(0, (viewport_height - menu_height) // 2)\n"
+                    "menu_theme['top'] = min(int(menu_top_value), centered_top)\n"
+                    "menu_theme['title_y'] = min(int(menu_title_value), max(30, centered_top // 2))\n"
+                    "project.menus['settings']['items'] = [\n"
+                    "    item for item in project.menus['settings']['items']\n"
+                    "    if not isinstance(item, dict) or item.get('setting') != 'fullscreen'\n"
+                    "]\n"
+                    "engine = Engine(project_config=project, window_size=viewport_size)\n",
+                    "Pygbag viewport-sized Android display",
+                ),
+                (
+                    "engine.initialize()\n",
+                    "engine.initialize()\n"
+                    "actual_width, actual_height = engine.screen.get_size()\n"
+                    "engine.windowed_size = (actual_width, actual_height)\n"
+                    "platform.window.canvas.width = actual_width\n"
+                    "platform.window.canvas.height = actual_height\n"
+                    "platform.window.config.fb_ar = actual_width / actual_height\n"
+                    "platform.window.config.fb_width = actual_width\n"
+                    "platform.window.config.fb_height = actual_height\n"
+                    "centered_top = max(0, (actual_height - menu_height) // 2)\n"
+                    "engine.theme['menu']['top'] = min(int(engine.theme['menu'].get('top', 190)), centered_top)\n"
+                    "engine.theme['menu']['title_y'] = min(int(engine.theme['menu'].get('title_y', 112)), max(30, centered_top // 2))\n"
+                    "platform.window.console.info(\n"
+                    "    f'VN Android canvas: {viewport_width}x{viewport_height} device px; '\n"
+                    "    f'Pygame: {actual_width}x{actual_height}; DPR: {device_pixel_ratio}'\n"
+                    ")\n"
+                    "platform.window.window_resize()\n",
+                    "Pygbag Android canvas layout",
+                ),
+            )
+            for old, new, description in replacements:
+                if main_source.count(old) != 1:
+                    raise ValueError(
+                        f"Could not adapt Android export: expected one {description} in assets/main.py."
+                    )
+                main_source = main_source.replace(old, new, 1)
+            main_contents = main_source.encode("utf-8")
+
+            display_flags = "flags = pygame.FULLSCREEN if self.settings.values[\"fullscreen\"] else 0\n"
+            if engine_source.count(display_flags) != 2:
+                raise ValueError(
+                    "Could not adapt Android export: expected both display mode flag assignments "
+                    "in assets/engine/engine.py."
+                )
+            engine_source = engine_source.replace(
+                display_flags,
+                "flags = 0\n",
+            )
+            engine_contents = engine_source.encode("utf-8")
+
+            with tarfile.open(fileobj=output_buffer, mode="w") as destination:
+                for item in members:
+                    member = copy(item)
+                    if item.name == "assets/main.py":
+                        member.size = len(main_contents)
+                        destination.addfile(member, BytesIO(main_contents))
+                    elif item.name == "assets/engine/engine.py":
+                        member.size = len(engine_contents)
+                        destination.addfile(member, BytesIO(engine_contents))
+                    elif item.isfile():
+                        contents = source.extractfile(item)
+                        if contents is None:
+                            raise ValueError(f"Could not read Pygbag runtime entry {item.name!r}.")
+                        destination.addfile(member, contents)
+                    else:
+                        destination.addfile(member)
+    except (OSError, EOFError, tarfile.TarError, UnicodeDecodeError) as error:
+        raise ValueError("Android web export contains an invalid Pygbag runtime archive.") from error
+    return output_buffer.getvalue()
+
+
+def _prepare_android_web_site(web_directory: Path, window_size: tuple[int, int]) -> None:
+    width, height = window_size
+    if (
+        not isinstance(width, int)
+        or isinstance(width, bool)
+        or width < 1
+        or not isinstance(height, int)
+        or isinstance(height, bool)
+        or height < 1
+    ):
+        raise ValueError("Android export requires positive integer project window dimensions.")
+
+    compressed_archive = web_directory / "vn-engine-web.tar.gz"
+    tar_archive = web_directory / "vn-engine-web.tar"
+    try:
+        archive_contents = _adapt_android_runtime_archive(
+            gzip.decompress(compressed_archive.read_bytes())
+        )
+        with tarfile.open(fileobj=BytesIO(archive_contents), mode="r:") as archive:
+            archive.getmembers()
+    except (OSError, EOFError, tarfile.TarError) as error:
+        raise ValueError(f"Android web export contains an invalid Pygbag runtime archive: {compressed_archive}") from error
+    tar_archive.write_bytes(archive_contents)
+    compressed_archive.unlink()
+
+    index_path = web_directory / "index.html"
+    page = index_path.read_text(encoding="utf-8")
+    viewport_pattern = re.compile(
+        r"<meta\b(?=[^>]*\bname\s*=\s*[\"']viewport[\"'])[^>]*>",
+        re.IGNORECASE | re.DOTALL,
+    )
+    viewport_matches = list(viewport_pattern.finditer(page))
+    if not viewport_matches:
+        raise ValueError(f"Could not adapt Android export: missing mobile viewport metadata in {index_path}.")
+    android_viewport = (
+        '<meta name="viewport" content="width=device-width, height=device-height, '
+        'initial-scale=1.0, viewport-fit=cover">'
+    )
+    for index in range(len(viewport_matches) - 1, -1, -1):
+        match = viewport_matches[index]
+        replacement = android_viewport if index == 0 else ""
+        page = page[:match.start()] + replacement + page[match.end():]
+
+    canvas_pattern = re.compile(r"<canvas\b(?=[^>]*\bid=[\"']canvas[\"'])[^>]*>", re.IGNORECASE | re.DOTALL)
+    canvas_matches = list(canvas_pattern.finditer(page))
+    if len(canvas_matches) != 1:
+        raise ValueError(f"Could not adapt Android export: expected one main game canvas in {index_path}.")
+    canvas_tag = canvas_matches[0].group()
+    for attribute, dimension in (("width", width), ("height", height)):
+        attribute_pattern = re.compile(rf"(\b{attribute}\s*=\s*)([\"']).*?\2", re.IGNORECASE)
+        if len(list(attribute_pattern.finditer(canvas_tag))) != 1:
+            raise ValueError(
+                f"Could not adapt Android export: expected one canvas {attribute} in {index_path}."
+            )
+        canvas_tag = attribute_pattern.sub(lambda match: f'{match.group(1)}"{dimension}"', canvas_tag, count=1)
+    page = page[:canvas_matches[0].start()] + canvas_tag + page[canvas_matches[0].end():]
+    framebuffer_settings = (
+        (
+            re.compile(r"(?m)^([ \t]*gui_divider[ \t]*:[ \t]*)\d+([ \t]*,?[ \t]*)$"),
+            "1",
+            "Pygbag initial canvas scale",
+        ),
+        (
+            re.compile(r"(?m)^([ \t]*fb_ar[ \t]*:[ \t]*)\d+(?:\.\d+)?([ \t]*,?[ \t]*)$"),
+            f"{width / height:.6g}",
+            "Pygbag framebuffer aspect ratio",
+        ),
+        (
+            re.compile(r'(?m)^([ \t]*fb_width[ \t]*:[ \t]*)"\d+"([ \t]*,?[ \t]*)$'),
+            f'"{width}"',
+            "Pygbag framebuffer width",
+        ),
+        (
+            re.compile(r'(?m)^([ \t]*fb_height[ \t]*:[ \t]*)"\d+"([ \t]*,?[ \t]*)$'),
+            f'"{height}"',
+            "Pygbag framebuffer height",
+        ),
+    )
+    for pattern, value, description in framebuffer_settings:
+        if len(list(pattern.finditer(page))) != 1:
+            raise ValueError(f"Could not adapt Android export: expected one {description} in {index_path}.")
+        page = pattern.sub(lambda match: f"{match.group(1)}{value}{match.group(2)}", page, count=1)
+
+    replacements = (
+        (
+            'platform.fopen("vn-engine-web.tar.gz", "rb")',
+            'platform.fopen("vn-engine-web.tar", "rb")',
+            "Pygbag runtime archive path",
+        ),
+        ('mode="r:gz"', 'mode="r:"', "Pygbag runtime archive mode"),
+        (
+            "    platform.window.transfer.hidden = true\n",
+            "",
+            "Pygbag early loader hide",
+        ),
+        (
+            '    platform.window.infobox.style.display = "none"',
+            '    platform.window.transfer.hidden = true\n'
+            '    platform.window.infobox.style.display = "none"',
+            "Pygbag loader completion",
+        ),
+        ("        transfer.hidden = debug_hidden\n", "", "Pygbag debug loader toggle"),
+    )
+    for old, new, description in replacements:
+        if page.count(old) != 1:
+            raise ValueError(f"Could not adapt Android export: expected one {description} in {index_path}.")
+        page = page.replace(old, new, 1)
+    index_path.write_text(page, encoding="utf-8", newline="\n")
+
+
+def _enable_android_fullscreen(android_directory: Path) -> None:
+    activity_files = list(android_directory.rglob("MainActivity.java"))
+    if len(activity_files) != 1:
+        raise FileNotFoundError(
+            f"Expected one generated MainActivity.java under {android_directory}; found {len(activity_files)}."
+        )
+    activity_path = activity_files[0]
+    source = activity_path.read_text(encoding="utf-8")
+    package_matches = re.findall(r"(?m)^package\s+([A-Za-z_][A-Za-z0-9_.]*)\s*;", source)
+    if len(package_matches) != 1 or source.count("public class MainActivity extends BridgeActivity") != 1:
+        raise ValueError(f"Could not adapt Capacitor's generated MainActivity at {activity_path}.")
+    package_name = package_matches[0]
+    activity_path.write_text(
+        f"""package {package_name};
+
+import android.os.Build;
+import android.os.Bundle;
+import android.view.View;
+import android.view.WindowManager;
+import android.view.WindowInsets;
+import android.view.WindowInsetsController;
+import com.getcapacitor.BridgeActivity;
+
+public class MainActivity extends BridgeActivity {{
+    @Override
+    public void onCreate(Bundle savedInstanceState) {{
+        super.onCreate(savedInstanceState);
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        hideSystemBars();
+    }}
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {{
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus) {{
+            hideSystemBars();
+        }}
+    }}
+
+    private void hideSystemBars() {{
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {{
+            getWindow().setDecorFitsSystemWindows(false);
+            WindowInsetsController controller = getWindow().getInsetsController();
+            if (controller != null) {{
+                controller.hide(WindowInsets.Type.statusBars() | WindowInsets.Type.navigationBars());
+                controller.setSystemBarsBehavior(
+                    WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                );
+            }}
+            return;
+        }}
+        getWindow().getDecorView().setSystemUiVisibility(
+            View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                | View.SYSTEM_UI_FLAG_FULLSCREEN
+                | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+        );
+    }}
+}}
+""",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+
+def _android_web_source_root() -> Path:
+    """Find web-build sources beside the editor package or in the source checkout."""
+    candidates = []
+    if sys.argv:
+        executable_parent = Path(sys.argv[0]).expanduser().resolve().parent
+        candidates.extend(parent / "android-web-source" for parent in (executable_parent, *executable_parent.parents))
+        candidates.append(executable_parent)
+    candidates.append(Path(__file__).resolve().parent)
+    for candidate in dict.fromkeys(candidates):
+        main_script = candidate / "main.py"
+        if not main_script.is_file():
+            main_script = candidate / "web_main.py"
+        if (candidate / "engine" / "engine.py").is_file() and main_script.is_file():
+            return candidate
+    raise FileNotFoundError(
+        "Fresh Android export sources are missing. Reinstall the editor package with its "
+        "android-web-source folder, or run from the VN Engine source checkout."
+    )
+
+
+def _copy_python_sources(source_root: Path, destination: Path) -> None:
+    destination.mkdir(parents=True, exist_ok=True)
+    for source in source_root.rglob("*.py"):
+        if "__pycache__" in source.parts:
+            continue
+        target = destination / source.relative_to(source_root)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+
+
+def _build_fresh_android_web_archive(
+    project_root: Path,
+    project_file: Path,
+    output_archive: Path,
+    workspace: Path,
+) -> None:
+    """Build a project-specific Pygbag archive from the current engine source."""
+    name, data_root, assets_root, story_path, project_json, project_icon = _prepare_project_export(
+        project_root, project_file
+    )
+    unsupported_audio = sorted(
+        path.relative_to(assets_root).as_posix()
+        for path in assets_root.rglob("*")
+        if path.is_file() and path.suffix.casefold() in {".wav", ".mp3", ".aiff"}
+    )
+    if unsupported_audio:
+        files = ", ".join(unsupported_audio[:8])
+        more = "..." if len(unsupported_audio) > 8 else ""
+        raise ValueError(
+            "Pygbag Android builds require OGG audio. Convert these project assets to .ogg: "
+            f"{files}{more}"
+        )
+
+    source_root = _android_web_source_root()
+    from engine.loader import loader
+    from engine.validator import StoryValidator
+
+    try:
+        story = loader.load_project_yaml(story_path.as_posix(), data_root)
+    except (OSError, ValueError) as error:
+        errors = [f"Could not read story {story_path.as_posix()!r}: {error}"]
+    else:
+        errors = StoryValidator.validate(story, assets_root, source_root / "engine" / "assets")
+    if errors:
+        raise ValueError("Story validation failed:\n" + "\n".join(f"- {error}" for error in errors))
+
+    app_root = workspace / "vn-engine-web"
+    app_root.mkdir()
+    shutil.copytree(
+        source_root / "engine",
+        app_root / "engine",
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
+    source_main = source_root / "web_main.py"
+    if not source_main.is_file():
+        source_main = source_root / "main.py"
+    shutil.copy2(source_main, app_root / "main.py")
+
+    yaml_source = source_root / "yaml"
+    if yaml_source.is_dir():
+        _copy_python_sources(yaml_source, app_root / "yaml")
+    else:
+        import yaml
+
+        _copy_python_sources(Path(yaml.__file__).resolve().parent, app_root / "yaml")
+
+    shutil.copytree(data_root, app_root / "data", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    shutil.copytree(assets_root, app_root / "assets", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    (app_root / "data" / "project.json").write_bytes(project_json)
+
+    # Web builds use the OGG counterparts bundled with the engine. Remove the
+    # desktop WAV copies so Pygame selects the browser-compatible files.
+    for wav_file in (app_root / "engine").rglob("*.wav"):
+        if wav_file.with_suffix(".ogg").is_file():
+            wav_file.unlink()
+        else:
+            raise FileNotFoundError(
+                f"The fresh Android build needs a browser-compatible engine sound: {wav_file.name}"
+            )
+
+    engine_logo = app_root / "engine" / "assets" / "images" / "logo.png"
+    shutil.copy2(project_icon or engine_logo, app_root / "favicon.png")
+
+    # Run Pygbag in this process. The standalone editor bundles this package,
+    # so Android export does not need an installed Python interpreter.
+    from pygbag.app import main_run, set_args
+
+    previous_argv = sys.argv
+    sys.argv = [
+        "pygbag",
+        "--build",
+        "--PYBUILD=3.12",
+        f"--title={name}",
+        f"--icon={app_root / 'favicon.png'}",
+        str(app_root),
+    ]
+    try:
+        app_folder, main_script = set_args(str(app_root))
+        asyncio.run(main_run(app_folder, main_script))
+    finally:
+        sys.argv = previous_argv
+
+    web_root = app_root / "build" / "web"
+    if not (web_root / "index.html").is_file():
+        raise FileNotFoundError(f"Pygbag did not create index.html under {web_root}.")
+    if not (web_root / "vn-engine-web.tar.gz").is_file():
+        raise FileNotFoundError(
+            "Pygbag did not create the fresh vn-engine-web.tar.gz application archive."
+        )
+    if not (web_root / "logo.png").is_file():
+        shutil.copy2(engine_logo, web_root / "logo.png")
+
+    output_archive.parent.mkdir(parents=True, exist_ok=True)
+    with ZipFile(output_archive, "w", compression=ZIP_DEFLATED, compresslevel=6) as archive:
+        for source in sorted(web_root.rglob("*"), key=lambda item: item.as_posix().casefold()):
+            if source.is_file():
+                archive.write(source, source.relative_to(web_root).as_posix())
+
+
+def _set_android_orientation(manifest_path: Path, orientation: str) -> None:
+    android_namespace = "http://schemas.android.com/apk/res/android"
+    ET.register_namespace("android", android_namespace)
+    try:
+        tree = ET.parse(manifest_path)
+    except ET.ParseError as error:
+        raise ValueError(f"Capacitor generated an invalid Android manifest at {manifest_path}: {error}") from error
+    activity = next(
+        (
+            element for element in tree.getroot().iter("activity")
+            if element.get(f"{{{android_namespace}}}name", "").endswith(".MainActivity")
+        ),
+        None,
+    )
+    if activity is None:
+        raise ValueError(f"Could not find Capacitor's MainActivity in {manifest_path}.")
+    activity.set(f"{{{android_namespace}}}screenOrientation", orientation)
+    tree.write(manifest_path, encoding="utf-8", xml_declaration=True)
+
+
+def _add_status_bar_hide_script(web_directory: Path, wrapper_directory: Path, npx: str) -> None:
+    entry = wrapper_directory / "vn-statusbar-entry.js"
+    entry.write_text(
+        "import { Capacitor } from '@capacitor/core';\n"
+        "import { StatusBar } from '@capacitor/status-bar';\n"
+        "const hideStatusBar = () => {\n"
+        "  if (Capacitor.isNativePlatform()) {\n"
+        "    StatusBar.hide().catch((error) => console.error('Could not hide the Android status bar.', error));\n"
+        "  }\n"
+        "};\n"
+        "if (document.readyState === 'complete') hideStatusBar();\n"
+        "else window.addEventListener('load', hideStatusBar, { once: true });\n",
+        encoding="utf-8",
+    )
+    _run_android_command(
+        [
+            npx, "esbuild", entry.name, "--bundle", "--platform=browser",
+            "--format=iife", "--outfile=www/vn-statusbar.js",
+        ],
+        wrapper_directory,
+    )
+
+    index_path = web_directory / "index.html"
+    page = index_path.read_text(encoding="utf-8")
+    script_tag = '<script src="./vn-statusbar.js"></script>'
+    closing_body = re.search(r"</body\s*>", page, flags=re.IGNORECASE)
+    if closing_body is None:
+        raise ValueError("Web export index.html is missing its closing </body> tag.")
+    if "vn-statusbar.js" not in page:
+        page = page[:closing_body.start()] + script_tag + page[closing_body.start():]
+        index_path.write_text(page, encoding="utf-8")
+
+
+def export_android_project(
+    project_root: Path,
+    project_file: Path,
+    templates_dir: Path,
+    output_file: Path,
+    fresh_web_build: bool = False,
+) -> Path:
+    """Build a Capacitor APK from a selected web template or fresh sources."""
+    project_root = Path(project_root).resolve()
+    project_file = Path(project_file).resolve()
+    templates_dir = Path(templates_dir).resolve()
+    output_file = Path(output_file).expanduser().resolve().with_suffix(".apk")
+    if not fresh_web_build and output_file == (templates_dir / "template-web.zip").resolve():
+        raise ValueError("The Android APK cannot overwrite the web export template.")
+
+    project_values = json.loads(project_file.read_text(encoding="utf-8"))
+    if not isinstance(project_values, dict):
+        raise ValueError("Project configuration must be a JSON object.")
+    app_name, app_id, orientation = _android_export_settings(project_values)
+    window = project_values.get("window", {})
+    if not isinstance(window, dict):
+        raise ValueError("Project configuration 'window' must be an object.")
+    window_size = (window.get("width", 1920), window.get("height", 1200))
+    project_icon = _prepare_project_export(project_root, project_file)[-1]
+    _android_tool("node")
+    npm = _android_tool("npm")
+    npx = _android_tool("npx")
+    java = shutil.which("java")
+    if java is None:
+        java_home = os.environ.get("JAVA_HOME")
+        java_name = "java.exe" if sys.platform == "win32" else "java"
+        if java_home and (Path(java_home) / "bin" / java_name).is_file():
+            java = str(Path(java_home) / "bin" / java_name)
+    if java is None:
+        raise RuntimeError("Android export requires a Java JDK on PATH or configured with JAVA_HOME.")
+    sdk_directory = _android_sdk_directory()
+
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".vn_android_export_", dir=output_file.parent) as temporary:
+        workspace = Path(temporary)
+        wrapper = workspace / "capacitor-wrapper"
+        web_directory = wrapper / "www"
+        web_directory.mkdir(parents=True)
+        web_archive = workspace / "web-export.zip"
+        if fresh_web_build:
+            _build_fresh_android_web_archive(project_root, project_file, web_archive, workspace)
+        else:
+            export_web_project(project_root, project_file, templates_dir, web_archive)
+        _extract_web_site(web_archive, web_directory)
+        _prepare_android_web_site(web_directory, window_size)
+
+        _run_android_command([npm, "init", "-y"], wrapper)
+        _run_android_command(
+            [
+                npm, "install",
+                "@capacitor/core@^8.6.2",
+                "@capacitor/cli@^8.6.2",
+                "@capacitor/android@^8.6.2",
+                "@capacitor/status-bar@^8.0.4",
+                "esbuild",
+            ],
+            wrapper,
+        )
+        (wrapper / "capacitor.config.json").write_text(
+            json.dumps(
+                {"appId": app_id, "appName": app_name, "webDir": "www"},
+                ensure_ascii=False,
+                indent=2,
+            ) + "\n",
+            encoding="utf-8",
+        )
+        _run_android_command([npx, "cap", "add", "android"], wrapper)
+        _enable_android_fullscreen(wrapper / "android")
+        _add_status_bar_hide_script(web_directory, wrapper, npx)
+        _set_android_orientation(
+            wrapper / "android" / "app" / "src" / "main" / "AndroidManifest.xml",
+            orientation,
+        )
+        (wrapper / "android" / "local.properties").write_text(
+            f"sdk.dir={sdk_directory.as_posix()}\n",
+            encoding="utf-8",
+        )
+
+        from engine.icon_utils import install_android_launcher_icons
+
+        engine_icon = (
+            _android_web_source_root() / "engine" / "assets" / "images" / "logo.png"
+            if fresh_web_build
+            else Path(__file__).resolve().parent / "engine" / "assets" / "images" / "logo.png"
+        )
+        install_android_launcher_icons(
+            project_icon or engine_icon,
+            wrapper / "android" / "app" / "src" / "main" / "res",
+        )
+
+        _run_android_command([npx, "cap", "sync", "android"], wrapper)
+        gradle_name = "gradlew.bat" if sys.platform == "win32" else "gradlew"
+        gradle_wrapper = wrapper / "android" / gradle_name
+        _run_android_command([str(gradle_wrapper), "assembleDebug"], gradle_wrapper.parent)
+        built_apk = wrapper / "android" / "app" / "build" / "outputs" / "apk" / "debug" / "app-debug.apk"
+        if not built_apk.is_file():
+            raise FileNotFoundError(f"Android build completed without producing the expected APK: {built_apk}")
+        temporary_apk = workspace / output_file.name
+        shutil.copy2(built_apk, temporary_apk)
+        os.replace(temporary_apk, output_file)
+    return output_file
+
+
 def export_project(
     project_root: Path,
     project_file: Path,
     templates_dir: Path,
     platform: str,
     output_file: Path,
+    fresh_android_web: bool = False,
 ) -> Path:
-    """Create a standalone game ZIP using the precompiled template for a target OS."""
+    """Create a standalone desktop/web ZIP or Android APK for the project."""
     if platform not in PLATFORMS:
         raise ValueError(f"Platform must be one of: {', '.join(sorted(PLATFORMS))}.")
 
     if platform == "web":
         return export_web_project(project_root, project_file, templates_dir, output_file)
+    if platform == "android":
+        return export_android_project(
+            project_root,
+            project_file,
+            templates_dir,
+            output_file,
+            fresh_web_build=fresh_android_web,
+        )
 
     project_root = Path(project_root).resolve()
     project_file = Path(project_file).resolve()

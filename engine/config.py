@@ -1,4 +1,5 @@
 from engine.assets import AssetManager
+from engine.ui_scale import ui_size
 
 
 class FONTS:
@@ -74,6 +75,6 @@ def load_assets(asset_manager: AssetManager, theme=None):
     COLORS.panel = tuple(colors.get("panel", COLORS.panel))
 
     game_fonts = theme.get("game_fonts", {})
-    FONTS.normal_text = asset_manager.load_font(game_fonts.get("text", "standard.ttf"), 24)
-    FONTS.char_name = asset_manager.load_font(game_fonts.get("name", "standard.ttf"), 28)
-    FONTS.button_text = asset_manager.load_font(game_fonts.get("button", "standard.ttf"), 20)
+    FONTS.normal_text = asset_manager.load_font(game_fonts.get("text", "standard.ttf"), ui_size(24))
+    FONTS.char_name = asset_manager.load_font(game_fonts.get("name", "standard.ttf"), ui_size(28))
+    FONTS.button_text = asset_manager.load_font(game_fonts.get("button", "standard.ttf"), ui_size(20))

@@ -121,6 +121,11 @@ def _create_example_project(package_root: Path) -> None:
         "name": "My Visual Novel",
         "story": "story.yaml",
         "icon": None,
+        "android": {
+            "app_name": "VN Engine",
+            "app_id": "com.example.vnengine",
+            "orientation": "landscape",
+        },
         "save_slots": 5,
         "paths": {"data": "data", "assets": "assets", "user_data": "user_data"},
     }

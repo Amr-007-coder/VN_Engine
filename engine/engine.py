@@ -24,6 +24,7 @@ from engine.settings import SettingsStore
 from engine.story import StoryFlow
 from engine.theme import resolve_theme
 from engine.ui import Button, Textbox
+from engine.ui_scale import set_ui_scale, ui_size
 from engine.validator import StoryValidator
 
 
@@ -82,6 +83,9 @@ class Engine:
             user_data_dir=self.project.user_data_dir,
         )
         self.textbox = None
+        self.pause_button_rect = pygame.Rect(0, 0, 0, 0)
+        self.pause_button_image = None
+        self.scaled_pause_button_image = None
         self.flow = None
         self.choice_buttons = []
         self.background_id = None
@@ -154,6 +158,7 @@ class Engine:
             PATHS.engine_assets,
         )
         self.settings.load()
+        set_ui_scale(self.settings.values["ui_scale"])
 
         pygame.init()
         try:
@@ -162,11 +167,6 @@ class Engine:
                 self.assets, self.story_data.get("character_defaults", {})
             )
             load_assets(self.assets, self.theme)
-            textbox_theme = self.theme.get("textbox", {})
-            textbox_image_name = textbox_theme.get("background")
-            textbox_image = self.assets.load_image(textbox_image_name) if textbox_image_name else None
-            textbox_color = textbox_theme.get("color")
-            textbox_color = tuple(textbox_color) if textbox_color is not None else COLORS.panel
             flags = pygame.FULLSCREEN if self.settings.values["fullscreen"] else 0
             self.screen = pygame.display.set_mode(self.windowed_size, flags)
             window_icon = self.assets.load_image(self.project.icon) if self.project.icon else loader.load_image("logo.png")
@@ -174,14 +174,12 @@ class Engine:
             self.window_size = self.screen.get_size()
             pygame.display.set_caption(self.caption)
             self.clock = pygame.time.Clock()
-            self.textbox = Textbox(
-                40,
-                self.window_size[1] - 290,
-                max(100, self.window_size[0] - 80),
-                250,
-                panel_color=textbox_color,
-                panel_image=textbox_image,
-            )
+            self.textbox = self._create_textbox()
+            try:
+                self.pause_button_image = loader.load_image("pause.png").convert_alpha()
+            except (FileNotFoundError, pygame.error):
+                self.pause_button_image = None
+            self._layout_pause_button()
             self.menu_renderer = self.renderer_override or self._create_menu_renderer()
             self._apply_audio_settings()
             self._refresh_settings_menu()
@@ -228,8 +226,8 @@ class Engine:
         logo_rect = logo.get_rect(center=(screen_width // 2, screen_height // 2 - 20))
         intro = self.project.values["intro"]
         engine_version = _read_engine_version()
-        font = self.assets.load_font("standard.ttf", max(22, screen_height // 30))
-        small_font = self.assets.load_font("standard.ttf", max(16, screen_height // 55))
+        font = self.assets.load_font("standard.ttf", ui_size(max(22, screen_height // 30)))
+        small_font = self.assets.load_font("standard.ttf", ui_size(max(16, screen_height // 55)))
         cards = [
             {"image": logo, "kind": "logo", "hold": 3.0},
             {"image": self._intro_image(intro["credit_image"]), "kind": "credit", "hold": 2.5},
@@ -273,7 +271,7 @@ class Engine:
                 card["image"].set_alpha(round(255 * alpha))
                 self.screen.blit(card["image"], logo_rect)
                 tm = small_font.render("TM", True, (238, 238, 245))
-                tm_rect = tm.get_rect(topright=(logo_rect.right - 5, logo_rect.top + 95))
+                tm_rect = tm.get_rect(topright=(logo_rect.right - ui_size(5), logo_rect.top + ui_size(95)))
                 tm.set_alpha(round(255 * alpha))
                 self.screen.blit(tm, tm_rect)
                 lines = ["© 2026 Marpp. All rights reserved.", "Powered by Pygame-CE"]
@@ -282,25 +280,25 @@ class Engine:
                 for index, line in enumerate(lines):
                     rendered = small_font.render(line, True, (190, 198, 215))
                     rendered.set_alpha(round(255 * alpha))
-                    self.screen.blit(rendered, rendered.get_rect(center=(screen_width // 2, screen_height - 100 + index * 28)))
+                    self.screen.blit(rendered, rendered.get_rect(center=(screen_width // 2, screen_height - ui_size(100) + index * ui_size(28))))
             else:
                 image = card["image"]
                 image_rect = None
                 if image is not None:
                     image = pygame.transform.smoothscale(image, (min(image.get_width(), screen_width // 2), min(image.get_height(), screen_height // 2)))
                     image.set_alpha(round(255 * alpha))
-                    image_y = screen_height // 2 - (150 if card.get("extra_image") else 90)
+                    image_y = screen_height // 2 - ui_size(150 if card.get("extra_image") else 90)
                     image_rect = image.get_rect(center=(screen_width // 2, image_y))
                     self.screen.blit(image, image_rect)
                 extra_image = card.get("extra_image")
                 if extra_image is not None:
                     extra = pygame.transform.smoothscale(extra_image, (min(extra_image.get_width(), screen_width // 3), min(extra_image.get_height(), screen_height // 3)))
                     extra.set_alpha(round(255 * alpha))
-                    self.screen.blit(extra, extra.get_rect(center=(screen_width // 2, screen_height // 2 + 190)))
+                    self.screen.blit(extra, extra.get_rect(center=(screen_width // 2, screen_height // 2 + ui_size(190))))
                 message = f"A Game by {intro['creator']}" if card["kind"] == "credit" else intro["warning_message"]
                 if card["kind"] == "credit" and intro.get("game_version"):
                     message += f"\nVersion {intro['game_version']}"
-                text_top = image_rect.bottom + 24 if card["kind"] == "credit" and image_rect else screen_height // 2
+                text_top = image_rect.bottom + ui_size(24) if card["kind"] == "credit" and image_rect else screen_height // 2
                 for line_index, line in enumerate(message.splitlines()):
                     text = font.render(line, True, (238, 238, 245))
                     text.set_alpha(round(255 * alpha))
@@ -361,7 +359,9 @@ class Engine:
         elif event.type == pygame.MOUSEWHEEL and self.history_visible:
             self.history_scroll = max(0, self.history_scroll + event.y * 3)
         elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-            if self.history_visible:
+            if not self.history_visible and self.pause_button_rect.collidepoint(event.pos):
+                self._open_pause_menu()
+            elif self.history_visible:
                 self.history_visible = False
             else:
                 self._handle_game_click(event.pos)
@@ -434,7 +434,7 @@ class Engine:
         elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             if self.mode == "credits" and getattr(self, "_credits_scroll_track", pygame.Rect(0, 0, 0, 0)).collidepoint(event.pos):
                 track = self._credits_scroll_track
-                max_offset = max(0, len(self.credits_entries) - max(2, (self.screen.get_height() - 260) // 65 - 1))
+                max_offset = max(0, len(self.credits_entries) - max(2, (self.screen.get_height() - ui_size(260)) // ui_size(65) - 1))
                 ratio = (event.pos[1] - track.top) / max(1, track.height)
                 self.credits_offset = round(max_offset * max(0.0, min(1.0, ratio)))
                 self._refresh_credits_window()
@@ -450,7 +450,9 @@ class Engine:
                 if self.mode != "slots":
                     item = self.active_menu.selected_item
                     if self.mode == "settings" and item.get("action") == "adjust_setting":
-                        self._adjust_selected_setting(1, item.get("setting"))
+                        row = self.active_menu.row_rects[selected]
+                        direction = 1 if event.pos[0] >= row.centerx else -1
+                        self._adjust_selected_setting(direction, item.get("setting"))
                     else:
                         self._activate_menu_item()
 
@@ -484,6 +486,7 @@ class Engine:
             self._render_status()
         else:
             self._render_status()
+            self._draw_pause_button()
         pygame.display.flip()
 
     def _renderer_for_active_menu(self):
@@ -523,15 +526,59 @@ class Engine:
             self._render_history()
         if pygame.time.get_ticks() < self.autosave_notice_until:
             notice = FONTS.button_text.render("Autosaved", True, COLORS.text)
-            box = notice.get_rect(midtop=(self.screen.get_width() // 2, 18)).inflate(28, 16)
-            pygame.draw.rect(self.screen, (0, 0, 0, 190), box, border_radius=8)
+            box = notice.get_rect(midtop=(self.screen.get_width() // 2, ui_size(18))).inflate(ui_size(28), ui_size(16))
+            pygame.draw.rect(self.screen, (0, 0, 0, 190), box, border_radius=ui_size(8))
             self.screen.blit(notice, notice.get_rect(center=box.center))
 
     def _render_status(self):
         if not self.status_message:
             return
         status = FONTS.button_text.render(self.status_message, True, COLORS.text_highlight)
-        self.screen.blit(status, status.get_rect(center=(self.screen.get_width() // 2, self.screen.get_height() - 40)))
+        self.screen.blit(status, status.get_rect(center=(self.screen.get_width() // 2, self.screen.get_height() - ui_size(40))))
+
+    def _create_textbox(self, previous=None):
+        textbox_theme = self.theme.get("textbox", {})
+        image_name = textbox_theme.get("background")
+        image = self.assets.load_image(image_name) if image_name else None
+        color = textbox_theme.get("color")
+        textbox = Textbox(
+            ui_size(40),
+            self.window_size[1] - ui_size(290),
+            max(ui_size(100), self.window_size[0] - ui_size(80)),
+            ui_size(250),
+            panel_color=tuple(color) if color is not None else COLORS.panel,
+            panel_image=image,
+        )
+        if previous is not None:
+            textbox.current_speaker = previous.current_speaker
+            textbox.full_parsed_text = previous.full_parsed_text
+            textbox.visible_chars = previous.visible_chars
+            textbox.last_update_time = previous.last_update_time
+            textbox.ms_per_char = previous.ms_per_char
+        return textbox
+
+    def _layout_pause_button(self):
+        if self.screen is None:
+            self.pause_button_rect = pygame.Rect(0, 0, 0, 0)
+            return
+        side = ui_size(78)
+        margin = ui_size(16)
+        self.pause_button_rect = pygame.Rect(margin, margin, side, side)
+        if self.pause_button_image is not None:
+            icon_side = ui_size(68)
+            self.scaled_pause_button_image = pygame.transform.smoothscale(
+                self.pause_button_image, (icon_side, icon_side)
+            )
+        else:
+            self.scaled_pause_button_image = None
+
+    def _draw_pause_button(self):
+        if self.pause_button_image is None or self.mode != "game" or self.history_visible:
+            return
+        rect = self.pause_button_rect
+        disk_side = ui_size(62)
+        pygame.draw.circle(self.screen, (242, 242, 247), rect.center, disk_side // 2)
+        self.screen.blit(self.scaled_pause_button_image, self.scaled_pause_button_image.get_rect(center=rect.center))
 
     def _menu_over_game(self):
         return self.mode == "pause_menu" or self.menu_origin == "pause_menu"
@@ -718,17 +765,17 @@ class Engine:
         shade = pygame.Surface(self.screen.get_size(), pygame.SRCALPHA)
         shade.fill((0, 0, 0, 190))
         self.screen.blit(shade, (0, 0))
-        width = min(self.screen.get_width() - 100, 1100)
-        panel = pygame.Rect(0, 0, width, self.screen.get_height() - 120)
+        width = min(self.screen.get_width() - ui_size(100), ui_size(1100))
+        panel = pygame.Rect(0, 0, width, self.screen.get_height() - ui_size(120))
         panel.center = (self.screen.get_width() // 2, self.screen.get_height() // 2)
-        pygame.draw.rect(self.screen, (24, 25, 38), panel, border_radius=10)
-        pygame.draw.rect(self.screen, (112, 86, 101), panel, width=2, border_radius=10)
+        pygame.draw.rect(self.screen, (24, 25, 38), panel, border_radius=ui_size(10))
+        pygame.draw.rect(self.screen, (112, 86, 101), panel, width=ui_size(2), border_radius=ui_size(10))
         heading = FONTS.char_name.render("Dialogue History", True, COLORS.text_highlight)
-        self.screen.blit(heading, (panel.left + 24, panel.top + 18))
+        self.screen.blit(heading, (panel.left + ui_size(24), panel.top + ui_size(18)))
         help_text = FONTS.button_text.render("H or Esc: close   Up/Down or mouse wheel: scroll", True, COLORS.text)
-        self.screen.blit(help_text, (panel.left + 24, panel.bottom - 34))
+        self.screen.blit(help_text, (panel.left + ui_size(24), panel.bottom - ui_size(34)))
         font = FONTS.normal_text
-        content_width = panel.width - 48
+        content_width = panel.width - ui_size(48)
         lines = []
         for item in self.dialogue_history:
             source = f"{item['speaker']}: {item['text']}"
@@ -743,8 +790,8 @@ class Engine:
                     current = candidate
             lines.append(current)
             lines.append("")
-        line_height = font.get_linesize() + 3
-        visible_count = max(1, (panel.height - 100) // line_height)
+        line_height = font.get_linesize() + ui_size(3)
+        visible_count = max(1, (panel.height - ui_size(100)) // line_height)
         max_scroll = max(0, len(lines) - visible_count)
         self.history_scroll = max(0, min(self.history_scroll, max_scroll))
         end = max(0, len(lines) - self.history_scroll)
@@ -752,7 +799,7 @@ class Engine:
         for index, line in enumerate(lines[start:end]):
             if line:
                 rendered = font.render(line, True, COLORS.text)
-                self.screen.blit(rendered, (panel.left + 24, panel.top + 62 + index * line_height))
+                self.screen.blit(rendered, (panel.left + ui_size(24), panel.top + ui_size(62) + index * line_height))
 
     def _set_background(self, image_id):
         self.background_id = image_id
@@ -788,12 +835,13 @@ class Engine:
             return
 
         count = len(options)
-        gap = 12
-        button_height = 56
-        button_width = min(900, max(120, self.window_size[0] - 96))
-        top = 40
-        bottom = self.textbox.rect.top - 20
+        gap = ui_size(12)
+        button_width = min(ui_size(900), max(ui_size(120), self.window_size[0] - ui_size(96)))
+        top = ui_size(40)
+        bottom = self.textbox.rect.top - ui_size(20)
         available_height = max(1, bottom - top)
+        max_button_height = max(ui_size(36), (available_height - (count - 1) * gap) // count)
+        button_height = min(ui_size(56), max_button_height)
         total_height = count * button_height + (count - 1) * gap
         start_y = top + max(0, (available_height - total_height) // 2)
         start_x = (self.window_size[0] - button_width) // 2
@@ -963,7 +1011,7 @@ class Engine:
         return {"label": entry["label"], "url": entry.get("url")}
 
     def _refresh_credits_window(self):
-        visible = max(3, (self.screen.get_height() - 260) // 65)
+        visible = max(3, (self.screen.get_height() - ui_size(260)) // ui_size(65))
         content_rows = visible - 1
         max_offset = max(0, len(self.credits_entries) - content_rows)
         self.credits_offset = max(0, min(self.credits_offset, max_offset))
@@ -976,7 +1024,7 @@ class Engine:
 
     def _move_credit_selection(self, offset):
         self.credits_selected = max(0, min(len(self.credits_entries), self.credits_selected + offset))
-        visible_rows = max(2, (self.screen.get_height() - 260) // 65 - 1)
+        visible_rows = max(2, (self.screen.get_height() - ui_size(260)) // ui_size(65) - 1)
         if self.credits_selected < self.credits_offset:
             self.credits_offset = self.credits_selected
         elif self.credits_selected >= self.credits_offset + visible_rows:
@@ -985,7 +1033,7 @@ class Engine:
         self._play_menu_sound("hover")
 
     def _scroll_credits(self, offset):
-        visible_rows = max(2, (self.screen.get_height() - 260) // 65 - 1)
+        visible_rows = max(2, (self.screen.get_height() - ui_size(260)) // ui_size(65) - 1)
         max_offset = max(0, len(self.credits_entries) - visible_rows)
         self.credits_offset = max(0, min(max_offset, self.credits_offset + offset))
         self.credits_selected = max(
@@ -996,36 +1044,38 @@ class Engine:
 
     def _draw_credits_panel(self):
         width, height = self.screen.get_size()
-        panel_width = min(1080, width - 64)
-        self._credits_panel_rect = pygame.Rect((width - panel_width) // 2, 150, panel_width, height - 235)
+        panel_width = min(ui_size(1080), width - ui_size(64))
+        self._credits_panel_rect = pygame.Rect((width - panel_width) // 2, ui_size(150), panel_width, height - ui_size(235))
         panel = pygame.Surface(self._credits_panel_rect.size, pygame.SRCALPHA)
         panel.fill((8, 8, 16, 210))
         self.screen.blit(panel, self._credits_panel_rect)
-        pygame.draw.rect(self.screen, (95, 84, 112), self._credits_panel_rect, width=1, border_radius=10)
+        pygame.draw.rect(self.screen, (95, 84, 112), self._credits_panel_rect, width=ui_size(1), border_radius=ui_size(10))
 
     def _draw_credits_scrollbar(self):
         if not self.credits_entries:
             return
         panel = self._credits_panel_rect
-        track = pygame.Rect(panel.right - 25, panel.top + 18, 8, panel.height - 36)
+        track = pygame.Rect(panel.right - ui_size(25), panel.top + ui_size(18), ui_size(8), panel.height - ui_size(36))
         self._credits_scroll_track = track
         pygame.draw.rect(self.screen, (45, 43, 56), track, border_radius=4)
-        visible_rows = max(2, (self.screen.get_height() - 260) // 65 - 1)
+        visible_rows = max(2, (self.screen.get_height() - ui_size(260)) // ui_size(65) - 1)
         ratio = min(1.0, visible_rows / len(self.credits_entries))
-        thumb_height = max(28, int(track.height * ratio))
+        thumb_height = max(ui_size(28), int(track.height * ratio))
         max_offset = max(0, len(self.credits_entries) - visible_rows)
         travel = track.height - thumb_height
         thumb_y = track.top + (travel * self.credits_offset / max_offset if max_offset else 0)
         self._credits_scroll_thumb = pygame.Rect(track.x, int(thumb_y), track.width, thumb_height)
-        pygame.draw.rect(self.screen, (170, 150, 192), self._credits_scroll_thumb, border_radius=4)
+        pygame.draw.rect(self.screen, (170, 150, 192), self._credits_scroll_thumb, border_radius=ui_size(4))
 
     def _render_slot_buttons(self):
         width, height = self.screen.get_size()
         labels = ("Delete", "Save" if self.slot_context == "save" else "Load", "Back")
-        button_width, button_height, gap = 150, 46, 12
+        gap = ui_size(12)
+        button_width = min(ui_size(150), max(ui_size(64), (width - ui_size(48) - gap * 2) // 3))
+        button_height = ui_size(46)
         total_width = button_width * 3 + gap * 2
         left = (width - total_width) // 2
-        top = height - 82
+        top = height - ui_size(82)
         self._slot_button_rects = {}
         selected = self.selected_slot is not None
         exists = False
@@ -1039,8 +1089,8 @@ class Engine:
             self._slot_button_rects[label.lower()] = rect
             color = (73, 50, 65) if enabled[index] else (42, 42, 48)
             text_color = (238, 238, 242) if enabled[index] else (115, 115, 122)
-            pygame.draw.rect(self.screen, color, rect, border_radius=7)
-            pygame.draw.rect(self.screen, (112, 86, 101), rect, width=1, border_radius=7)
+            pygame.draw.rect(self.screen, color, rect, border_radius=ui_size(7))
+            pygame.draw.rect(self.screen, (112, 86, 101), rect, width=ui_size(1), border_radius=ui_size(7))
             font = FONTS.button_text
             text = font.render(label, True, text_color)
             self.screen.blit(text, text.get_rect(center=rect.center))
@@ -1207,7 +1257,15 @@ class Engine:
     def _refresh_settings_menu(self):
         config = self.project.menus["settings"]
         items = []
-        for configured_item in config["items"]:
+        configured_items = list(config["items"])
+        if not any(item.get("setting") == "ui_scale" for item in configured_items):
+            ui_item = {"label": "UI Size", "action": "adjust_setting", "setting": "ui_scale"}
+            back_index = next(
+                (index for index, item in enumerate(configured_items) if item.get("action") == "back"),
+                len(configured_items),
+            )
+            configured_items.insert(back_index, ui_item)
+        for configured_item in configured_items:
             item = dict(configured_item)
             setting = item.get("setting")
             if setting in self.settings.values:
@@ -1218,6 +1276,8 @@ class Engine:
                     item["detail"] = f"{round(value * 100)}%"
                 elif setting == "fullscreen":
                     item["detail"] = "Fullscreen" if value else "Windowed"
+                elif setting == "ui_scale":
+                    item["detail"] = f"< {round(value * 100)}% >"
             items.append(item)
         self.settings_menu.set_items(items, title=config["title"])
 
@@ -1232,9 +1292,13 @@ class Engine:
             self.settings.set(setting, round(current + direction * 0.25, 2))
         elif setting in {"music_volume", "sfx_volume"}:
             self.settings.set(setting, round(current + direction * 0.1, 2))
+        elif setting == "ui_scale":
+            self.settings.set(setting, round(current + direction * 0.1, 2))
         self.settings.save()
         self._apply_audio_settings()
         self._sync_text_speed()
+        if setting == "ui_scale":
+            self._apply_ui_scale()
         self._refresh_settings_menu()
 
     def _adjust_or_toggle_setting(self, direction):
@@ -1256,6 +1320,21 @@ class Engine:
         if self.textbox is not None:
             self.textbox.ms_per_char = max(5, int(30 / self.settings.values["type_speed"]))
 
+    def _apply_ui_scale(self):
+        set_ui_scale(self.settings.values["ui_scale"])
+        if self.assets is None:
+            return
+        load_assets(self.assets, self.theme)
+        if self.renderer_override is None:
+            self.menu_renderer = self._create_menu_renderer()
+        if self.textbox is not None:
+            self.textbox = self._create_textbox(self.textbox)
+        self.choice_buttons = []
+        self._sync_choice_buttons()
+        self._layout_pause_button()
+        if self.mode == "credits":
+            self._refresh_credits_window()
+
     def _apply_audio_settings(self):
         if pygame.mixer.get_init():
             pygame.mixer.music.set_volume(self.settings.values["music_volume"])
@@ -1270,26 +1349,11 @@ class Engine:
             self.window_size = new_size
             if self.textbox is not None:
                 old_textbox = self.textbox
-                textbox = Textbox(
-                    40,
-                    self.window_size[1] - 290,
-                    max(100, self.window_size[0] - 80),
-                    250,
-                    panel_color=tuple(self.theme.get("textbox", {}).get("color") or COLORS.panel),
-                    panel_image=(
-                        self.assets.load_image(self.theme["textbox"]["background"])
-                        if self.theme.get("textbox", {}).get("background") else None
-                    ),
-                )
-                textbox.current_speaker = old_textbox.current_speaker
-                textbox.full_parsed_text = old_textbox.full_parsed_text
-                textbox.visible_chars = old_textbox.visible_chars
-                textbox.last_update_time = old_textbox.last_update_time
-                textbox.ms_per_char = old_textbox.ms_per_char
-                self.textbox = textbox
+                self.textbox = self._create_textbox(old_textbox)
                 self.choice_buttons = []
                 if self.flow is not None:
                     self._sync_choice_buttons()
+        self._layout_pause_button()
 
     def shutdown(self):
         self.running = False

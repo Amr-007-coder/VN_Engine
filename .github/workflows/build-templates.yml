@@ -16,6 +16,7 @@ jobs:
       platforms: ${{ steps.options.outputs.platforms }}
       platform_csv: ${{ steps.options.outputs.platform_csv }}
       build_editor: ${{ steps.options.outputs.build_editor }}
+      build_android_apk: ${{ steps.options.outputs.build_android_apk }}
       matrix: ${{ steps.options.outputs.matrix }}
     steps:
       - uses: actions/checkout@v4
@@ -81,6 +82,47 @@ jobs:
         with:
           name: template-${{ matrix.platform }}
           path: templates/template-${{ matrix.platform }}.zip
+          if-no-files-found: error
+
+  build-android-apk:
+    name: Build Android APK
+    needs: release-options
+    if: needs.release-options.outputs.build_android_apk == 'true'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - uses: android-actions/setup-android@v4
+
+      - name: Install Android SDK platform
+        run: |
+          sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Install build dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Build fresh Android app
+        run: python main.py --build-game --platform android --fresh-android-web --output-dir exports
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vn-engine-android-apk
+          path: exports/*.apk
           if-no-files-found: error
 
   build-editor:
@@ -158,12 +200,13 @@ jobs:
 
   publish-release-assets:
     name: Attach selected templates and editor packages to release
-    needs: [release-options, build-template, build-editor]
+    needs: [release-options, build-template, build-editor, build-android-apk]
     if: >-
       always() &&
       needs.release-options.result == 'success' &&
       needs.build-template.result == 'success' &&
-      (needs.build-editor.result == 'success' || needs.build-editor.result == 'skipped')
+      (needs.build-editor.result == 'success' || needs.build-editor.result == 'skipped') &&
+      (needs.build-android-apk.result == 'success' || needs.build-android-apk.result == 'skipped')
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/download-artifact@v4
@@ -179,7 +222,13 @@ jobs:
           path: release-assets
           merge-multiple: true
 
+      - uses: actions/download-artifact@v4
+        if: needs.release-options.outputs.build_android_apk == 'true'
+        with:
+          name: vn-engine-android-apk
+          path: release-assets
+
       - uses: softprops/action-gh-release@v2
         with:
-          files: release-assets/*.zip
+          files: release-assets/*
           fail_on_unmatched_files: true

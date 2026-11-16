@@ -2,7 +2,9 @@
 
 import argparse
 import importlib.util
+import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -11,6 +13,8 @@ from engine.icon_utils import make_icns
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 EDITOR_SOURCE = PROJECT_ROOT / "editor.py"
+BUILT_EDITOR_OUTPUT = PROJECT_ROOT / "dist" / "editor-build" / ("VN_Editor.exe" if sys.platform == "win32" else "VN_Editor")
+EDITOR_OUTPUT = PROJECT_ROOT / "dist" / ("VN_Editor.exe" if sys.platform == "win32" else "VN_Editor")
 
 
 def _current_platform() -> str:
@@ -30,6 +34,13 @@ def _parse_args():
         help="Nuitka output folder (default: dist/editor-build)",
     )
     return parser.parse_args()
+
+
+def _move_editor_to_dist() -> None:
+    if not BUILT_EDITOR_OUTPUT.exists():
+        raise FileNotFoundError(f"Built editor output was not found: {BUILT_EDITOR_OUTPUT}")
+    EDITOR_OUTPUT.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(BUILT_EDITOR_OUTPUT, EDITOR_OUTPUT)
 
 
 def main() -> int:
@@ -66,7 +77,10 @@ def main() -> int:
         f"--output-filename={output_name}",
         "--jobs=4",
         "--include-package=yaml",
+        "--include-package=pygbag",
+        "--include-package-data=pygbag",
         "--include-module=export_pipeline",
+        "--include-module=engine.validator",
         "--python-flag=no_docstrings",
     ]
     if platform == "windows":

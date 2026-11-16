@@ -8,7 +8,7 @@ The downloadable VN_Editor package is available for Windows, Linux, and macOS. E
 2. Launch the editor for that platform: `VN_Editor.exe` on Windows, `VN_Editor` on Linux, or `VN_Editor.app` on macOS.
 3. Edit `data/story.yaml`, `data/project.json`, and files under `assets/`. The starter project is ready to edit.
 4. Click **Test Play** to run the project with a temporary copy of the engine runtime for your current OS.
-5. Click **Export Game** to create a Windows, Linux, macOS, or browser build from its prebuilt template.
+5. Click **Export Game** to create a Windows, Linux, macOS, browser, or Android build.
 
 The extracted editor package has this layout; it contains one platform-specific editor app:
 
@@ -20,6 +20,7 @@ MyVisualNovel/
     template-linux.zip        # Included when selected for the release
     template-macos.zip        # Included when selected for the release
     template-web.zip          # Included when selected for the release
+  android-web-source/       # Engine and YAML sources for fresh Android APK exports
   assets/                   # Project art, sound, music, fonts, and character art
   data/
     project.json            # Project name, menus, settings, and theme
@@ -36,7 +37,8 @@ The editor and `templates/` are tools for authoring and running the project. Edi
 - Story variables, conditional choices, and actions for backgrounds, static and animated character portraits, music, sound effects, fades, screen shake, and command-triggered autosaves.
 - Multi-file YAML stories with recursive includes for chapter-sized files.
 - Automatic discovery of character looks and PNG expressions from folders.
-- Main and pause menus, save/load slots, continue, credits, and settings for text speed, volume, and fullscreen.
+- Main and pause menus, save/load slots, continue, credits, and settings for text speed, volume, fullscreen, and adjustable UI size.
+- A touch-friendly pause button during gameplay, alongside the Escape key on desktop.
 - Project-level menu labels, window size, intro cards, credits, and a declarative menu theme.
 - Story validation and a character-asset inventory from the command line.
 - An editor export pipeline for Windows, Linux, macOS, and browser game archives using prebuilt templates.
@@ -65,7 +67,7 @@ The editor opens the configured story, each YAML file named by `includes`, and `
 
 **Test Play** saves and checks the project, copies the current platform's game template and project files to a temporary folder, then launches that game. The temporary folder is removed when the game closes or the editor exits. Test Play stores settings and saves in that temporary folder, so it does not change the project's normal save data.
 
-**Export Game** saves and checks the project, then embeds its `assets/` and `data/` files in a desktop game executable. Desktop ZIPs also contain a platform shortcut: a Windows `.lnk`, a relative Linux symbolic link, or a macOS app-bundle symbolic link. For a browser export, the ZIP contains a static website with an `index.html` and its Pygbag runtime files; upload its contents to a web host, or serve it through a local HTTP server. The browser game does not need to fetch runtime assets from a CDN. Browser project audio must use OGG files (`.ogg`).
+**Export Game** saves and checks the project, then embeds its `assets/` and `data/` files in a desktop game executable. Desktop ZIPs also contain a platform shortcut: a Windows `.lnk`, a relative Linux symbolic link, or a macOS app-bundle symbolic link. A browser export is a static website ZIP with its Pygbag runtime files. An Android export builds a fresh web app from the current engine source, then packages it as a Capacitor APK; it does not use `template-web.zip`. Android export requires Node.js/npm, a Java JDK, the Android SDK, and an internet connection. Browser and Android project audio must use OGG files (`.ogg`).
 
 The command pane uses PowerShell on Windows and the available bash, zsh, or sh shell on Linux/macOS. It starts in the project folder and keeps its working directory as commands run. Use **Restart** to reopen the shell.
 

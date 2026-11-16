@@ -17,6 +17,13 @@ _ICNS_SIZES = (
     (512, b"ic09"),
     (1024, b"ic10"),
 )
+_ANDROID_ICON_SIZES = (
+    ("mdpi", 48),
+    ("hdpi", 72),
+    ("xhdpi", 96),
+    ("xxhdpi", 144),
+    ("xxxhdpi", 192),
+)
 
 
 def _png_images(image_path: Path, sizes: tuple[int, ...]) -> list[tuple[int, bytes]]:
@@ -70,6 +77,35 @@ def make_icns(image_path: Path) -> bytes:
         chunks.append(code + struct.pack(">I", len(data) + 8) + data)
     content = b"".join(chunks)
     return b"icns" + struct.pack(">I", len(content) + 8) + content
+
+
+def install_android_launcher_icons(image_path: Path, resources_directory: Path) -> None:
+    try:
+        image = pygame.image.load(str(image_path))
+    except pygame.error as error:
+        raise ValueError(f"Could not load Android app icon image {image_path}: {error}") from error
+    if image.get_width() < 1 or image.get_height() < 1:
+        raise ValueError(f"Android app icon image has invalid dimensions: {image_path}")
+
+    try:
+        for density, icon_size in _ANDROID_ICON_SIZES:
+            directory = Path(resources_directory) / f"mipmap-{density}"
+            directory.mkdir(parents=True, exist_ok=True)
+            square_icon = pygame.transform.smoothscale(image, (icon_size, icon_size))
+            for name in ("ic_launcher.png", "ic_launcher_round.png"):
+                pygame.image.save(square_icon, str(directory / name))
+
+            foreground_size = icon_size * 2
+            foreground = pygame.Surface((foreground_size, foreground_size), pygame.SRCALPHA, 32)
+            artwork_size = foreground_size * 2 // 3
+            artwork = pygame.transform.smoothscale(image, (artwork_size, artwork_size))
+            foreground.blit(
+                artwork,
+                ((foreground_size - artwork_size) // 2, (foreground_size - artwork_size) // 2),
+            )
+            pygame.image.save(foreground, str(directory / "ic_launcher_foreground.png"))
+    except pygame.error as error:
+        raise ValueError(f"Could not generate Android app icons from {image_path}: {error}") from error
 
 
 def update_windows_executable_icon(executable: Path, ico_data: bytes) -> None:

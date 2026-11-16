@@ -359,30 +359,43 @@ def build_template(output: Path) -> Path:
         if not (web_root / "index.html").is_file():
             raise FileNotFoundError(f"Pygbag did not create index.html under {web_root}.")
         shutil.copy2(PROJECT_ROOT / "engine" / "assets" / "images" / "logo.png", web_root / "logo.png")
-        _vendor_web_runtime(web_root)
+
+        runtime_archive = web_root / "vn-engine-web.tar.gz"
+        if runtime_archive.is_file():
+            # Pygbag's packaged runtime archive is already in place; keep it and avoid re-downloading
+            # or rewriting the generated runtime URLs unless the build actually needs local runtime assets.
+            pass
+        else:
+            _vendor_web_runtime(web_root)
+
         index_path = web_root / "index.html"
         index_html = index_path.read_text(encoding="utf-8")
-        if index_html.count(SERVICE_WORKER_BLOCK) != 1:
-            raise RuntimeError("Pygbag's expected disabled service-worker block was not found exactly once.")
-        index_html = index_html.replace(SERVICE_WORKER_BLOCK, "", 1)
-        if index_html.count(PYGBAG_BROWSERFS_SCRIPT_URL) != 1:
-            raise RuntimeError("Pygbag's expected BrowserFS script reference was not found exactly once.")
-        index_html = index_html.replace(
-            PYGBAG_BROWSERFS_SCRIPT_URL,
-            f"{LOCAL_RUNTIME_ROOT}browserfs.min.js",
-        )
-        if PYGBAG_CDN_URL not in index_html:
-            raise RuntimeError("Pygbag's expected CDN base URL was not found.")
-        index_html = index_html.replace(PYGBAG_CDN_URL, LOCAL_RUNTIME_ROOT)
-        if "https://" in index_html or "http://" in index_html:
-            raise RuntimeError("The generated web page still contains an external URL.")
-        if index_html.count("</head>") != 1:
-            raise RuntimeError("Pygbag's expected closing head tag was not found exactly once.")
-        index_path.write_text(
-            index_html.replace("</head>", f"{LOADER_STYLE}\n</head>", 1),
-            encoding="utf-8",
-            newline="\n",
-        )
+        if SERVICE_WORKER_BLOCK in index_html:
+            if index_html.count(SERVICE_WORKER_BLOCK) != 1:
+                raise RuntimeError("Pygbag's expected disabled service-worker block was not found exactly once.")
+            index_html = index_html.replace(SERVICE_WORKER_BLOCK, "", 1)
+        if runtime_archive.is_file():
+            if PYGBAG_BROWSERFS_SCRIPT_URL in index_html:
+                index_html = index_html.replace(PYGBAG_BROWSERFS_SCRIPT_URL, BROWSERFS_SCRIPT_URL, 1)
+        else:
+            if index_html.count(PYGBAG_BROWSERFS_SCRIPT_URL) != 1:
+                raise RuntimeError("Pygbag's expected BrowserFS script reference was not found exactly once.")
+            index_html = index_html.replace(
+                PYGBAG_BROWSERFS_SCRIPT_URL,
+                f"{LOCAL_RUNTIME_ROOT}browserfs.min.js",
+            )
+            if PYGBAG_CDN_URL not in index_html:
+                raise RuntimeError("Pygbag's expected CDN base URL was not found.")
+            index_html = index_html.replace(PYGBAG_CDN_URL, LOCAL_RUNTIME_ROOT)
+            if "https://" in index_html or "http://" in index_html:
+                raise RuntimeError("The generated web page still contains an external URL.")
+        if "</head>" in index_html:
+            if index_html.count("</head>") != 1:
+                raise RuntimeError("Pygbag's expected closing head tag was not found exactly once.")
+            index_html = index_html.replace("</head>", f"{LOADER_STYLE}\n</head>", 1)
+        else:
+            index_html += f"\n{LOADER_STYLE}\n"
+        index_path.write_text(index_html, encoding="utf-8", newline="\n")
         app_archives = list(web_root.glob("*.apk"))
         if len(app_archives) != 1:
             raise FileNotFoundError(f"Expected one Pygbag .apk archive under {web_root}; found {len(app_archives)}.")

@@ -16,6 +16,7 @@ MyVisualNovel/                 # Project and editor package root
     template-linux.zip
     template-macos.zip
     template-web.zip           # Present when Web was selected for the release
+  android-web-source/          # Current engine and YAML sources used for fresh APK exports
   assets/                      # Project art and audio
   data/
     project.json               # Project settings
@@ -24,7 +25,7 @@ MyVisualNovel/                 # Project and editor package root
   docs/                        # This guide and the other Markdown references
 ```
 
-The folder containing `assets/` and `data/` is the project root. The editor opens this packaged starter project automatically. Use **Open Project** to select another project folder.
+The folder containing `assets/` and `data/` is the project root. The editor opens this packaged starter project automatically. Keep `android-web-source/` beside the editor; Android export uses it to build a fresh web app and does not read `template-web.zip`. Use **Open Project** to select another project folder.
 
 ## 2. Write a story and add assets
 
@@ -71,19 +72,19 @@ The editor command pane starts in the project folder. It uses PowerShell on Wind
 | Advance to the next line | `Space` or click the game window |
 | Finish revealing the current typewriter line | Press `Space` or click once; press/click again to advance |
 | Choose an option | Wait for the line to finish, then click a choice |
-| Pause | `Esc` |
+| Pause | `Esc` or the on-screen pause button in the upper-left corner |
 | Open/close dialogue history | `H` |
 | Scroll dialogue history | `Up`/`Down`, `Page Up`/`Page Down`, or mouse wheel |
 | Replay the current voice line | `V` |
 | Move through a menu | `Up`/`Down` or `W`/`S`; you can also move the mouse |
 | Activate a menu item | `Enter` or click |
 | Go back from a submenu | `Esc` or `Backspace` |
-| Adjust a setting | Select it and press `Left`/`Right`; click a setting row to increase it |
+| Adjust a setting | Select it and press `Left`/`Right`; click the left or right half of a setting row to decrease or increase it |
 | Save/load a slot | Select a slot, then press `Enter` again or use its Save/Load button |
 | Delete the selected save | `Delete` or the Delete button |
 | Scroll the credits list | Mouse wheel or `Page Up`/`Page Down` |
 
-The settings menu provides type speed, music volume, sound-effects volume, and windowed/fullscreen display mode. Settings are remembered between launches. Choices are selected with the mouse. The main menu provides Load; the pause menu provides Save and Load. Continue loads whichever is newer: the story autosave or the most recent populated numbered save slot.
+The settings menu provides type speed, music volume, sound-effects volume, UI size, and windowed/fullscreen display mode. UI size defaults to 120% and can be changed from 80% to 160%. Settings are remembered between launches. Choices are selected with the mouse or touch. On Android, the game requests that the display stay awake while the app is active. The main menu provides Load; the pause menu provides Save and Load. Continue loads whichever is newer: the story autosave or the most recent populated numbered save slot.
 
 ## 5. Assets and built-in art
 
@@ -104,8 +105,8 @@ The runtime includes these assets, and the engine searches them after the projec
 | Engine asset folder | Built-in files | Default use |
 | --- | --- | --- |
 | `engine/assets/fonts/` | `standard.ttf`, `Joystix.ttf`, `MS Gothic.ttf`, `PermanentMarker.ttf`, `rpg-maker-2k.ttf`, `Toriko.ttf`, `VCR_OSD_Mono.ttf` | `standard.ttf` is used for dialogue text and speaker names unless configured otherwise. All can be selected for dialogue or menus. |
-| `engine/assets/images/` | `logo.png`, `content_warning.png`, `headphones.png`, `test.png` | `logo.png` is fixed in the opening splash and cannot be replaced. The warning and headphone images appear on the default notice card and can be replaced. `test.png` can be referenced like any other image. |
-| `engine/assets/sounds/` | `intro.wav`, `hover_button.wav`, `click_button.wav` | Opening splash sound; default menu hover and click sounds. |
+| `engine/assets/images/` | `logo.png`, `pause.png`, `content_warning.png`, `headphones.png`, `test.png` | `logo.png` is fixed in the opening splash and cannot be replaced. `pause.png` draws the in-game pause button; its size follows the UI Size setting. The warning and headphone images appear on the default notice card and can be replaced. `test.png` can be referenced like any other image. |
+| `engine/assets/sounds/` | `intro.wav`/`.ogg`, `hover_button.wav`/`.ogg`, `click_button.wav`/`.ogg` | Opening splash and default menu hover/click sounds. Desktop builds use the WAV files; fresh Web and Android builds use their OGG counterparts. |
 
 There are no built-in character portraits or music tracks. Add your own under `assets/characters/` and `assets/music/`. Built-in engine assets are bundled in each platform runtime template; you do not need a separate `VN_Engine/` folder to use Test Play or Export Game.
 
@@ -135,7 +136,7 @@ To let someone play or continue editing, share the complete project folder with 
 
 The platform editor ZIP includes the game runtime templates selected for that release under `templates/`; the editor uses the current platform template for Test Play and any available selected platform template for export.
 
-## 8. Export a desktop game or browser game
+## 8. Export a desktop, browser, or Android game
 
 The editor packages games for any supported desktop OS from a prebuilt runtime template. Built-in engine assets and data are compiled into each template executable as native constants. When you export a project, its own `assets/` and `data/` files are bundled into the game executable; the computer doing the export needs no compiler.
 
@@ -144,8 +145,8 @@ The release determines which `template-*.zip` files are included in each editor 
 To export in the editor:
 
 1. Open the project and click **Export Game**.
-2. Choose Windows, Linux, macOS, or Web.
-3. Choose the output ZIP and click **Export**.
+2. Choose Windows, Linux, macOS, Web, or Android.
+3. Choose the output file and click **Export**.
 
 The editor saves its open YAML and JSON files, checks the project and story, then adds the project's configured `assets/` and `data/` files to the selected runtime executable. It rewrites the project paths to portable `assets/` and `data/` names inside that embedded bundle. The ZIP also contains a platform shortcut beside the game folder:
 
@@ -177,15 +178,19 @@ Linux and macOS archives preserve executable permissions for the main program an
 
 A Web export is a static website ZIP containing `index.html`, the packaged game data, and the Pygbag runtime files. Upload the ZIP contents to a static web host, or start an HTTP server in the extracted folder to preview it. Opening `index.html` directly as a `file://` URL is not supported. The game loads its runtime from the exported files and does not need internet access after those files are available to the browser. Project sound and music files must be OGG (`.ogg`) for browser exports; convert WAV, MP3, and AIFF files before exporting.
 
+An Android export creates a fresh Pygbag web build from the current engine source and project, then packages it as a Capacitor debug APK. It does not use `template-web.zip` or need Python installed; the editor includes the Pygbag build package and the engine source used for this build. Install Node.js/npm, a Java JDK, and the Android SDK (for example, through Android Studio) on the export computer. The build downloads current Pygbag runtime and Android dependencies, so it needs an internet connection. The APK uses `android.app_name`, `android.app_id`, and `android.orientation` from `data/project.json`; `icon` sets its launcher icon. The orientation defaults to landscape. Debug APKs are for testing and sideloading; Play Store distribution requires a signed release build.
+
 ### Command-line export
 
-The editor ZIP does not include a command-line engine executable. These commands apply when you also have a separate compiled engine distribution; from the source repository, run `python main.py` with the same flags. Without `--platform`, `--build-game` makes a native package. With `--platform`, it creates a ZIP from the selected prebuilt template in `--output-dir`, which defaults to the project `output/` folder:
+The editor ZIP does not include a command-line engine executable. These commands apply when you also have a separate compiled engine distribution; from the source repository, run `python main.py` with the same flags. Without `--platform`, `--build-game` makes a native package. With `--platform`, it creates a ZIP from the selected prebuilt template in `--output-dir`, which defaults to the project `output/` folder. The Android CLI normally builds an APK from `template-web.zip`. When running from the source repository, add `--fresh-android-web` to build the web app from current Pygbag and engine sources instead:
 
 ```powershell
 .\VN_Engine\engine.exe --build-game --platform windows
 .\VN_Engine\engine.exe --build-game --platform linux
 .\VN_Engine\engine.exe --build-game --platform macos --templates-dir "D:\vn-templates" --output-dir output
 .\VN_Engine\engine.exe --build-game --platform web --templates-dir "D:\vn-templates" --output-dir output
+.\VN_Engine\engine.exe --build-game --platform android --templates-dir "D:\vn-templates" --output-dir output
+python main.py --build-game --platform android --fresh-android-web --output-dir output
 ```
 
 The source engine defaults to `engine/templates/` and also checks `templates/` in the project folder. Pass `--templates-dir` to select another folder. For example, the Linux command creates `output/<Game Name>-linux.zip`.

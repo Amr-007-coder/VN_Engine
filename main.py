@@ -26,21 +26,27 @@ def main():
         type=Path,
         help=(
             "Choose the output folder for --build-game (default: project-root/output); "
-            "a platform export writes its ZIP here"
+            "platform exports write their ZIP or APK here"
         ),
     )
     argument_parser.add_argument(
         "--platform",
-        choices=("windows", "linux", "macos", "web"),
+        choices=("windows", "linux", "macos", "web", "android"),
         help=(
-            "Export a ZIP for this platform using its prebuilt template. "
-            "Without --platform, --build-game makes the existing native build."
+            "Export a ZIP for this platform using its prebuilt template, or build an Android APK "
+            "from the web template (use --fresh-android-web with source builds). Without --platform, "
+            "--build-game makes the existing native build."
         ),
     )
     argument_parser.add_argument(
         "--templates-dir",
         type=Path,
         help="Folder containing the selected platform template (default: engine/project templates folder)",
+    )
+    argument_parser.add_argument(
+        "--fresh-android-web",
+        action="store_true",
+        help="Build Android from current Pygbag sources instead of template-web.zip (source builds only).",
     )
     argument_parser.add_argument("--story", help="Override the YAML story filename from data/project.json")
     argument_parser.add_argument("--validate", action="store_true", help="Validate the story and exit")
@@ -57,6 +63,8 @@ def main():
     )
     args = argument_parser.parse_args()
     if args.build_game:
+        if args.fresh_android_web and args.platform != "android":
+            argument_parser.error("--fresh-android-web can only be used with --platform android")
         if args.story is not None or args.validate or args.list_character_assets is not None or args.look is not None:
             argument_parser.error("--build-game cannot be combined with story validation or asset-listing options")
         if args.platform is None:
@@ -103,7 +111,8 @@ def main():
         )
         if args.templates_dir is not None and not templates_dir.is_absolute():
             templates_dir = project_root / templates_dir
-        output_file = output_dir / f"{safe_project_name(project.name)}-{args.platform}.zip"
+        extension = ".apk" if args.platform == "android" else ".zip"
+        output_file = output_dir / f"{safe_project_name(project.name)}-{args.platform}{extension}"
         try:
             output = export_project(
                 project_root,
@@ -111,14 +120,17 @@ def main():
                 templates_dir,
                 args.platform,
                 output_file,
+                fresh_android_web=args.fresh_android_web,
             )
-        except (OSError, ValueError, subprocess.SubprocessError) as error:
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
             print(f"Game export failed: {error}", file=sys.stderr)
             return 1
         print(f"Game export created: {output}")
         return 0
     if args.platform is not None or args.templates_dir is not None:
         argument_parser.error("--platform and --templates-dir can only be used with --build-game")
+    if args.fresh_android_web:
+        argument_parser.error("--fresh-android-web can only be used with --build-game --platform android")
     if args.output_dir is not None:
         argument_parser.error("--output-dir can only be used with --build-game")
     if args.look is not None and args.list_character_assets is None:

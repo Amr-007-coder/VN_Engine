@@ -10,6 +10,11 @@ DEFAULT_PROJECT = {
     "name": "Visual Novel",
     "story": "story.yaml",
     "icon": None,
+    "android": {
+        "app_name": "VN Engine",
+        "app_id": "com.example.vnengine",
+        "orientation": "landscape",
+    },
     "save_slots": 5,
     "credits": [],
     "intro": {
@@ -63,6 +68,7 @@ DEFAULT_PROJECT = {
                 {"label": "Text Speed", "action": "adjust_setting", "setting": "type_speed"},
                 {"label": "Music Volume", "action": "adjust_setting", "setting": "music_volume"},
                 {"label": "Sound Effects Volume", "action": "adjust_setting", "setting": "sfx_volume"},
+                {"label": "UI Size", "action": "adjust_setting", "setting": "ui_scale"},
                 {"label": "Display Mode", "action": "toggle_setting", "setting": "fullscreen"},
                 {"label": "Back", "action": "back"},
             ],
@@ -150,6 +156,17 @@ class ProjectConfig:
                 or icon_path.suffix.casefold() != ".png"
             ):
                 raise ValueError("Project config 'icon' must be a relative PNG path inside the project's assets folder or null.")
+        android = values.get("android")
+        if not isinstance(android, dict):
+            raise ValueError("Project config 'android' must be an object.")
+        if not isinstance(android.get("app_name"), str) or not android["app_name"].strip():
+            raise ValueError("Project config 'android.app_name' must be a non-empty string.")
+        app_id = android.get("app_id")
+        if not isinstance(app_id, str) or re.fullmatch(r"[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+", app_id) is None:
+            raise ValueError("Project config 'android.app_id' must be a lowercase reverse-DNS identifier.")
+        orientation = android.get("orientation")
+        if not isinstance(orientation, str) or orientation not in {"landscape", "portrait"}:
+            raise ValueError("Project config 'android.orientation' must be 'landscape' or 'portrait'.")
         intro = values.get("intro")
         if (
             not isinstance(intro, dict)
@@ -208,7 +225,7 @@ class ProjectConfig:
                     raise ValueError(f"Project menu {menu_name!r} item {index} has an unknown action ID.")
                 if action in {"adjust_setting", "toggle_setting"}:
                     setting = item.get("setting")
-                    if not isinstance(setting, str) or setting not in {"type_speed", "music_volume", "sfx_volume", "fullscreen"}:
+                    if not isinstance(setting, str) or setting not in {"type_speed", "music_volume", "sfx_volume", "fullscreen", "ui_scale"}:
                         raise ValueError(f"Project menu {menu_name!r} item {index} has an unknown setting ID.")
 
         slot_menu = menus.get("slots")

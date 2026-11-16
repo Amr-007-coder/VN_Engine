@@ -1,6 +1,7 @@
 """Package a platform-native VN_Editor build with a starter project and game templates."""
 
 import argparse
+import importlib.util
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -68,6 +69,11 @@ def _write_starter_project(root: Path) -> None:
         "name": "My Visual Novel",
         "story": "story.yaml",
         "icon": None,
+        "android": {
+            "app_name": "VN Engine",
+            "app_id": "com.example.vnengine",
+            "orientation": "landscape",
+        },
         "save_slots": 5,
         "paths": {"data": "data", "assets": "assets", "user_data": "user_data"},
     }
@@ -99,6 +105,30 @@ def _copy_game_templates(templates_dir: Path, root: Path, template_platforms: se
         if not source.is_file():
             raise FileNotFoundError(f"Required game template is missing: {source}")
         shutil.copy2(source, destination / name)
+
+
+def _copy_android_web_sources(root: Path) -> None:
+    """Ship source inputs for a fresh Pygbag build, without requiring Python on the user's PC."""
+    project_root = Path(__file__).resolve().parents[1]
+    source_root = root / "android-web-source"
+    shutil.copytree(
+        project_root / "engine",
+        source_root / "engine",
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.wav"),
+    )
+    shutil.copy2(project_root / "web_main.py", source_root / "main.py")
+
+    yaml_spec = importlib.util.find_spec("yaml")
+    if yaml_spec is None or yaml_spec.origin is None:
+        raise FileNotFoundError("PyYAML source files are required to package fresh Android web builds.")
+    yaml_root = Path(yaml_spec.origin).resolve().parent
+    yaml_destination = source_root / "yaml"
+    for source in yaml_root.rglob("*.py"):
+        if "__pycache__" in source.parts:
+            continue
+        target = yaml_destination / source.relative_to(yaml_root)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
 
 
 def _main_executable_path(platform: str) -> str:
@@ -169,6 +199,7 @@ def package_editor(
         else:
             shutil.copy2(editor_build, staging / editor_build.name)
         _copy_game_templates(templates_dir, staging, template_platforms)
+        _copy_android_web_sources(staging)
         _write_starter_project(staging)
         _copy_docs(staging)
 

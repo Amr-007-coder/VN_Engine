@@ -2,6 +2,7 @@ import json
 
 from engine.embedded import bytes_for_path
 from engine.loader import PATHS
+from engine.ui_scale import DEFAULT_UI_SCALE, MAX_UI_SCALE, MIN_UI_SCALE
 
 
 DEFAULT_SETTINGS = {
@@ -9,6 +10,7 @@ DEFAULT_SETTINGS = {
     "music_volume": 0.7,
     "sfx_volume": 0.8,
     "fullscreen": False,
+    "ui_scale": DEFAULT_UI_SCALE,
 }
 
 
@@ -83,3 +85,9 @@ class SettingsStore:
         if isinstance(fullscreen, str):
             fullscreen = fullscreen.strip().lower() in {"1", "true", "yes", "on"}
         self.values["fullscreen"] = bool(fullscreen)
+
+        try:
+            ui_scale = float(self.values.get("ui_scale", DEFAULT_UI_SCALE))
+        except (TypeError, ValueError):
+            ui_scale = DEFAULT_UI_SCALE
+        self.values["ui_scale"] = round(min(MAX_UI_SCALE, max(MIN_UI_SCALE, ui_scale)), 2)
