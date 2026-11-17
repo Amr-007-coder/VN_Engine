@@ -80,6 +80,7 @@ class Textbox(UIElement):
         self.current_speaker = ""
         self.ms_per_char = 30
         self.last_update_time = 0
+        self.text_bottom_padding = 0
 
     @property
     def complete(self) -> bool:
@@ -137,6 +138,9 @@ class Textbox(UIElement):
         cursor_x = ui_size(40)
         cursor_y = ui_size(55)
         line_height = font.get_linesize()
+        original_clip = self.surface.get_clip()
+        content_height = max(0, self.rect.height - self.text_bottom_padding)
+        self.surface.set_clip(pygame.Rect(0, 0, self.rect.width, content_height))
 
         old_bold = font.get_bold()
         old_italic = font.get_italic()
@@ -169,6 +173,7 @@ class Textbox(UIElement):
 
         font.set_bold(old_bold)
         font.set_italic(old_italic)
+        self.surface.set_clip(original_clip)
 
 
 class Button(UIElement):

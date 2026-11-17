@@ -8,6 +8,15 @@ def parse(text: str):
     temp = ""
     current_type = ""
     for char in text:
+        if "value" in current_type:
+            if char == CHAR_PARS.value.end:
+                if temp:
+                    words.append((temp, current_type))
+                    temp = ""
+                current_type = current_type.replace("value", "")
+            else:
+                temp += char
+            continue
         if char in seperators:
             if temp:
                 words.append((temp, current_type))

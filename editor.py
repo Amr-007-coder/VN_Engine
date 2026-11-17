@@ -12,6 +12,7 @@ import ast
 from dataclasses import dataclass
 from difflib import get_close_matches
 import json
+import math
 import os
 from pathlib import Path
 from pathlib import PurePosixPath
@@ -46,11 +47,13 @@ CONDITION_KEYS = {"var", "op", "value", "all", "any", "not"}
 ACTION_TYPES = {
     "set", "add", "subtract", "background", "clear_background", "music", "stop_music",
     "sound", "show_character", "animate_character", "hide_character", "clear_characters", "fade", "shake", "autosave",
+    "input",
 }
 ACTION_FIELDS = {
     "set": {"type", "var", "value"},
     "add": {"type", "var", "value"},
     "subtract": {"type", "var", "value"},
+    "input": {"type", "var", "prompt", "input_type"},
     "background": {"type", "image"},
     "clear_background": {"type"},
     "music": {"type", "track"},
@@ -68,6 +71,7 @@ REQUIRED_ACTION_FIELDS = {
     "set": {"var", "value"},
     "add": {"var", "value"},
     "subtract": {"var", "value"},
+    "input": {"var", "prompt"},
     "background": {"image"},
     "music": {"track"},
     "sound": {"name"},
@@ -149,6 +153,12 @@ FALLBACK_DEFAULT_PROJECT = {
     },
     "paths": {"data": "data", "assets": "assets", "user_data": "user_data"},
     "window": {"width": 1920, "height": 1200, "caption": "VN Engine"},
+    "dialogue_buttons": {
+        "back": {"visible": True, "label": "Back"},
+        "history": {"visible": True, "label": "History"},
+        "quick_save": {"visible": True, "label": "Q. Save"},
+        "quick_load": {"visible": True, "label": "Q. Load"},
+    },
     "menus": {
         "main": {"title": "Visual Novel", "items": [
             {"label": "New Game", "action": "new_game"},
@@ -182,6 +192,7 @@ FALLBACK_DEFAULT_PROJECT = {
             "back": {"label": "Back", "action": "back"},
         },
     },
+    "characters": {},
     "theme": {},
 }
 DEFAULT_PROJECT = _literal_from_engine("engine/project.py", "DEFAULT_PROJECT") or FALLBACK_DEFAULT_PROJECT
@@ -193,6 +204,14 @@ DEFAULT_THEME = _literal_from_engine("engine/theme.py", "DEFAULT_THEME") or {
                "accent": [233, 79, 88], "panel": [0, 0, 0, 128]},
     "fonts": {"menu": None, "title": None, "item_size": 20,
               "detail_size": 16, "title_size": 30},
+    "game_fonts": {
+        "text": "standard.ttf", "name": "standard.ttf",
+        "button": "standard.ttf", "intro": "standard.ttf",
+    },
+    "game_font_sizes": {
+        "text": 24, "name": 28, "button": 20, "dialogue_controls": 12,
+        "intro": 40, "intro_small": 21,
+    },
     "menu": {
         "layout": "centered", "background": None, "width": 860,
         "x": None, "row_height": 56, "row_gap": 9, "title_y": 112,
@@ -236,7 +255,13 @@ DEFAULT_THEME = _literal_from_engine("engine/theme.py", "DEFAULT_THEME") or {
     "sounds": {"hover": "sounds/hover_button.wav", "click": "sounds/click_button.wav",
                "cancel": "sounds/click_button.wav", "load": "sounds/click_button.wav"},
 }
-DEFAULT_THEME.setdefault("game_fonts", {"text": None, "name": None, "button": None})
+DEFAULT_THEME.setdefault("game_fonts", {
+    "text": None, "name": None, "button": None, "intro": None,
+})
+DEFAULT_THEME.setdefault("game_font_sizes", {
+    "text": 24, "name": 28, "button": 20, "dialogue_controls": 12,
+    "intro": 40, "intro_small": 21,
+})
 DEFAULT_THEME.setdefault("menu", {}).setdefault("right_margin", 48)
 DEFAULT_THEME.setdefault("textbox", {"background": None, "color": None})
 
@@ -297,21 +322,6 @@ def _is_standalone_editor_package(root: Path) -> bool:
 
 def _starter_project_directory() -> Path:
     return Path.home() / "Documents" / "VN Engine Projects" / "My Visual Novel"
-
-
-def _editor_release_tag(package_root: Path) -> str | None:
-    version_files = (
-        package_root / "engine-version.txt",
-        Path(__file__).resolve().parent / "engine" / "data" / "version.txt",
-    )
-    for version_file in version_files:
-        if not version_file.is_file():
-            continue
-        version = version_file.read_text(encoding="utf-8").strip()
-        if not re.fullmatch(r"\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?", version):
-            raise ValueError(f"Invalid editor version in {version_file}: {version!r}")
-        return f"v{version}"
-    return None
 
 
 def _editor_markdown_paths(editor_home: Path) -> list[Path]:
@@ -788,6 +798,17 @@ def analyze_story(
         if not isinstance(actions, list):
             diagnostics.append(Diagnostic("error", f"dialogues.{dialogue_id}.actions must be a list.", _line_of_key(source, "actions", line)))
             actions = []
+        input_actions = [
+            action for action in actions
+            if isinstance(action, dict) and action.get("type") == "input"
+        ]
+        if len(input_actions) > 1:
+            diagnostics.append(Diagnostic("error", f"dialogues.{dialogue_id} may contain at most one input action.", _line_of_key(source, "actions", line)))
+        if input_actions and any(
+            isinstance(action, dict) and action.get("type") == "autosave"
+            for action in actions
+        ):
+            diagnostics.append(Diagnostic("error", f"dialogues.{dialogue_id} cannot combine an input action with autosave.", _line_of_key(source, "actions", line)))
         for action in actions:
             diagnostics.extend(_validate_action(action, variables, catalog, source, line, dialogue_id))
 
@@ -868,7 +889,7 @@ def _validate_action(action, variables, catalog, source, dialogue_line, dialogue
         result.append(Diagnostic("error", f"Unknown action type {kind!r}.{_suggest_typo(kind, ACTION_TYPES)}", action_line))
         result.extend(_mapping_key_diagnostics(
             action,
-            {"type", "var", "value", "image", "track", "name", "look", "expression", "frames", "position", "direction", "duration", "frame_duration", "loop", "color", "intensity"},
+            {"type", "var", "value", "prompt", "input_type", "image", "track", "name", "look", "expression", "frames", "position", "direction", "duration", "frame_duration", "loop", "color", "intensity"},
             source,
             action_line,
             "action",
@@ -892,6 +913,24 @@ def _validate_action(action, variables, catalog, source, dialogue_line, dialogue
                 result.append(Diagnostic("error", f"Action '{kind}' needs a numeric story variable.", _line_of_key(source, "var", action_line)))
             if not isinstance(value, (int, float)) or isinstance(value, bool):
                 result.append(Diagnostic("error", f"Action '{kind}' needs a numeric value.", _line_of_key(source, "value", action_line)))
+    elif kind == "input":
+        variable = action.get("var")
+        if not isinstance(variable, str) or variable not in variables:
+            result.append(Diagnostic("error", f"Action 'input' references undeclared variable {variable!r}.", _line_of_key(source, "var", action_line)))
+        prompt = action.get("prompt")
+        if not isinstance(prompt, str) or not prompt.strip():
+            result.append(Diagnostic("error", "Action 'input' requires a non-empty prompt.", _line_of_key(source, "prompt", action_line)))
+        input_type = action.get("input_type", "text")
+        if not isinstance(input_type, str) or input_type not in {"text", "integer"}:
+            result.append(Diagnostic("error", "Action 'input' input_type must be 'text' or 'integer'.", _line_of_key(source, "input_type", action_line)))
+        elif isinstance(variable, str) and variable in variables:
+            initial = variables[variable]
+            if input_type == "text" and initial is not None and not isinstance(initial, str):
+                result.append(Diagnostic("error", f"Action 'input' requires variable '{variable}' to start as a string or null.", _line_of_key(source, "var", action_line)))
+            elif input_type == "integer" and initial is not None and (
+                not isinstance(initial, int) or isinstance(initial, bool)
+            ):
+                result.append(Diagnostic("error", f"Action 'input' requires variable '{variable}' to start as an integer or null.", _line_of_key(source, "var", action_line)))
     elif kind in {"background", "sound", "music"}:
         field, category = {"background": ("image", "image"), "sound": ("name", "sound"), "music": ("track", "music")}[kind]
         asset_name = action.get(field)
@@ -1016,12 +1055,140 @@ def _validate_project_object(values, raw, source, diagnostics):
 
     diagnostics.extend(_mapping_key_diagnostics(raw, set(DEFAULT_PROJECT), source, 1, "project.json"))
     for key, child in raw.items():
-        if key != "theme" and key in DEFAULT_PROJECT and isinstance(child, dict) and isinstance(DEFAULT_PROJECT[key], dict):
+        if (
+            key not in {"theme", "characters"}
+            and key in DEFAULT_PROJECT
+            and isinstance(child, dict)
+            and isinstance(DEFAULT_PROJECT[key], dict)
+        ):
             check_unknown(child, DEFAULT_PROJECT[key], f"project.json.{key}", _line_of_key(source, key))
+    characters = raw.get("characters", {})
+    if not isinstance(characters, dict):
+        diagnostics.append(Diagnostic(
+            "error",
+            "characters must be an object mapping character names to settings.",
+            _line_of_key(source, "characters"),
+        ))
+    else:
+        for name, settings in characters.items():
+            character_line = _line_of_key(
+                source, str(name), _line_of_key(source, "characters")
+            )
+            if not isinstance(name, str) or not name.strip():
+                diagnostics.append(Diagnostic(
+                    "error",
+                    "characters keys must be non-empty character names.",
+                    character_line,
+                ))
+                continue
+            if not isinstance(settings, dict):
+                diagnostics.append(Diagnostic(
+                    "error",
+                    f"characters.{name} must be an object.",
+                    character_line,
+                ))
+                continue
+            diagnostics.extend(_mapping_key_diagnostics(
+                settings, {"scale"}, source, character_line, f"characters.{name}"
+            ))
+            scale = settings.get("scale", 100)
+            try:
+                valid_scale = (
+                    isinstance(scale, (int, float))
+                    and not isinstance(scale, bool)
+                    and math.isfinite(scale)
+                    and scale > 0
+                )
+            except OverflowError:
+                valid_scale = False
+            if not valid_scale:
+                diagnostics.append(Diagnostic(
+                    "error",
+                    f"characters.{name}.scale must be a positive percentage.",
+                    _line_of_key(source, "scale", character_line),
+                ))
+    dialogue_buttons = raw.get("dialogue_buttons", {})
+    if not isinstance(dialogue_buttons, dict):
+        diagnostics.append(Diagnostic(
+            "error",
+            "dialogue_buttons must be an object.",
+            _line_of_key(source, "dialogue_buttons"),
+        ))
+    else:
+        for button_name in ("back", "history", "quick_save", "quick_load"):
+            button = dialogue_buttons.get(button_name)
+            if button is None:
+                continue
+            button_line = _line_of_key(
+                source, button_name, _line_of_key(source, "dialogue_buttons")
+            )
+            if not isinstance(button, dict):
+                diagnostics.append(Diagnostic(
+                    "error",
+                    f"dialogue_buttons.{button_name} must be an object.",
+                    button_line,
+                ))
+                continue
+            if "visible" in button and not isinstance(button["visible"], bool):
+                diagnostics.append(Diagnostic(
+                    "error",
+                    f"dialogue_buttons.{button_name}.visible must be a boolean.",
+                    _line_of_key(source, "visible", button_line),
+                ))
+            if "label" in button and not isinstance(button["label"], str):
+                diagnostics.append(Diagnostic(
+                    "error",
+                    f"dialogue_buttons.{button_name}.label must be a string.",
+                    _line_of_key(source, "label", button_line),
+                ))
     theme = raw.get("theme", {})
     if isinstance(theme, dict):
         check_unknown(theme, DEFAULT_THEME, "theme", _line_of_key(source, "theme"))
         theme_values = merge_defaults(DEFAULT_THEME, theme)
+        for group, font_names in (
+            ("fonts", ("menu", "title")),
+            ("game_fonts", ("text", "name", "button", "intro")),
+        ):
+            font_config = theme.get(group, {})
+            if not isinstance(font_config, dict):
+                diagnostics.append(Diagnostic(
+                    "error",
+                    f"theme.{group} must be an object.",
+                    _line_of_key(source, group, _line_of_key(source, "theme")),
+                ))
+                continue
+            for name in font_names:
+                font = font_config.get(name)
+                if font is not None and not isinstance(font, str):
+                    diagnostics.append(Diagnostic(
+                        "error",
+                        f"theme.{group}.{name} must be a font path or null.",
+                        _line_of_key(source, name, _line_of_key(source, group)),
+                    ))
+        for group, size_names in (
+            ("fonts", ("item_size", "detail_size", "title_size")),
+            (
+                "game_font_sizes",
+                ("text", "name", "button", "dialogue_controls", "intro", "intro_small"),
+            ),
+        ):
+            size_config = theme.get(group, {})
+            if not isinstance(size_config, dict):
+                diagnostics.append(Diagnostic(
+                    "error",
+                    f"theme.{group} must be an object.",
+                    _line_of_key(source, group, _line_of_key(source, "theme")),
+                ))
+                continue
+            defaults = DEFAULT_THEME[group]
+            for name in size_names:
+                size = size_config.get(name, defaults[name])
+                if not isinstance(size, int) or isinstance(size, bool) or size < 1:
+                    diagnostics.append(Diagnostic(
+                        "error",
+                        f"theme.{group}.{name} must be a positive integer.",
+                        _line_of_key(source, name, _line_of_key(source, group)),
+                    ))
         menu_theme = theme.get("menu", {})
         resolved_menu = theme_values.get("menu", {})
         if not isinstance(menu_theme, dict):
@@ -1419,7 +1586,7 @@ def _validate_project_assets(values, catalog, source, diagnostics):
         return
     for group, keys, kind in (
         ("fonts", ("menu", "title"), "font"),
-        ("game_fonts", ("text", "name", "button"), "font"),
+        ("game_fonts", ("text", "name", "button", "intro"), "font"),
         ("menu", ("background",), "image"),
         ("slot", ("normal", "hovered"), "image"),
         ("textbox", ("background",), "image"),
@@ -3123,7 +3290,7 @@ while ($true) {{
                 values = [(value, "sound asset") for value in catalog.asset_suggestions("sound")]
             elif key in {"menu", "title"} and context[-1:] == ("fonts",):
                 values = [(value, "font file") for value in catalog.asset_suggestions("font")]
-            elif key in {"text", "name", "button"} and context[-1:] == ("game_fonts",):
+            elif key in {"text", "name", "button", "intro"} and context[-1:] == ("game_fonts",):
                 values = [(value, "font file") for value in catalog.asset_suggestions("font")]
             elif key in {"data", "assets", "user_data"} and context[-1:] == ("paths",):
                 values = [("data", "project folder"), ("assets", "project folder"), ("user_data", "writable folder")]
@@ -3207,11 +3374,18 @@ while ($true) {{
     def _json_allowed_keys(context):
         if not context:
             return sorted(DEFAULT_PROJECT)
+        if context[0] == "characters":
+            return ["scale"] if len(context) == 2 else []
         joined = ".".join(context)
         schemas = {
             "intro": ["creator", "game_version", "warning_message", "credit_image", "warning_image", "headphones_image"],
             "paths": ["data", "assets", "user_data"],
             "window": ["width", "height", "caption"],
+            "dialogue_buttons": list(DEFAULT_PROJECT.get("dialogue_buttons", {})),
+            "dialogue_buttons.back": ["visible", "label"],
+            "dialogue_buttons.history": ["visible", "label"],
+            "dialogue_buttons.quick_save": ["visible", "label"],
+            "dialogue_buttons.quick_load": ["visible", "label"],
             "menus": ["main", "pause", "settings", "slots"],
             "menus.main": ["title", "items"],
             "menus.pause": ["title", "items"],
@@ -3226,7 +3400,8 @@ while ($true) {{
             "theme": list(DEFAULT_THEME),
             "theme.colors": list(DEFAULT_THEME.get("colors", {})),
             "theme.fonts": list(DEFAULT_THEME.get("fonts", {})),
-            "theme.game_fonts": ["text", "name", "button"],
+            "theme.game_fonts": list(DEFAULT_THEME.get("game_fonts", {})),
+            "theme.game_font_sizes": list(DEFAULT_THEME.get("game_font_sizes", {})),
             "theme.menu": list(DEFAULT_THEME.get("menu", {})) + ["right_margin"],
             "theme.menu.screens": list(DEFAULT_THEME.get("menu", {}).get("screens", {})),
             "theme.menu.screens.main": list(DEFAULT_THEME.get("menu", {}).get("screens", {}).get("main", {})),
@@ -3865,7 +4040,7 @@ def main():
         last_project = None if args.project_dir is not None else _load_last_project()
         root_path = _initial_project_root(args.project_dir, Path.cwd(), package_root, last_project)
         if args.project_dir is None and not _contains_project(root_path):
-            install_starter_project(root_path, _editor_release_tag(package_root))
+            install_starter_project(root_path, project_template=DEFAULT_PROJECT)
     except (OSError, RuntimeError, ValueError) as error:
         root = tk.Tk()
         root.withdraw()

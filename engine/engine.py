@@ -3,6 +3,7 @@ import pygame
 import math
 import random
 import sys
+from copy import deepcopy
 from datetime import datetime
 
 from engine.assets import AssetManager
@@ -101,6 +102,11 @@ class Engine:
         self.dialogue_history = []
         self.history_visible = False
         self.history_scroll = 0
+        self.dialogue_back_stack = []
+        self.dialogue_button_rects = {}
+        self.confirmation = None
+        self.confirmation_button_rects = {}
+        self.story_input = None
         self.fade_effect = None
         self.shake_effect = None
         self.autosave_notice_until = 0
@@ -166,7 +172,9 @@ class Engine:
         try:
             self.assets = AssetManager(self.project.assets_dir)
             self.character_layer = CharacterLayer(
-                self.assets, self.story_data.get("character_defaults", {})
+                self.assets,
+                self.story_data.get("character_defaults", {}),
+                self.project.values.get("characters", {}),
             )
             load_assets(self.assets, self.theme)
             flags = pygame.FULLSCREEN if self.settings.values["fullscreen"] else 0
@@ -229,8 +237,15 @@ class Engine:
         logo_rect = logo.get_rect(center=(screen_width // 2, screen_height // 2 - 20))
         intro = self.project.values["intro"]
         engine_version = _read_engine_version()
-        font = self.assets.load_font("standard.ttf", ui_size(max(22, screen_height // 30)))
-        small_font = self.assets.load_font("standard.ttf", ui_size(max(16, screen_height // 55)))
+        game_fonts = self.theme.get("game_fonts", {})
+        font_sizes = self.theme.get("game_font_sizes", {})
+        intro_font = game_fonts.get("intro", "standard.ttf")
+        font = self.assets.load_font(
+            intro_font, ui_size(font_sizes.get("intro", 40))
+        )
+        small_font = self.assets.load_font(
+            intro_font, ui_size(font_sizes.get("intro_small", 21))
+        )
         cards = [
             {"image": logo, "kind": "logo", "hold": 3.0},
             {"image": self._intro_image(intro["credit_image"]), "kind": "credit", "hold": 2.5},
@@ -351,6 +366,19 @@ class Engine:
                 self._handle_menu_event(event)
 
     def _handle_game_event(self, event):
+        if getattr(self, "story_input", None) is not None:
+            if self.story_input["active"]:
+                self._handle_story_input_event(event)
+            elif self.textbox.complete:
+                self._activate_story_input()
+            elif event.type == pygame.KEYDOWN and event.key == pygame.K_SPACE:
+                self._advance_story()
+            elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                self._advance_story()
+            return
+        if self.confirmation is not None:
+            self._handle_confirmation_event(event)
+            return
         if event.type == pygame.KEYDOWN:
             if event.key == pygame.K_ESCAPE:
                 if self.history_visible:
@@ -372,12 +400,16 @@ class Engine:
         elif event.type == pygame.MOUSEWHEEL and self.history_visible:
             self.history_scroll = max(0, self.history_scroll + event.y * 3)
         elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-            if not self.history_visible and self.pause_button_rect.collidepoint(event.pos):
-                self._open_pause_menu()
-            elif self.history_visible:
+            if self.history_visible:
                 self.history_visible = False
             else:
-                self._handle_game_click(event.pos)
+                self._layout_dialogue_buttons()
+                if self._handle_dialogue_button_click(event.pos):
+                    return
+                if self.pause_button_rect.collidepoint(event.pos):
+                    self._open_pause_menu()
+                else:
+                    self._handle_game_click(event.pos)
 
     def _handle_game_click(self, position):
         if self._fade_out_blocks_input():
@@ -385,6 +417,7 @@ class Engine:
         if self.flow.choices_visible:
             for index, button in enumerate(self.choice_buttons):
                 if button.update(True, position):
+                    self._remember_dialogue_state()
                     self.flow.choose(index)
                     self._enter_dialogue()
                     return
@@ -473,6 +506,10 @@ class Engine:
         if self.mode != "game":
             return
         self.textbox.update()
+        if self.story_input is not None:
+            if not self.story_input["active"] and self.textbox.complete:
+                self._activate_story_input()
+            return
         if self.flow.options and self.textbox.complete and not self.flow.choices_visible:
             self.flow.show_choices()
             self._sync_choice_buttons()
@@ -500,6 +537,13 @@ class Engine:
         else:
             self._render_status()
             self._draw_pause_button()
+        if self.confirmation is not None:
+            self._render_confirmation()
+        if (
+            getattr(self, "story_input", None) is not None
+            and self.story_input["active"]
+        ):
+            self._render_story_input()
         pygame.display.flip()
 
     def _renderer_for_active_menu(self):
@@ -532,6 +576,7 @@ class Engine:
                 )
                 scene.blit(button.surface, button.rect)
 
+        self._draw_dialogue_buttons(scene)
         self.screen.fill(COLORS.background)
         shake_x, shake_y = self._shake_offset()
         self.screen.blit(scene, (shake_x, shake_y))
@@ -569,6 +614,14 @@ class Engine:
             panel_image=image,
             panel_opacity=textbox_theme.get("opacity", 0.95),
         )
+        dialogue_buttons = getattr(
+            getattr(self, "project", None), "values", {}
+        ).get("dialogue_buttons", {})
+        if any(
+            isinstance(button, dict) and button.get("visible", False)
+            for button in dialogue_buttons.values()
+        ):
+            textbox.text_bottom_padding = ui_size(48)
         if previous is not None:
             textbox.current_speaker = previous.current_speaker
             textbox.full_parsed_text = previous.full_parsed_text
@@ -601,6 +654,404 @@ class Engine:
         pygame.draw.circle(self.screen, (242, 242, 247), rect.center, disk_side // 2)
         self.screen.blit(self.scaled_pause_button_image, self.scaled_pause_button_image.get_rect(center=rect.center))
 
+    def _layout_dialogue_buttons(self):
+        self.dialogue_button_rects = {}
+        if self.textbox is None:
+            return []
+
+        config = self.project.values.get("dialogue_buttons", {})
+        visible = [
+            (name, button)
+            for name in ("back", "history", "quick_save", "quick_load")
+            if isinstance((button := config.get(name)), dict) and button.get("visible", True)
+        ]
+        if not visible:
+            return []
+
+        gap = ui_size(8)
+        height = ui_size(22)
+        available_width = max(1, self.textbox.rect.width - ui_size(24))
+        max_button_width = max(
+            1, (available_width - gap * (len(visible) - 1)) // len(visible)
+        )
+        widths = [
+            min(
+                max_button_width,
+                max(
+                    ui_size(58),
+                    FONTS.dialogue_controls.size(button["label"])[0] + ui_size(14),
+                ),
+            )
+            for _, button in visible
+        ]
+        if sum(widths) + gap * (len(widths) - 1) > available_width:
+            widths = [max_button_width] * len(visible)
+        total_width = sum(widths) + gap * (len(widths) - 1)
+        left = self.textbox.rect.centerx - total_width // 2
+        top = self.textbox.rect.bottom - ui_size(8) - height
+
+        buttons = []
+        for (name, button), width in zip(visible, widths):
+            rect = pygame.Rect(left, top, width, height)
+            self.dialogue_button_rects[name] = rect
+            buttons.append(
+                (name, button["label"], rect, name != "back" or bool(self.dialogue_back_stack))
+            )
+            left += width + gap
+        return buttons
+
+    def _draw_dialogue_buttons(self, surface):
+        colors = self.theme.get("colors", {})
+        for name, label, rect, enabled in self._layout_dialogue_buttons():
+            hovered = enabled and rect.collidepoint(pygame.mouse.get_pos())
+            if not enabled:
+                text_color = (130, 130, 138)
+            elif hovered:
+                text_color = colors.get("accent", COLORS.text_highlight)
+            else:
+                text_color = COLORS.text
+            text = FONTS.dialogue_controls.render(label, True, text_color)
+            previous_clip = surface.get_clip()
+            surface.set_clip(rect)
+            surface.blit(text, text.get_rect(center=rect.center))
+            surface.set_clip(previous_clip)
+
+    def _handle_dialogue_button_click(self, position):
+        for name, _, rect, enabled in self._layout_dialogue_buttons():
+            if not rect.collidepoint(position):
+                continue
+            if not enabled:
+                return True
+            if name == "back":
+                self._go_back_dialogue()
+            elif name == "history":
+                self.history_visible = True
+                self.history_scroll = 0
+            elif name == "quick_save":
+                self._request_confirmation(
+                    "quick_save", "Overwrite Quick Save with current progress?"
+                )
+            elif name == "quick_load":
+                self._request_confirmation(
+                    "quick_load",
+                    "Load Quick Save if available, otherwise the most recent save?",
+                )
+            return True
+        return False
+
+    def _remember_dialogue_state(self):
+        if self.flow is None:
+            return
+        state = {
+            "flow": self.flow.snapshot(),
+            "background": self.background_id,
+            "music": self.music_track,
+            "characters": (
+                self.character_layer.snapshot()
+                if self.character_layer is not None
+                else {}
+            ),
+            "dialogue_history": deepcopy(self.dialogue_history),
+            "fade_effect": deepcopy(self.fade_effect),
+            "shake_effect": deepcopy(self.shake_effect),
+        }
+        self.dialogue_back_stack.append(state)
+        if len(self.dialogue_back_stack) > 2000:
+            del self.dialogue_back_stack[:-2000]
+
+    def _go_back_dialogue(self):
+        if not self.dialogue_back_stack:
+            return False
+
+        state = self.dialogue_back_stack.pop()
+        flow = StoryFlow(self.story_data, self.project.assets_dir, PATHS.engine_assets)
+        flow.restore(state["flow"])
+        self.flow = flow
+        self.choice_buttons = []
+        self.dialogue_history = state["dialogue_history"]
+        self.background_id = state["background"]
+        self.background_image = None
+        if self.background_id is not None:
+            self._set_background(self.background_id)
+        if self.character_layer is not None:
+            self.character_layer.restore(state["characters"])
+        if self.music_track != state["music"]:
+            self._stop_music()
+            if state["music"]:
+                self._play_music(state["music"])
+        self.fade_effect = state["fade_effect"]
+        self.shake_effect = state["shake_effect"]
+        self.history_visible = False
+        self.history_scroll = 0
+        self.status_message = ""
+        self._enter_dialogue(apply_actions=False)
+        return True
+
+    def _request_confirmation(self, action, message):
+        self.confirmation = {"action": action, "message": message}
+        self.confirmation_button_rects = {}
+
+    def _begin_story_input(self, action):
+        if self.flow is None or action["var"] not in self.flow.variables:
+            raise RuntimeError(
+                f"Input action references unavailable story variable {action['var']!r}."
+            )
+        self.story_input = {
+            "var": action["var"],
+            "prompt": action["prompt"],
+            "input_type": action.get("input_type", "text"),
+            "text": "",
+            "error": "",
+            "active": False,
+        }
+
+    def _activate_story_input(self):
+        if self.story_input is None or self.story_input["active"]:
+            return
+        self.story_input["active"] = True
+        pygame.key.start_text_input()
+        screen = getattr(self, "screen", None)
+        if screen is not None and hasattr(pygame.key, "set_text_input_rect"):
+            pygame.key.set_text_input_rect(self._story_input_geometry()[1])
+
+    def _end_story_input(self):
+        if getattr(self, "story_input", None) is None:
+            return
+        active = self.story_input["active"]
+        self.story_input = None
+        if active:
+            pygame.key.stop_text_input()
+
+    def _handle_story_input_event(self, event):
+        if event.type == pygame.TEXTINPUT:
+            self.story_input["text"] += event.text
+        elif event.type == pygame.KEYDOWN:
+            if event.key == pygame.K_BACKSPACE:
+                self.story_input["text"] = self.story_input["text"][:-1]
+                self.story_input["error"] = ""
+            elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+                self._submit_story_input()
+
+    def _submit_story_input(self):
+        answer = self.story_input["text"].strip()
+        if not answer:
+            self.story_input["error"] = "An answer is required."
+            return
+        if self.story_input["input_type"] == "integer":
+            try:
+                answer = int(answer)
+            except ValueError:
+                self.story_input["error"] = "Enter a whole number."
+                return
+        self.flow.variables[self.story_input["var"]] = answer
+        self._end_story_input()
+
+    def _story_input_geometry(self):
+        screen_rect = self.screen.get_rect()
+        width = max(1, min(ui_size(720), screen_rect.width - ui_size(32)))
+        prompt_width = max(1, width - ui_size(48))
+        font = FONTS.normal_text
+        prompt_lines = []
+        for paragraph in self.story_input["prompt"].splitlines() or [""]:
+            line = ""
+            for word in paragraph.split():
+                candidate = f"{line} {word}".strip()
+                if line and font.size(candidate)[0] > prompt_width:
+                    prompt_lines.append(line)
+                    line = word
+                else:
+                    line = candidate
+            prompt_lines.append(line)
+        line_height = font.get_linesize()
+        fixed_height = ui_size(174)
+        height = max(
+            1,
+            min(
+                max(ui_size(230), fixed_height + len(prompt_lines) * line_height),
+                screen_rect.height - ui_size(32),
+            ),
+        )
+        panel = pygame.Rect(0, 0, width, height)
+        panel.center = screen_rect.center
+        max_prompt_lines = max(1, (panel.height - fixed_height) // line_height)
+        prompt_lines = prompt_lines[:max_prompt_lines]
+        field = pygame.Rect(
+            panel.left + ui_size(24),
+            panel.top + ui_size(76) + len(prompt_lines) * line_height,
+            max(1, panel.width - ui_size(48)),
+            ui_size(46),
+        )
+        return panel, field, prompt_lines
+
+    def _render_story_input(self):
+        panel, field, prompt_lines = self._story_input_geometry()
+        pygame.draw.rect(self.screen, (24, 25, 38), panel, border_radius=ui_size(10))
+        pygame.draw.rect(
+            self.screen,
+            self.theme.get("colors", {}).get("border", (112, 86, 101)),
+            panel,
+            width=max(1, ui_size(2)),
+            border_radius=ui_size(10),
+        )
+        heading = FONTS.char_name.render("Story Input", True, COLORS.text_highlight)
+        self.screen.blit(heading, heading.get_rect(midtop=(panel.centerx, panel.top + ui_size(18))))
+
+        font = FONTS.normal_text
+        for index, line in enumerate(prompt_lines):
+            rendered = font.render(line, True, COLORS.text)
+            self.screen.blit(
+                rendered,
+                rendered.get_rect(midtop=(panel.centerx, panel.top + ui_size(62) + index * font.get_linesize())),
+            )
+
+        pygame.draw.rect(self.screen, (12, 13, 22), field, border_radius=ui_size(5))
+        pygame.draw.rect(
+            self.screen,
+            self.theme.get("colors", {}).get("border", (112, 86, 101)),
+            field,
+            width=max(1, ui_size(1)),
+            border_radius=ui_size(5),
+        )
+        answer = self.story_input["text"]
+        while answer and font.size(answer)[0] > field.width - ui_size(20):
+            answer = answer[1:]
+        rendered_answer = font.render(answer, True, COLORS.text)
+        self.screen.blit(
+            rendered_answer,
+            rendered_answer.get_rect(midleft=(field.left + ui_size(10), field.centery)),
+        )
+        if self.story_input["error"]:
+            error = FONTS.button_text.render(self.story_input["error"], True, COLORS.text_highlight)
+            self.screen.blit(error, error.get_rect(midtop=(panel.centerx, field.bottom + ui_size(6))))
+        help_text = FONTS.button_text.render("Type your answer, then press Enter", True, COLORS.text)
+        self.screen.blit(help_text, help_text.get_rect(midbottom=(panel.centerx, panel.bottom - ui_size(14))))
+
+    def _handle_confirmation_event(self, event):
+        if event.type == pygame.KEYDOWN:
+            if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_y):
+                self._confirm_dialogue_action()
+            elif event.key in (pygame.K_ESCAPE, pygame.K_BACKSPACE, pygame.K_n):
+                self.confirmation = None
+                self.confirmation_button_rects = {}
+        elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            if self.confirmation_button_rects.get("confirm", pygame.Rect(0, 0, 0, 0)).collidepoint(event.pos):
+                self._confirm_dialogue_action()
+            else:
+                self.confirmation = None
+                self.confirmation_button_rects = {}
+
+    def _render_confirmation(self):
+        shade = pygame.Surface(self.screen.get_size(), pygame.SRCALPHA)
+        shade.fill((0, 0, 0, 190))
+        self.screen.blit(shade, (0, 0))
+        width = max(1, min(ui_size(560), self.screen.get_width() - ui_size(32)))
+        height = max(1, min(ui_size(190), self.screen.get_height() - ui_size(32)))
+        panel = pygame.Rect(0, 0, width, height)
+        panel.center = self.screen.get_rect().center
+        pygame.draw.rect(self.screen, (24, 25, 38), panel, border_radius=ui_size(10))
+        pygame.draw.rect(
+            self.screen,
+            self.theme.get("colors", {}).get("border", (112, 86, 101)),
+            panel,
+            width=max(1, ui_size(2)),
+            border_radius=ui_size(10),
+        )
+        heading = FONTS.char_name.render("Are you sure?", True, COLORS.text_highlight)
+        self.screen.blit(heading, heading.get_rect(midtop=(panel.centerx, panel.top + ui_size(18))))
+
+        message_width = max(1, panel.width - ui_size(32))
+        message_lines = []
+        current_line = ""
+        for word in self.confirmation["message"].split():
+            candidate = f"{current_line} {word}".strip()
+            if current_line and FONTS.button_text.size(candidate)[0] > message_width:
+                message_lines.append(current_line)
+                current_line = word
+            else:
+                current_line = candidate
+        if current_line:
+            message_lines.append(current_line)
+        buttons_top = panel.bottom - ui_size(54)
+        line_height = FONTS.button_text.get_linesize()
+        message_top = min(panel.top + ui_size(60), buttons_top - line_height)
+        for index, line in enumerate(message_lines):
+            message = FONTS.button_text.render(line, True, COLORS.text)
+            self.screen.blit(
+                message,
+                message.get_rect(
+                    center=(panel.centerx, message_top + index * line_height)
+                ),
+            )
+
+        button_height = ui_size(38)
+        buttons_top = panel.bottom - button_height - ui_size(16)
+        gap = ui_size(16)
+        button_width = min(
+            ui_size(110), max(1, (panel.width - ui_size(32) - gap) // 2)
+        )
+        total_width = button_width * 2 + gap
+        left = panel.centerx - total_width // 2
+        self.confirmation_button_rects = {
+            "confirm": pygame.Rect(left, buttons_top, button_width, button_height),
+            "cancel": pygame.Rect(left + button_width + gap, buttons_top, button_width, button_height),
+        }
+        for action, label in (("confirm", "Yes"), ("cancel", "Cancel")):
+            rect = self.confirmation_button_rects[action]
+            hovered = rect.collidepoint(pygame.mouse.get_pos())
+            color = self.theme.get("colors", {}).get(
+                "hover" if hovered else "normal", (18, 18, 29)
+            )
+            pygame.draw.rect(self.screen, color, rect, border_radius=ui_size(5))
+            pygame.draw.rect(
+                self.screen,
+                self.theme.get("colors", {}).get("border", (112, 86, 101)),
+                rect,
+                width=max(1, ui_size(1)),
+                border_radius=ui_size(5),
+            )
+            text = FONTS.button_text.render(label, True, COLORS.text)
+            self.screen.blit(text, text.get_rect(center=rect.center))
+
+    def _confirm_dialogue_action(self):
+        action = self.confirmation["action"]
+        self.confirmation = None
+        self.confirmation_button_rects = {}
+        if action == "quick_save":
+            self._quick_save()
+        elif action == "quick_load":
+            self._quick_load()
+
+    def _quick_save(self):
+        if self.flow is None:
+            self.status_message = self._message("no_active_game")
+            return
+        try:
+            self.save_system.save_quick_save(
+                self.story_file,
+                self.flow,
+                self.background_id,
+                self.music_track,
+                self.character_layer.snapshot(),
+                self.dialogue_history,
+            )
+            self.status_message = self._message("save_success", slot="Quick Save")
+        except (OSError, ValueError) as error:
+            self.status_message = self._message("save_error", error=error)
+
+    def _quick_load(self):
+        try:
+            saved_game = self.save_system.read_quick_save()
+        except (OSError, ValueError, TypeError) as error:
+            self.status_message = self._message("load_error", error=error)
+            return
+        if saved_game is not None and saved_game.get("story") == self.story_file:
+            try:
+                self._apply_saved_game(saved_game)
+            except (OSError, ValueError, RuntimeError, KeyError, TypeError, pygame.error) as error:
+                self.status_message = self._message("load_error", error=error)
+            return
+        self._continue_game()
+
     def _menu_over_game(self):
         return self.mode == "pause_menu" or self.menu_origin == "pause_menu"
 
@@ -610,10 +1061,15 @@ class Engine:
         if not self.textbox.complete:
             self.textbox.reveal_all()
             return
+        if self.story_input is not None:
+            self._activate_story_input()
+            return
         if self._fade_out_blocks_input():
             return
 
         previous_id = self.flow.current_id
+        if not self.flow.options:
+            self._remember_dialogue_state()
         self.flow.advance()
         if self.flow.current_id != previous_id:
             self._enter_dialogue()
@@ -653,7 +1109,9 @@ class Engine:
         action_type = action["type"]
         if action_type in {"set", "add", "subtract"}:
             return  # StoryFlow has already applied variable assignments.
-        if action_type == "background":
+        if action_type == "input":
+            self._begin_story_input(action)
+        elif action_type == "background":
             self._set_background(action["image"])
         elif action_type == "clear_background":
             self.background_id = None
@@ -888,10 +1346,12 @@ class Engine:
             )
 
     def _start_new_game(self):
+        self._end_story_input()
         self.flow = StoryFlow(self.story_data, self.project.assets_dir, PATHS.engine_assets)
         self.dialogue_history = []
         self.history_visible = False
         self.history_scroll = 0
+        self.dialogue_back_stack = []
         self.fade_effect = None
         self.shake_effect = None
         self.background_id = None
@@ -1200,10 +1660,12 @@ class Engine:
             self.status_message = self._message("different_story")
             return
 
+        self._end_story_input()
         flow = StoryFlow(self.story_data, self.project.assets_dir, PATHS.engine_assets)
         flow.restore(saved_game.get("state", {}))
         self.flow = flow
         self.choice_buttons = []
+        self.dialogue_back_stack = []
         self.dialogue_history = [
             item for item in saved_game.get("history", [])
             if isinstance(item, dict) and isinstance(item.get("speaker"), str) and isinstance(item.get("text"), str)
@@ -1393,6 +1855,7 @@ class Engine:
 
     def shutdown(self):
         self.running = False
+        self._end_story_input()
         if self.initialized or pygame.get_init():
             pygame.quit()
         self.initialized = False

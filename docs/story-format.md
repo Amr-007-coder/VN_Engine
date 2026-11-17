@@ -180,6 +180,7 @@ dialogues:
 ```
 
 The name inside `{...}` must match a declared variable. If it does not, the placeholder is shown literally, such as `{missing_name}`. Keep braces for substitutions; there is no separate escape syntax.
+Formatting markers inside a placeholder are treated as part of the variable name, so underscores in names such as `{player_name}` do not activate italic text. Formatting markers outside placeholders, such as `_italic text_`, continue to work normally.
 
 ## Choices and conditions
 
@@ -272,6 +273,37 @@ actions:
 ```
 
 `set` replaces the value. `add` and `subtract` require both the declared variable and action value to be numeric; booleans are not numbers for this purpose. Action values may be strings, numbers, booleans, or `null` for `set`.
+
+### Collect player input
+
+Use an `input` action to ask the player for a value and store it in a declared story variable. Text is the default input type; `integer` accepts whole numbers and saves them as numbers rather than strings.
+
+```yaml
+variables:
+  player_name: ""
+  player_age: 0
+
+dialogues:
+  ask_name:
+    speaker: Narrator
+    text: "What should we call you?"
+    actions:
+      - type: input
+        var: player_name
+        prompt: "Enter your name:"
+    next: ask_age
+
+  ask_age:
+    speaker: Narrator
+    text: "How old are you, {player_name}?"
+    actions:
+      - type: input
+        var: player_age
+        prompt: "Enter your age as a whole number:"
+        input_type: integer
+```
+
+After the dialogue text finishes typewriting, the prompt appears in its own panel without dimming the rest of the screen. Story controls remain paused until a non-empty answer is submitted with `Enter`; Backspace edits the answer. Integer input stays open until a whole number is entered. Text answers are trimmed at the ends. Each dialogue may contain at most one input action, and it cannot also autosave on entry. Collected values become normal story variables, so `{player_name}` substitution, conditions, and existing save/load slots work with them.
 
 ### Change backgrounds, music, and sound
 

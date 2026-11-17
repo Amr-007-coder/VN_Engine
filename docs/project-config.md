@@ -4,11 +4,11 @@
 
 The project configuration is optional. If it is missing, the engine loads its built-in defaults and looks for `data/story.yaml`. When a config value is omitted, its built-in default is used. Nested objects merge with defaults; arrays such as menu `items` replace the default array completely.
 
-The starter-project template includes the full default theme, including the menu-screen, textbox, choice-button, and pause-button settings described below. VN_Editor shows this template for a missing or empty `data/project.json` and marks it unsaved; the file is written only when you save. A non-empty project file is loaded as written and is not replaced or filled with template keys. Its omitted settings still use engine defaults at runtime.
+The starter-project template includes the full default theme, including the menu-screen, textbox, choice-button, pause-button, and font settings described below. VN_Editor shows this template for a missing or empty `data/project.json` and marks it unsaved; the file is written only when you save. A non-empty project file is loaded as written and is not replaced or filled with template keys. Its omitted settings still use engine defaults at runtime.
 
 ## Project folder and path rules
 
-The project root is the folder containing `assets/` and `data/`. If `Documents/VN Engine Projects/My Visual Novel` does not exist when VN_Editor starts without another project selected, the editor installs the starter project from its GitHub Release archive there. It leaves an existing folder and its `data/project.json` untouched. You can also open any other project folder from VN_Editor.
+The project root is the folder containing `assets/` and `data/`. If `Documents/VN Engine Projects/My Visual Novel` does not exist when VN_Editor starts without another project selected, the editor creates the starter project locally from its bundled defaults. It leaves an existing folder and its `data/project.json` untouched. You can also open any other project folder from VN_Editor.
 
 Runtime templates are downloaded from the public GitHub Releases on demand and cached in the user's local cache. They are editor runtime files, not part of your project's `assets/` or `data/`.
 
@@ -92,7 +92,16 @@ This example changes the project name, window, credits, menu labels, intro text,
     "game_fonts": {
       "text": "standard.ttf",
       "name": "standard.ttf",
-      "button": "standard.ttf"
+      "button": "standard.ttf",
+      "intro": "standard.ttf"
+    },
+    "game_font_sizes": {
+      "text": 24,
+      "name": 28,
+      "button": 20,
+      "dialogue_controls": 12,
+      "intro": 40,
+      "intro_small": 21
     },
     "fonts": {
       "menu": "Joystix.ttf",
@@ -138,7 +147,22 @@ If you copy this example, add `assets/images/menu-background.jpg` or set `theme.
 | `credits` | `[]` | Additional credits shown in the Credits menu. |
 | `messages` | Built-in messages | Text for save/load/status messages; see [messages](#messages). |
 | `menus` | Built-in menus | Main, pause, settings, and save-slot menu titles/items. |
+| `dialogue_buttons` | See [dialogue controls](#dialogue-controls) | Labels and visibility for the controls shown at the bottom of the dialogue textbox. |
+| `characters` | `{}` | Optional per-character sprite scaling; see [character scaling](#character-scaling). |
 | `theme` | Built-in theme | Colors, fonts, textbox, menus, button art, pause icon, and menu sounds. |
+
+## Character scaling
+
+Use the optional top-level `characters` object to scale all sprites for selected characters relative to their normal auto-fit size:
+
+```json
+"characters": {
+  "Aiko": { "scale": 100 },
+  "Mina": { "scale": 75 }
+}
+```
+
+`100` keeps the current size, `50` renders at half that size, and `150` renders at one-and-a-half times the size. The percentage applies to every expression, look, and animation frame for that character. Character names are matched case-insensitively. A scale must be a positive number; values above 100 can make a sprite extend beyond the window. Characters not listed use the default 100% scale.
 
 ## Paths
 
@@ -317,15 +341,46 @@ To use only a flat color, set `background` to `null` or omit it:
 
 All geometry values are window fractions; `x + width` and `bottom + height` must each be at most `1.0`. Width and height must be greater than zero. A project image that cannot be found is an error; use the editor’s asset suggestions or its live diagnostics to find the correct path.
 
+### Dialogue controls
+
+The default controls appear along the bottom of the textbox. Each control has a `visible` boolean and a customizable `label`; omitted fields retain their defaults. Set `visible` to `false` to hide a control.
+
+```json
+"dialogue_buttons": {
+  "back": { "visible": true, "label": "Back" },
+  "history": { "visible": true, "label": "History" },
+  "quick_save": { "visible": true, "label": "Q. Save" },
+  "quick_load": { "visible": true, "label": "Q. Load" }
+}
+```
+
+**Back** returns to the previous dialogue step, restoring its story variables, scene, and choice state when applicable. It is disabled until there is a previous step. **History** opens the dialogue-history panel; the `H` key remains available as a shortcut.
+
+**Q. Save** writes to a separate Quick Save file, outside the numbered save slots. **Q. Load** loads that save when it belongs to the current story; otherwise it follows the Continue behavior and loads the most recent available save. Both controls ask for confirmation before saving or loading.
+
 ### Fonts
 
-Use `game_fonts` for dialogue text, speaker names, and choice buttons:
+Use `game_fonts` to choose font files for dialogue text, speaker names, buttons, and the intro cards:
 
 ```json
 "game_fonts": {
   "text": "standard.ttf",
   "name": "Joystix.ttf",
-  "button": "standard.ttf"
+  "button": "standard.ttf",
+  "intro": "VCR_OSD_Mono.ttf"
+}
+```
+
+Use `game_font_sizes` to set the base sizes for those fonts and the smaller dialogue controls:
+
+```json
+"game_font_sizes": {
+  "text": 24,
+  "name": 28,
+  "button": 20,
+  "dialogue_controls": 12,
+  "intro": 40,
+  "intro_small": 21
 }
 ```
 
@@ -341,9 +396,9 @@ Use `fonts` for menus:
 }
 ```
 
-Font names can refer to files in `assets/fonts/` or the built-in font folder. The built-in files are `standard.ttf`, `Joystix.ttf`, `MS Gothic.ttf`, `PermanentMarker.ttf`, `rpg-maker-2k.ttf`, `Toriko.ttf`, and `VCR_OSD_Mono.ttf`. Missing or unreadable fonts fall back to a system font.
+Font names can refer to files in `assets/fonts/` or the built-in font folder. The built-in files are `standard.ttf`, `Joystix.ttf`, `MS Gothic.ttf`, `PermanentMarker.ttf`, `rpg-maker-2k.ttf`, `Toriko.ttf`, and `VCR_OSD_Mono.ttf`. Set a font path to `null` to use the system font; missing or unreadable font files also fall back to a system font.
 
-Dialogue text, speaker names, and choice-button text have base sizes of 24, 28, and 20 design pixels respectively. The player's UI Size setting scales these and other interface elements together. `game_fonts` changes their font files, not their base sizes. Menu title, item, and detail base sizes can be changed with the `fonts` values above and are also scaled by UI Size.
+`game_font_sizes.text`, `name`, and `button` control dialogue text, speaker names, and choice/button text. `dialogue_controls` sizes the Back, History, Quick Save, and Quick Load labels. `intro` and `intro_small` size the main and small intro-card text. Menu title, item, and detail sizes are set by `fonts.title_size`, `item_size`, and `detail_size`. All values are positive design-pixel sizes and are scaled by the player's UI Size setting.
 
 ### Standard menu layout
 

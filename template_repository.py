@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 from functools import lru_cache
 import hashlib
@@ -389,29 +390,39 @@ def ensure_starter_project_archive(release_tag: str | None = None) -> Path:
     return destination
 
 
-def install_starter_project(destination: Path, release_tag: str | None = None) -> bool:
-    """Install the released starter project only when the destination does not exist."""
+def install_starter_project(
+    destination: Path,
+    release_tag: str | None = None,
+    project_template: dict | None = None,
+) -> bool:
+    """Create from a template, or install a legacy release archive when none is given."""
     destination = Path(destination).expanduser().resolve()
     if destination.exists():
         if not destination.is_dir():
             raise FileExistsError(f"The starter-project destination is not a directory: {destination}")
         return False
 
-    archive_path = ensure_starter_project_archive(release_tag)
+    if project_template is not None and not isinstance(project_template, dict):
+        raise ValueError("The starter-project template must be an object.")
+
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = Path(tempfile.mkdtemp(prefix=".vn-engine-starter-", dir=destination.parent))
     try:
-        _validate_starter_project_archive(archive_path)
-        with ZipFile(archive_path, "r") as archive:
-            for item in archive.infolist():
-                relative = PurePosixPath(item.filename)
-                target = temporary.joinpath(*relative.parts)
-                if item.is_dir():
-                    target.mkdir(parents=True, exist_ok=True)
-                    continue
-                target.parent.mkdir(parents=True, exist_ok=True)
-                with archive.open(item, "r") as source, target.open("wb") as output:
-                    shutil.copyfileobj(source, output)
+        if project_template is None:
+            archive_path = ensure_starter_project_archive(release_tag)
+            _validate_starter_project_archive(archive_path)
+            with ZipFile(archive_path, "r") as archive:
+                for item in archive.infolist():
+                    relative = PurePosixPath(item.filename)
+                    target = temporary.joinpath(*relative.parts)
+                    if item.is_dir():
+                        target.mkdir(parents=True, exist_ok=True)
+                        continue
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with archive.open(item, "r") as source, target.open("wb") as output:
+                        shutil.copyfileobj(source, output)
+        else:
+            _write_starter_project(temporary, project_template)
         try:
             os.rename(temporary, destination)
         except OSError:
@@ -422,6 +433,37 @@ def install_starter_project(destination: Path, release_tag: str | None = None) -
     finally:
         if temporary.exists():
             shutil.rmtree(temporary)
+
+
+def _write_starter_project(root: Path, project_template: dict) -> None:
+    assets = root / "assets"
+    data = root / "data"
+    assets.mkdir()
+    data.mkdir()
+    (data / "story.yaml").write_text(
+        "title: My Visual Novel\n"
+        "start: opening\n"
+        "dialogues:\n"
+        "  opening:\n"
+        "    chapter: Chapter 1\n"
+        "    speaker: Narrator\n"
+        "    active_character: null\n"
+        "    text: Replace this line with your opening dialogue.\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    project = deepcopy(project_template)
+    if not isinstance(project.get("menus"), dict) or not isinstance(
+        project["menus"].get("main"), dict
+    ):
+        raise ValueError("The starter-project template must define menus.main.")
+    project["name"] = "My Visual Novel"
+    project["menus"]["main"]["title"] = "My Visual Novel"
+    (data / "project.json").write_text(
+        json.dumps(project, ensure_ascii=True, indent=2) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
 
 
 def fetch_android_sources(release_tag: str) -> tuple[bytes, bytes]:

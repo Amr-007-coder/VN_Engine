@@ -1,4 +1,5 @@
 from copy import deepcopy
+import math
 import os
 import re
 from pathlib import Path, PurePosixPath
@@ -64,6 +65,15 @@ DEFAULT_PROJECT = {
             "text": "standard.ttf",
             "name": "standard.ttf",
             "button": "standard.ttf",
+            "intro": "standard.ttf",
+        },
+        "game_font_sizes": {
+            "text": 24,
+            "name": 28,
+            "button": 20,
+            "dialogue_controls": 12,
+            "intro": 40,
+            "intro_small": 21,
         },
         "menu": {
             "layout": "centered",
@@ -152,6 +162,13 @@ DEFAULT_PROJECT = {
             "load": "sounds/click_button.wav",
         },
     },
+    "dialogue_buttons": {
+        "back": {"visible": True, "label": "Back"},
+        "history": {"visible": True, "label": "History"},
+        "quick_save": {"visible": True, "label": "Q. Save"},
+        "quick_load": {"visible": True, "label": "Q. Load"},
+    },
+    "characters": {},
     "menus": {
         "main": {
             "title": "Visual Novel",
@@ -310,6 +327,31 @@ class ProjectConfig:
         if not isinstance(window.get("caption"), str):
             raise ValueError("Project window caption must be a string.")
 
+        characters = values.get("characters")
+        if not isinstance(characters, dict):
+            raise ValueError("Project config 'characters' must be an object.")
+        for name, settings in characters.items():
+            if not isinstance(name, str) or not name.strip():
+                raise ValueError("Project config character names must be non-empty strings.")
+            if not isinstance(settings, dict):
+                raise ValueError(
+                    f"Project config characters.{name} must be an object."
+                )
+            scale = settings.get("scale", 100)
+            try:
+                valid_scale = (
+                    isinstance(scale, (int, float))
+                    and not isinstance(scale, bool)
+                    and math.isfinite(scale)
+                    and scale > 0
+                )
+            except OverflowError:
+                valid_scale = False
+            if not valid_scale:
+                raise ValueError(
+                    f"Project config characters.{name}.scale must be a positive percentage."
+                )
+
         menus = values.get("menus")
         if not isinstance(menus, dict):
             raise ValueError("Project config 'menus' must be an object.")
@@ -366,11 +408,59 @@ class ProjectConfig:
                 raise ValueError(f"Project config menus.slots.{key} must use action {required_action!r}.")
         if not isinstance(values.get("theme"), dict):
             raise ValueError("Project config 'theme' must be an object.")
+        dialogue_buttons = values.get("dialogue_buttons")
+        if not isinstance(dialogue_buttons, dict):
+            raise ValueError("Project config 'dialogue_buttons' must be an object.")
+        for button_name in ("back", "history", "quick_save", "quick_load"):
+            button = dialogue_buttons.get(button_name)
+            if not isinstance(button, dict):
+                raise ValueError(
+                    f"Project config 'dialogue_buttons.{button_name}' must be an object."
+                )
+            if not isinstance(button.get("visible"), bool):
+                raise ValueError(
+                    f"Project config 'dialogue_buttons.{button_name}.visible' must be a boolean."
+                )
+            if not isinstance(button.get("label"), str):
+                raise ValueError(
+                    f"Project config 'dialogue_buttons.{button_name}.label' must be a string."
+                )
         raw_theme = values["theme"]
+        for group, font_names in (
+            ("fonts", ("menu", "title")),
+            ("game_fonts", ("text", "name", "button", "intro")),
+        ):
+            font_config = raw_theme.get(group)
+            if not isinstance(font_config, dict):
+                raise ValueError(f"Project theme {group!r} must be an object.")
+            for name in font_names:
+                font = font_config.get(name)
+                if font is not None and not isinstance(font, str):
+                    raise ValueError(
+                        f"Project theme {group}.{name} must be a font path or null."
+                    )
+
+        theme = resolve_theme(raw_theme)
+        for group, size_names in (
+            ("fonts", ("item_size", "detail_size", "title_size")),
+            (
+                "game_font_sizes",
+                ("text", "name", "button", "dialogue_controls", "intro", "intro_small"),
+            ),
+        ):
+            size_config = raw_theme.get(group)
+            if not isinstance(size_config, dict):
+                raise ValueError(f"Project theme {group!r} must be an object.")
+            for name in size_names:
+                size = theme[group].get(name)
+                if not isinstance(size, int) or isinstance(size, bool) or size < 1:
+                    raise ValueError(
+                        f"Project theme {group}.{name} must be a positive integer."
+                    )
+
         raw_textbox_theme = raw_theme.get("textbox", {})
         if not isinstance(raw_textbox_theme, dict):
             raise ValueError("Project theme 'textbox' must be an object.")
-        theme = resolve_theme(raw_theme)
         textbox_theme = theme["textbox"]
         textbox_image = textbox_theme.get("background")
         if textbox_image is not None and not isinstance(textbox_image, str):

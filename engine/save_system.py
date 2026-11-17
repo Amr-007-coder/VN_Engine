@@ -38,6 +38,9 @@ class SaveSystem:
     def read_autosave(self):
         return self._read_save(self.directory / "autosave.json", "Autosave")
 
+    def read_quick_save(self):
+        return self._read_save(self.directory / "quick_save.json", "Quick save")
+
     @staticmethod
     def _read_save(path, label):
         if not path.exists():
@@ -85,6 +88,21 @@ class SaveSystem:
             story_file, flow, background_id, music_track, characters, dialogue_history
         )
         self._write_save(self.directory / "autosave.json", data)
+        return data
+
+    def save_quick_save(
+        self,
+        story_file: str,
+        flow,
+        background_id=None,
+        music_track=None,
+        characters=None,
+        dialogue_history=None,
+    ):
+        data = self._make_save(
+            story_file, flow, background_id, music_track, characters, dialogue_history
+        )
+        self._write_save(self.directory / "quick_save.json", data)
         return data
 
     @staticmethod

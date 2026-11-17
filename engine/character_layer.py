@@ -16,10 +16,14 @@ class CharacterLayer:
     }
     DIM_COLOR = (150, 150, 165)
 
-    def __init__(self, assets, defaults=None):
+    def __init__(self, assets, defaults=None, scale_settings=None):
         self.assets = assets
         self.catalog = CharacterAssetCatalog(assets.project_assets, assets.fallback_assets)
         self.defaults = defaults or {}
+        self.scale_percentages = {
+            name.casefold(): settings.get("scale", 100)
+            for name, settings in (scale_settings or {}).items()
+        }
         self.characters = {}
         self._surface_cache = {}
 
@@ -196,13 +200,18 @@ class CharacterLayer:
 
     def _prepared_sprite(self, name: str, character: dict, screen_size: tuple[int, int], active: bool):
         expression = character["expression"]
-        key = (name, character["look"], expression, screen_size, active)
+        scale_percentage = self.scale_percentages.get(name.casefold(), 100)
+        key = (name, character["look"], expression, screen_size, active, scale_percentage)
         if key in self._surface_cache:
             return self._surface_cache[key]
 
         source = character["image"]
         screen_width, screen_height = screen_size
-        scale = min(screen_height / source.get_height(), (screen_width * 0.45) / source.get_width())
+        scale = (
+            min(screen_height / source.get_height(), (screen_width * 0.45) / source.get_width())
+            * scale_percentage
+            / 100
+        )
         sprite_size = (
             max(1, round(source.get_width() * scale)),
             max(1, round(source.get_height() * scale)),

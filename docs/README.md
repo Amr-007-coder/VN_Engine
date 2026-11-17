@@ -1,11 +1,11 @@
 # VN Engine
 
-The downloadable VN_Editor package is available for Windows, Linux, and macOS. Each platform ZIP contains its native editor app, the editor version, and the user guides. The starter project is a separate GitHub Release asset and is installed under `Documents/VN Engine Projects/My Visual Novel` only if that folder does not already exist. Existing projects and their configuration are left untouched. Game runtime templates download from GitHub Releases on first use and are cached locally. Creators do not need Python, Pygame, Pygbag, Nuitka, or a compiler installed to use the editor.
+The downloadable VN_Editor package is available for Windows, Linux, and macOS. Each platform ZIP contains its native editor app, the editor version, and the user guides. On first launch, the editor creates a starter project from its built-in defaults under `Documents/VN Engine Projects/My Visual Novel` only if that folder does not already exist. Existing projects and their configuration are left untouched. Game runtime templates download from GitHub Releases on first use and are cached locally. Creators do not need Python, Pygame, Pygbag, Nuitka, or a compiler installed to use the editor.
 
 ## Start here
 
 1. Extract the ZIP for your computer to a folder you can write to.
-2. Launch the editor for that platform: `VN_Editor.exe` on Windows, `VN_Editor` on Linux, or `VN_Editor.app` on macOS. If the default starter-project folder does not exist, the editor downloads and installs the released starter project.
+2. Launch the editor for that platform: `VN_Editor.exe` on Windows, `VN_Editor` on Linux, or `VN_Editor.app` on macOS. If the default project folder does not exist, the editor creates the starter project locally.
 3. Edit `data/story.yaml`, `data/project.json`, and files under `assets/` in the project folder. The starter project is ready to edit.
 4. Click **Test Play** to run the project with a temporary copy of the engine runtime for your current OS.
 5. Click **Export Game** to create a Windows, Linux, macOS, browser, or Android build.
@@ -20,12 +20,12 @@ VN_Editor/
   docs/                     # The included Markdown guides
 ```
 
-The starter project is stored separately at `Documents/VN Engine Projects/My Visual Novel`. The editor initializes it only if that folder does not exist; later launches preserve its `data/project.json` and all other user files. Use **Open Project** to work on another project folder. Test Play and game export use temporary or output folders. Runtime templates are downloaded on demand from GitHub Releases and cached in the user's local cache.
+The starter project is stored separately at `Documents/VN Engine Projects/My Visual Novel`. The editor creates it from its built-in template only if that folder does not exist; later launches preserve its `data/project.json` and all other user files. Use **Open Project** to work on another project folder. Test Play and game export use temporary or output folders. Runtime templates are downloaded on demand from GitHub Releases and cached in the user's local cache.
 
 ## What the engine provides
 
 - Dialogue with a typewriter effect, speaker names, text formatting, variable substitution, branching choices, optional voice lines, and a scrollable dialogue history.
-- Story variables, conditional choices, and actions for backgrounds, static and animated character portraits, music, sound effects, fades, screen shake, and command-triggered autosaves.
+- Story variables, player text/integer input, conditional choices, and actions for backgrounds, static and animated character portraits, music, sound effects, fades, screen shake, and command-triggered autosaves.
 - Multi-file YAML stories with recursive includes for chapter-sized files.
 - Automatic discovery of character looks and PNG expressions from folders.
 - Main and pause menus, save/load slots, continue, credits, and settings for text speed, volume, fullscreen, and adjustable UI size.

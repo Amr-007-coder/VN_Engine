@@ -1,4 +1,4 @@
-"""Create a versioned Git release tag that selects the templates to build."""
+"""Create a versioned Git release tag that builds every template and editor."""
 
 import argparse
 import json
@@ -10,7 +10,6 @@ import sys
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PLATFORMS = ("windows", "linux", "macos", "web")
-DEFAULT_PLATFORMS = PLATFORMS
 PLATFORM_RUNNERS = {
     "windows": "windows-latest",
     "linux": "ubuntu-22.04",
@@ -76,19 +75,6 @@ def _ask_yes_no(prompt: str, default: bool) -> bool:
         print("Enter y or n.")
 
 
-def _select_builds() -> tuple[list[str], bool]:
-    print("Choose the game templates to build:")
-    selected = [
-        platform
-        for platform in PLATFORMS
-        if _ask_yes_no(f"  Build {platform}?", True)
-    ]
-    if not selected:
-        raise ValueError("Select at least one game template.")
-    include_editor = _ask_yes_no("Build editor packages for Windows, Linux, and macOS?", True)
-    return selected, include_editor
-
-
 def _tag_exists(tag: str) -> bool:
     return _git("show-ref", "--verify", "--quiet", f"refs/tags/{tag}").returncode == 0
 
@@ -114,7 +100,6 @@ def _release(dry_run: bool = False) -> int:
 
     version = tag[1:]
     print(f"Preparing VN Engine release {version} from branch {branch}.")
-    platforms, include_editor = _select_builds()
     status = _git_output("status", "--short", "--untracked-files=all")
     commit_message = None
     if status:
@@ -130,8 +115,8 @@ def _release(dry_run: bool = False) -> int:
         print(f"Dry run: git add -A && git commit -m {commit_message!r}" if commit_message else "Dry run: no commit needed.")
         print(f"Dry run: git push -u origin {branch}")
         print(
-            f"Dry run: create annotated tag {tag} with build_platforms={','.join(platforms)}, "
-            f"build_editor={'true' if include_editor else 'false'}"
+            f"Dry run: create annotated tag {tag} with "
+            f"build_platforms={','.join(PLATFORMS)}, build_editor=true"
         )
         print(f"Dry run: git push origin refs/tags/{tag}")
         return 0
@@ -150,10 +135,7 @@ def _release(dry_run: bool = False) -> int:
     if result.returncode:
         raise RuntimeError(f"Could not push branch {branch} to origin.")
 
-    tag_message = (
-        f"build_platforms={','.join(platforms)}\n"
-        f"build_editor={'true' if include_editor else 'false'}"
-    )
+    tag_message = f"build_platforms={','.join(PLATFORMS)}\nbuild_editor=true"
     result = _git("tag", "-a", tag, "-m", tag_message)
     if result.returncode:
         raise RuntimeError(f"Could not create annotated release tag {tag}.")
@@ -163,45 +145,21 @@ def _release(dry_run: bool = False) -> int:
             f"Could not push tag {tag}. The tag remains local; retry with "
             f"'git push origin refs/tags/{tag}'."
         )
-    print(f"Release {tag} pushed. GitHub Actions will build: {', '.join(platforms)}.")
-    if include_editor:
-        print("Editor packages will download runtime templates from GitHub Releases.")
+    print(
+        f"Release {tag} pushed. GitHub Actions will build all templates "
+        "and Windows, Linux, and macOS editor packages."
+    )
     return 0
 
 
 def _read_tag_options(tag: str) -> dict[str, str]:
     if _git("check-ref-format", f"refs/tags/{tag}").returncode:
         raise ValueError(f"Invalid release tag: {tag}")
-    message = _git_output("for-each-ref", "--format=%(contents)", f"refs/tags/{tag}")
-    metadata = {}
-    for line in message.splitlines():
-        if "=" in line:
-            key, value = line.split("=", 1)
-            metadata[key.strip()] = value.strip()
-
-    targets = metadata.get("build_platforms")
-    editor = metadata.get("build_editor")
-    if targets is None and editor is None:
-        print("::warning::Tag has no build selection metadata; building all templates and editors.", file=sys.stderr)
-        selected = list(DEFAULT_PLATFORMS)
-        include_editor = True
-    else:
-        if targets is None or editor not in {"true", "false"}:
-            raise ValueError(f"Release tag {tag} has incomplete build selection metadata.")
-        selected = targets.split(",")
-        if (
-            not selected
-            or len(selected) != len(set(selected))
-            or any(platform not in PLATFORMS for platform in selected)
-        ):
-            raise ValueError(f"Release tag {tag} has invalid build_platforms metadata.")
-        include_editor = editor == "true"
-
     return {
-        "platforms": json.dumps(selected, separators=(",", ":")),
-        "platform_csv": ",".join(selected),
-        "build_editor": "true" if include_editor else "false",
-        "matrix": _build_matrix(selected),
+        "platforms": json.dumps(PLATFORMS, separators=(",", ":")),
+        "platform_csv": ",".join(PLATFORMS),
+        "build_editor": "true",
+        "matrix": _build_matrix(list(PLATFORMS)),
     }
 
 

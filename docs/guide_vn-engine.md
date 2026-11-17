@@ -4,7 +4,7 @@ This guide takes you from the platform-specific VN_Editor download to a playable
 
 ## 1. Extract and open the editor package
 
-Extract the ZIP for your computer to a folder you can write to. Launch the platform-specific editor app: `VN_Editor.exe` on Windows, `VN_Editor` on Linux, or `VN_Editor.app` on macOS. If `Documents/VN Engine Projects/My Visual Novel` does not exist, the editor downloads and installs the released starter project there.
+Extract the ZIP for your computer to a folder you can write to. Launch the platform-specific editor app: `VN_Editor.exe` on Windows, `VN_Editor` on Linux, or `VN_Editor.app` on macOS. If `Documents/VN Engine Projects/My Visual Novel` does not exist, the editor creates the starter project there from its built-in defaults.
 
 The macOS editor app is not signed or notarized. If macOS blocks it on first launch, Control-click `VN_Editor.app` in Finder and choose **Open**.
 
@@ -16,7 +16,7 @@ VN_Editor/                     # Editor package root
   docs/                        # This guide and the other Markdown references
 ```
 
-The starter project is separate from the editor package. Its folder containing `assets/` and `data/` is the project root. The editor installs it only when the default project folder does not already exist; if that folder is present, all of its files remain untouched. VN_Editor remembers the last project folder and reopens it on the next launch. A project folder you launch from or pass with `--project-dir` takes precedence. Use **Open Project** to select another project folder. Runtime templates are downloaded from GitHub Releases when needed; local or custom templates can still be selected in the export dialog.
+The starter project is separate from the editor package. Its folder containing `assets/` and `data/` is the project root. The editor creates it from the defaults bundled with that editor version only when the default project folder does not already exist; if that folder is present, all of its files remain untouched. VN_Editor remembers the last project folder and reopens it on the next launch. A project folder you launch from or pass with `--project-dir` takes precedence. Use **Open Project** to select another project folder. Runtime templates are downloaded from GitHub Releases when needed; local or custom templates can still be selected in the export dialog.
 
 ## 2. Write a story and add assets
 
@@ -165,7 +165,7 @@ macOS:
 
 The optional `icon` field in `data/project.json` sets the exported game's window icon and native app/file icon where supported. See [project configuration](./project-config.md#application-icon) for path and platform details.
 
-The starter project's `assets/` and `data/` live separately from the editor package under `Documents/VN Engine Projects/My Visual Novel`. The release provides a ready-to-use starter-project ZIP; the editor installs it only when that folder does not exist. Only exported game archives embed the project files in the game executable.
+The starter project's `assets/` and `data/` live separately from the editor package under `Documents/VN Engine Projects/My Visual Novel`. The editor creates the project locally from its bundled defaults; no starter-project release asset is required. Only exported game archives embed the project files in the game executable.
 
 Linux and macOS archives preserve executable permissions for the main program and shared libraries. The macOS exporter removes the template bundle signature because it changes the app bundle; exported macOS apps are not signed or notarized. Players need the matching OS to run a desktop export.
 

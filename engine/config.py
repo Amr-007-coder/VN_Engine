@@ -6,6 +6,7 @@ class FONTS:
     normal_text = None
     char_name = None
     button_text = None
+    dialogue_controls = None
 
 
 class IMAGES:
@@ -75,6 +76,21 @@ def load_assets(asset_manager: AssetManager, theme=None):
     COLORS.panel = tuple(colors.get("panel", COLORS.panel))
 
     game_fonts = theme.get("game_fonts", {})
-    FONTS.normal_text = asset_manager.load_font(game_fonts.get("text", "standard.ttf"), ui_size(24))
-    FONTS.char_name = asset_manager.load_font(game_fonts.get("name", "standard.ttf"), ui_size(28))
-    FONTS.button_text = asset_manager.load_font(game_fonts.get("button", "standard.ttf"), ui_size(20))
+    font_sizes = theme.get("game_font_sizes", {})
+    button_font = game_fonts.get("button", "standard.ttf")
+    FONTS.normal_text = asset_manager.load_font(
+        game_fonts.get("text", "standard.ttf"),
+        ui_size(font_sizes.get("text", 24)),
+    )
+    FONTS.char_name = asset_manager.load_font(
+        game_fonts.get("name", "standard.ttf"),
+        ui_size(font_sizes.get("name", 28)),
+    )
+    FONTS.button_text = asset_manager.load_font(
+        button_font,
+        ui_size(font_sizes.get("button", 20)),
+    )
+    FONTS.dialogue_controls = asset_manager.load_font(
+        button_font,
+        ui_size(font_sizes.get("dialogue_controls", 16)),
+    )

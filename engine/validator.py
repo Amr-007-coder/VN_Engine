@@ -22,6 +22,7 @@ class StoryValidator:
         "set": {"type", "var", "value"},
         "add": {"type", "var", "value"},
         "subtract": {"type", "var", "value"},
+        "input": {"type", "var", "prompt", "input_type"},
         "background": {"type", "image"},
         "clear_background": {"type"},
         "music": {"type", "track"},
@@ -38,7 +39,7 @@ class StoryValidator:
     STORY_ACTIONS = {
         "background", "clear_background", "music", "stop_music", "sound",
         "show_character", "animate_character", "hide_character", "clear_characters",
-        "fade", "shake", "autosave", *ASSIGNMENT_ACTIONS,
+        "fade", "shake", "autosave", "input", *ASSIGNMENT_ACTIONS,
     }
     CHARACTER_POSITIONS = {"far_left", "left", "center", "right", "far_right"}
 
@@ -149,6 +150,17 @@ class StoryValidator:
             if not isinstance(actions, list):
                 errors.append(f"{where}.actions must be a list.")
                 actions = []
+            input_actions = [
+                action for action in actions
+                if isinstance(action, dict) and action.get("type") == "input"
+            ]
+            if len(input_actions) > 1:
+                errors.append(f"{where} may contain at most one input action.")
+            if input_actions and any(
+                isinstance(action, dict) and action.get("type") == "autosave"
+                for action in actions
+            ):
+                errors.append(f"{where} cannot combine an input action with autosave.")
             for index, action in enumerate(actions):
                 cls._validate_action(
                     action,
@@ -267,6 +279,24 @@ class StoryValidator:
                     errors.append(f"{where} uses {action_type!r} on a non-numeric variable.")
                 if not isinstance(value, (int, float)) or isinstance(value, bool):
                     errors.append(f"{where}.value must be numeric for {action_type!r}.")
+        elif action_type == "input":
+            name = action.get("var")
+            if not isinstance(name, str) or name not in variables:
+                errors.append(f"{where} references undeclared variable {name!r}.")
+            prompt = action.get("prompt")
+            if not isinstance(prompt, str) or not prompt.strip():
+                errors.append(f"{where}.prompt must be a non-empty string.")
+            input_type = action.get("input_type", "text")
+            if not isinstance(input_type, str) or input_type not in {"text", "integer"}:
+                errors.append(f"{where}.input_type must be 'text' or 'integer'.")
+            elif isinstance(name, str) and name in variables:
+                initial = variables[name]
+                if input_type == "text" and initial is not None and not isinstance(initial, str):
+                    errors.append(f"{where} requires variable {name!r} to start as a string or null.")
+                elif input_type == "integer" and initial is not None and (
+                    not isinstance(initial, int) or isinstance(initial, bool)
+                ):
+                    errors.append(f"{where} requires variable {name!r} to start as an integer or null.")
         elif action_type in {"background", "music", "sound"}:
             field = {"background": "image", "music": "track", "sound": "name"}[action_type]
             if not isinstance(action.get(field), str) or not action[field]:

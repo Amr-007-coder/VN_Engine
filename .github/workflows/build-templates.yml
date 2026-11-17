@@ -1,4 +1,4 @@
-name: Build selected release templates and editor packages
+name: Build all release templates and editor packages
 
 on:
   push:
@@ -10,12 +10,9 @@ permissions:
 
 jobs:
   release-options:
-    name: Read build selection from release tag
+    name: Set the full release build matrix
     runs-on: ubuntu-22.04
     outputs:
-      platforms: ${{ steps.options.outputs.platforms }}
-      platform_csv: ${{ steps.options.outputs.platform_csv }}
-      build_editor: ${{ steps.options.outputs.build_editor }}
       matrix: ${{ steps.options.outputs.matrix }}
     steps:
       - uses: actions/checkout@v4
@@ -83,30 +80,9 @@ jobs:
           path: templates/template-${{ matrix.platform }}.zip
           if-no-files-found: error
 
-  build-starter-project:
-    name: Package starter project
-    needs: release-options
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Package starter project
-        run: python tools/package_starter_project.py --output exports/VN_Engine-Starter-Project.zip
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: vn-engine-starter-project
-          path: exports/VN_Engine-Starter-Project.zip
-          if-no-files-found: error
-
   build-editor:
     name: Build VN_Editor for ${{ matrix.platform }}
     needs: release-options
-    if: needs.release-options.outputs.build_editor == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -169,14 +145,13 @@ jobs:
           if-no-files-found: error
 
   publish-release-assets:
-    name: Attach selected templates, starter project, and editor packages
-    needs: [release-options, build-template, build-starter-project, build-editor]
+    name: Publish all templates and editor packages
+    needs: [release-options, build-template, build-editor]
     if: >-
       always() &&
       needs.release-options.result == 'success' &&
       needs.build-template.result == 'success' &&
-      needs.build-starter-project.result == 'success' &&
-      (needs.build-editor.result == 'success' || needs.build-editor.result == 'skipped')
+      needs.build-editor.result == 'success'
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/download-artifact@v4
@@ -186,12 +161,6 @@ jobs:
           merge-multiple: true
 
       - uses: actions/download-artifact@v4
-        with:
-          name: vn-engine-starter-project
-          path: release-assets
-
-      - uses: actions/download-artifact@v4
-        if: needs.release-options.outputs.build_editor == 'true'
         with:
           pattern: vn-editor-*
           path: release-assets

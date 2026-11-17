@@ -49,6 +49,20 @@ DEFAULT_THEME = {
         "detail_size": 16,
         "title_size": 30,
     },
+    "game_fonts": {
+        "text": "standard.ttf",
+        "name": "standard.ttf",
+        "button": "standard.ttf",
+        "intro": "standard.ttf",
+    },
+    "game_font_sizes": {
+        "text": 24,
+        "name": 28,
+        "button": 20,
+        "dialogue_controls": 12,
+        "intro": 40,
+        "intro_small": 21,
+    },
     "menu": {
         "layout": "centered",
         "background": None,
