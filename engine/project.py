@@ -4,6 +4,7 @@ import re
 from pathlib import Path, PurePosixPath
 
 from engine.loader import PATHS, loader
+from engine.theme import MENU_SCREEN_NAMES, resolve_theme, validate_menu_grid
 
 
 DEFAULT_PROJECT = {
@@ -40,6 +41,117 @@ DEFAULT_PROJECT = {
     },
     "paths": {"data": "data", "assets": "assets", "user_data": "user_data"},
     "window": {"width": 1920, "height": 1200, "caption": "VN Engine"},
+    "theme": {
+        "colors": {
+            "background": [30, 30, 45],
+            "text": [230, 230, 230],
+            "muted": [170, 170, 180],
+            "normal": [18, 18, 29],
+            "hover": [73, 50, 65],
+            "selected": [45, 92, 78],
+            "border": [112, 86, 101],
+            "accent": [233, 79, 88],
+            "panel": [0, 0, 0, 128],
+        },
+        "fonts": {
+            "menu": None,
+            "title": None,
+            "item_size": 20,
+            "detail_size": 16,
+            "title_size": 30,
+        },
+        "game_fonts": {
+            "text": "standard.ttf",
+            "name": "standard.ttf",
+            "button": "standard.ttf",
+        },
+        "menu": {
+            "layout": "centered",
+            "background": None,
+            "width": 860,
+            "x": None,
+            "row_height": 56,
+            "row_gap": 9,
+            "title_y": 112,
+            "top": 190,
+            "border_radius": 8,
+            "right_margin": 48,
+            "screens": {
+                "main": {
+                    "background": None,
+                    "alignment": None,
+                    "top": None,
+                    "row_gap": None,
+                    "button_width": None,
+                    "button_height": None,
+                    "grid": None,
+                    "buttons": {"normal": None, "hovered": None},
+                },
+                "pause": {
+                    "background": None,
+                    "alignment": None,
+                    "top": None,
+                    "row_gap": None,
+                    "button_width": None,
+                    "button_height": None,
+                    "grid": None,
+                    "buttons": {"normal": None, "hovered": None},
+                },
+                "settings": {
+                    "background": None,
+                    "alignment": None,
+                    "top": None,
+                    "row_gap": None,
+                    "button_width": None,
+                    "button_height": None,
+                    "grid": None,
+                    "buttons": {"normal": None, "hovered": None},
+                },
+                "slots": {
+                    "background": None,
+                    "alignment": None,
+                    "top": None,
+                    "row_gap": None,
+                    "button_width": None,
+                    "button_height": None,
+                    "grid": None,
+                    "buttons": {"normal": None, "hovered": None},
+                },
+                "credits": {
+                    "background": None,
+                    "alignment": None,
+                    "top": None,
+                    "row_gap": None,
+                    "button_width": None,
+                    "button_height": None,
+                    "buttons": {"normal": None, "hovered": None},
+                },
+            },
+        },
+        "textbox": {
+            "background": None,
+            "color": None,
+            "x": 0.02,
+            "bottom": 0.0,
+            "width": 0.96,
+            "height": 0.21,
+            "opacity": 0.95,
+        },
+        "choice_buttons": {
+            "normal": None,
+            "hovered": None,
+            "width": 900,
+            "height": 56,
+            "gap": 12,
+        },
+        "pause_button": {"image": None, "size": 78, "margin": 16},
+        "sounds": {
+            "hover": "sounds/hover_button.wav",
+            "click": "sounds/click_button.wav",
+            "cancel": "sounds/click_button.wav",
+            "load": "sounds/click_button.wav",
+        },
+    },
     "menus": {
         "main": {
             "title": "Visual Novel",
@@ -87,9 +199,6 @@ DEFAULT_PROJECT = {
             "delete": {"label": "Delete Selected Slot", "action": "delete_selected_slot"},
             "back": {"label": "Back", "action": "back"},
         },
-    },
-    "theme": {
-        "textbox": {"background": None, "color": None},
     },
 }
 
@@ -257,9 +366,12 @@ class ProjectConfig:
                 raise ValueError(f"Project config menus.slots.{key} must use action {required_action!r}.")
         if not isinstance(values.get("theme"), dict):
             raise ValueError("Project config 'theme' must be an object.")
-        textbox_theme = values["theme"].get("textbox", {})
-        if not isinstance(textbox_theme, dict):
+        raw_theme = values["theme"]
+        raw_textbox_theme = raw_theme.get("textbox", {})
+        if not isinstance(raw_textbox_theme, dict):
             raise ValueError("Project theme 'textbox' must be an object.")
+        theme = resolve_theme(raw_theme)
+        textbox_theme = theme["textbox"]
         textbox_image = textbox_theme.get("background")
         if textbox_image is not None and not isinstance(textbox_image, str):
             raise ValueError("Project theme 'textbox.background' must be an image path or null.")
@@ -271,6 +383,114 @@ class ProjectConfig:
                    for channel in textbox_color)
         ):
             raise ValueError("Project theme 'textbox.color' must be an RGB or RGBA array of values from 0 to 255.")
+        for key in ("x", "bottom", "width", "height", "opacity"):
+            value = textbox_theme[key]
+            if (
+                not isinstance(value, (int, float))
+                or isinstance(value, bool)
+                or not 0 <= value <= 1
+                or (key in {"width", "height"} and value == 0)
+            ):
+                raise ValueError(f"Project theme 'textbox.{key}' must be a fraction from 0 to 1.")
+        if (
+            textbox_theme["x"] + textbox_theme["width"] > 1
+            or textbox_theme["bottom"] + textbox_theme["height"] > 1
+        ):
+            raise ValueError("Project theme textbox geometry must fit within the window.")
+
+        menu_theme = raw_theme.get("menu", {})
+        if not isinstance(menu_theme, dict):
+            raise ValueError("Project theme 'menu' must be an object.")
+        screens = menu_theme.get("screens", {})
+        if not isinstance(screens, dict):
+            raise ValueError("Project theme 'menu.screens' must be an object.")
+        menu_item_counts = {
+            "main": len(menus["main"]["items"]),
+            "pause": len(menus["pause"]["items"]),
+            "settings": len(menus["settings"]["items"])
+            + (0 if any(item.get("setting") == "ui_scale" for item in menus["settings"]["items"]) else 1),
+            "slots": values["save_slots"],
+        }
+        for screen_name, screen_theme in screens.items():
+            if screen_name not in MENU_SCREEN_NAMES:
+                raise ValueError(f"Project theme has unknown menu screen {screen_name!r}.")
+            if not isinstance(screen_theme, dict):
+                raise ValueError(f"Project theme 'menu.screens.{screen_name}' must be an object.")
+            alignment = screen_theme.get("alignment")
+            if alignment is not None and (
+                not isinstance(alignment, str)
+                or alignment not in {"centered", "left", "right"}
+            ):
+                raise ValueError(
+                    f"Project theme 'menu.screens.{screen_name}.alignment' must be centered, left, or right."
+                )
+            for key in ("top", "row_gap", "button_width", "button_height"):
+                value = screen_theme.get(key)
+                if value is not None and (
+                    not isinstance(value, int)
+                    or isinstance(value, bool)
+                    or value < (0 if key in {"top", "row_gap"} else 1)
+                ):
+                    raise ValueError(
+                        f"Project theme 'menu.screens.{screen_name}.{key}' must be a "
+                        f"{'non-negative' if key in {'top', 'row_gap'} else 'positive'} integer."
+                    )
+            background = screen_theme.get("background")
+            if background is not None and not isinstance(background, str):
+                raise ValueError(
+                    f"Project theme 'menu.screens.{screen_name}.background' must be an image path or null."
+                )
+            buttons = screen_theme.get("buttons", {})
+            if not isinstance(buttons, dict):
+                raise ValueError(f"Project theme 'menu.screens.{screen_name}.buttons' must be an object.")
+            for state in ("normal", "hovered"):
+                path = buttons.get(state)
+                if path is not None and (
+                    not isinstance(path, str) or Path(path).suffix.casefold() != ".png"
+                ):
+                    raise ValueError(
+                        f"Project theme 'menu.screens.{screen_name}.buttons.{state}' must be a PNG path or null."
+                    )
+            grid = screen_theme.get("grid")
+            if grid is not None:
+                if screen_name == "credits":
+                    raise ValueError("The Credits screen is a scrolling list and does not support a button grid.")
+                try:
+                    validate_menu_grid(grid, menu_item_counts[screen_name])
+                except ValueError as error:
+                    raise ValueError(f"Project theme 'menu.screens.{screen_name}.grid': {error}") from error
+
+        choice_theme = raw_theme.get("choice_buttons", {})
+        if not isinstance(choice_theme, dict):
+            raise ValueError("Project theme 'choice_buttons' must be an object.")
+        for state in ("normal", "hovered"):
+            path = choice_theme.get(state)
+            if path is not None and (
+                not isinstance(path, str) or Path(path).suffix.casefold() != ".png"
+            ):
+                raise ValueError(f"Project theme 'choice_buttons.{state}' must be a PNG path or null.")
+        for key in ("width", "height"):
+            value = choice_theme.get(key, theme["choice_buttons"][key])
+            if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+                raise ValueError(f"Project theme 'choice_buttons.{key}' must be a positive integer.")
+        gap = choice_theme.get("gap", theme["choice_buttons"]["gap"])
+        if not isinstance(gap, int) or isinstance(gap, bool) or gap < 0:
+            raise ValueError("Project theme 'choice_buttons.gap' must be a non-negative integer.")
+
+        pause_theme = raw_theme.get("pause_button", {})
+        if not isinstance(pause_theme, dict):
+            raise ValueError("Project theme 'pause_button' must be an object.")
+        pause_image = pause_theme.get("image")
+        if pause_image is not None and (
+            not isinstance(pause_image, str) or Path(pause_image).suffix.casefold() != ".png"
+        ):
+            raise ValueError("Project theme 'pause_button.image' must be a PNG path or null.")
+        pause_size = pause_theme.get("size", theme["pause_button"]["size"])
+        pause_margin = pause_theme.get("margin", theme["pause_button"]["margin"])
+        if not isinstance(pause_size, int) or isinstance(pause_size, bool) or pause_size < 1:
+            raise ValueError("Project theme 'pause_button.size' must be a positive integer.")
+        if not isinstance(pause_margin, int) or isinstance(pause_margin, bool) or pause_margin < 0:
+            raise ValueError("Project theme 'pause_button.margin' must be a non-negative integer.")
         credits = values.get("credits")
         if not isinstance(credits, list):
             raise ValueError("Project config 'credits' must be a list.")

@@ -4,6 +4,8 @@
 
 The project configuration is optional. If it is missing, the engine loads its built-in defaults and looks for `data/story.yaml`. When a config value is omitted, its built-in default is used. Nested objects merge with defaults; arrays such as menu `items` replace the default array completely.
 
+The starter-project template includes the full default theme, including the menu-screen, textbox, choice-button, and pause-button settings described below. VN_Editor shows this template for a missing or empty `data/project.json` and marks it unsaved; the file is written only when you save. A non-empty project file is loaded as written and is not replaced or filled with template keys. Its omitted settings still use engine defaults at runtime.
+
 ## Project folder and path rules
 
 The project root is the folder containing `assets/` and `data/`. If `Documents/VN Engine Projects/My Visual Novel` does not exist when VN_Editor starts without another project selected, the editor installs the starter project from its GitHub Release archive there. It leaves an existing folder and its `data/project.json` untouched. You can also open any other project folder from VN_Editor.
@@ -136,7 +138,7 @@ If you copy this example, add `assets/images/menu-background.jpg` or set `theme.
 | `credits` | `[]` | Additional credits shown in the Credits menu. |
 | `messages` | Built-in messages | Text for save/load/status messages; see [messages](#messages). |
 | `menus` | Built-in menus | Main, pause, settings, and save-slot menu titles/items. |
-| `theme` | Built-in theme | Colors, fonts, dialogue textbox image/color, menu layout/images, slot layout, and menu sounds. |
+| `theme` | Built-in theme | Colors, fonts, textbox, menus, button art, pause icon, and menu sounds. |
 
 ## Paths
 
@@ -188,7 +190,7 @@ Android APKs run immersive full-screen and fit the game display to the device vi
 
 ## Intro cards
 
-The engine displays an opening sequence before the main menu: the built-in logo, a creator credit, then a content notice. Use `intro` to change its text and replace/omit the optional images:
+The engine displays an opening sequence before the main menu: the built-in logo, a creator credit, then an optional content notice. Use `intro` to change its text and replace/omit the optional images:
 
 | Key | Default | Description |
 | --- | --- | --- |
@@ -200,6 +202,8 @@ The engine displays an opening sequence before the main menu: the built-in logo,
 | `headphones_image` | `headphones.png` | Additional image below the notice. Set to `null` to omit it. |
 
 The optional intro image values resolve from project `assets/` first and engine assets second. The `logo.png` and `intro.wav` splash assets are provided by the engine. The splash logo is fixed to the engine asset and cannot be hidden or replaced by a project image.
+
+The notice card is skipped when `warning_message` is empty and both `warning_image` and `headphones_image` are `null`.
 
 ## Menus
 
@@ -266,7 +270,7 @@ Only `http://` and `https://` URLs are accepted. Selecting a linked entry opens 
 
 ## Theme
 
-The `theme` object is merged over a full set of engine defaults. You can set only the values you want to change. Theme asset paths resolve from project `assets/` first, then engine assets. Colors are arrays of channel values from `0` to `255`; use `[R, G, B]`, or `[R, G, B, A]` for the dialogue panel opacity. The editor’s default `project.json` includes `theme.textbox.background` and `theme.textbox.color`, both `null` initially.
+The `theme` object is merged over a full set of engine defaults. The starter `project.json` spells these defaults out so every available setting is visible and editable; existing project files are not rewritten to add them. You can still omit values in a hand-edited project. Theme asset paths resolve from project `assets/` first, then engine assets. Colors are arrays of channel values from `0` to `255`; use `[R, G, B]`, or `[R, G, B, A]` for color alpha. The textbox also has an overall opacity setting from `0.0` to `1.0`.
 
 ### Colors
 
@@ -284,13 +288,18 @@ The `theme` object is merged over a full set of engine defaults. You can set onl
 
 ### Dialogue textbox image and color
 
-The textbox keeps its default size and position, but you can choose its panel color, add a panel image, or use both. Put image files in `assets/images/` and set the path relative to `assets/`. The image is scaled to fill the textbox; transparent parts show the configured color underneath. With no image, the color alone is used. `color: null` uses `theme.colors.panel` (default `[0, 0, 0, 128]`). An RGBA color controls its opacity.
+The textbox defaults to a 96%-width panel aligned with the bottom edge of the window. Set its `x`, `bottom`, `width`, and `height` as fractions of the window dimensions from `0.0` to `1.0`. Put image files in `assets/images/` and set the path relative to `assets/`. The image is scaled to fill the textbox; transparent parts show the configured color underneath. `opacity` multiplies the opacity of the entire panel, including its image. With no image, the color alone is used. `color: null` uses `theme.colors.panel` (default `[0, 0, 0, 128]`).
 
 ```json
 "theme": {
   "textbox": {
     "background": "images/dialogue-frame.png",
-    "color": [18, 15, 28, 220]
+    "color": [18, 15, 28, 220],
+    "x": 0.02,
+    "bottom": 0.0,
+    "width": 0.96,
+    "height": 0.24,
+    "opacity": 0.8
   }
 }
 ```
@@ -306,7 +315,7 @@ To use only a flat color, set `background` to `null` or omit it:
 }
 ```
 
-Both fields are optional. A project image that cannot be found is an error; use the editor’s asset suggestions or its live diagnostics to find the correct path.
+All geometry values are window fractions; `x + width` and `bottom + height` must each be at most `1.0`. Width and height must be greater than zero. A project image that cannot be found is an error; use the editor’s asset suggestions or its live diagnostics to find the correct path.
 
 ### Fonts
 
@@ -368,33 +377,70 @@ Dialogue text, speaker names, and choice-button text have base sizes of 24, 28, 
 
 If no theme values are configured, the engine uses a simple built-in renderer with system fonts and the default colors. Setting a `theme` enables the configurable renderer while keeping defaults for omitted theme values.
 
-### Save-slot layout and artwork
+### Per-screen menus, grids, and button images
 
-By default, save slots use the standard menu rows. Set `theme.slot.layout` to `tape` to draw tape artwork at the left of each slot row. Put both images in the project `assets/` folder; paths are relative to that folder:
+Menu screens can have independent backgrounds, row alignment and spacing, button sizes, button images, and grid layouts. The supported screen names are `main`, `pause`, `settings`, and `slots`; each applies only to that screen. Credits remains a scrolling list but supports its own button images and background. A screen-specific background overrides the shared `theme.menu.background`.
+
+Normal and hovered button images are optional PNGs. If only one is provided, it is used for both states. The label and any detail text are drawn over the image. With no button images, the engine draws its normal colored rows.
 
 ```json
-"slot": {
-  "layout": "tape",
-  "normal": "images/tape.png",
-  "hovered": "images/tape-selected.png",
-  "width": 900,
-  "row_height": 82,
-  "row_gap": 8,
-  "icon_width": 30,
-  "icon_height": 72,
-  "text_offset": 62
+"menu": {
+  "screens": {
+    "main": {
+      "background": "images/title-screen.png",
+      "buttons": {
+        "normal": "images/title-button.png",
+        "hovered": "images/title-button-hover.png"
+      },
+      "grid": [
+        [0, 1, 0],
+        [2, 0, 3]
+      ],
+      "button_width": 260,
+      "button_height": 72
+    },
+    "pause": {
+      "buttons": {
+        "normal": "images/pause-button.png"
+      }
+    },
+    "slots": {
+      "buttons": {
+        "normal": "images/slot-button.png",
+        "hovered": "images/slot-button-hover.png"
+      }
+    }
+  }
 }
 ```
 
-| Key | Default | Use |
-| --- | --- | --- |
-| `layout` | `list` | Use `list` for normal rows or `tape` for artwork rows. |
-| `normal`, `hovered` | `null` | Image paths for the unselected and selected tape. Both are required for tape artwork. |
-| `width`, `row_height`, `row_gap` | `900`, `82`, `8` | Row dimensions and spacing. |
-| `icon_width`, `icon_height` | `30`, `72` | Size of the tape artwork area. |
-| `text_offset` | `62` | Horizontal offset for the slot text. |
+In a grid, each positive number refers to that menu's item in one-based order. Use `0` or `null` for an empty cell. Every item index must appear exactly once; repeated or missing indexes are invalid. Rows may have different lengths: the window is divided by the number of grid rows and by the longest row, with short-row cells left empty. Buttons are centered in their cells. `button_width` and `button_height` are design pixels scaled by UI Size; omitted values default to `240` × `72` in a grid. The same size and spacing settings can also override the normal vertical rows for an individual screen. Grids are supported on the main, pause, settings, and save/load screens; Credits remains scrollable.
 
-If either tape image is missing, the engine falls back to standard rows. The UI Size setting scales these dimensions.
+The `main` grid above assumes `menus.main.items` contains exactly three items. Change the grid numbers to match the item list. A grid for Settings must account for the automatically added UI Size item if the configured list does not already contain it. Save/load grids must contain one index for each save slot.
+
+Story-choice buttons use their own image pair and dimensions:
+
+```json
+"choice_buttons": {
+  "normal": "images/choice.png",
+  "hovered": "images/choice-hover.png",
+  "width": 900,
+  "height": 56,
+  "gap": 12
+}
+```
+
+The pause icon in the top-left corner can also use a project PNG. Its default image is the engine's built-in `pause.png`:
+
+```json
+"pause_button": {
+  "image": "images/pause.png",
+  "size": 78,
+  "margin": 16
+}
+```
+
+Choice-button and pause-button dimensions are design pixels and scale with UI Size. If only one choice image is supplied, it is used for both normal and hovered states.
 
 ### Menu sounds
 

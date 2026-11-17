@@ -15,7 +15,6 @@ from engine.menu_renderer import (
     DeclarativeMenuRenderer,
     FallbackMenuRenderer,
     MenuRenderer,
-    TapeSlotRenderer,
 )
 from engine.parser import parse
 from engine.project import ProjectConfig
@@ -41,6 +40,10 @@ def _save_time(saved_game):
         return datetime.fromisoformat(saved_game["saved_at"]).timestamp()
     except (KeyError, TypeError, ValueError):
         return 0
+
+
+def _intro_warning_card_needed(message: str, warning_image, headphones_image) -> bool:
+    return bool(message.strip()) or warning_image is not None or headphones_image is not None
 
 
 class Engine:
@@ -75,7 +78,6 @@ class Engine:
         self.renderer_override = menu_renderer
         self.renderer_factory = menu_renderer_factory
         self.menu_renderer = None
-        self.tape_slot_renderer = None
 
         self.settings = SettingsStore(self.project.user_data_dir)
         self.save_system = SaveSystem(
@@ -175,10 +177,14 @@ class Engine:
             pygame.display.set_caption(self.caption)
             self.clock = pygame.time.Clock()
             self.textbox = self._create_textbox()
-            try:
-                self.pause_button_image = loader.load_image("pause.png").convert_alpha()
-            except (FileNotFoundError, pygame.error):
-                self.pause_button_image = None
+            pause_image = self.theme.get("pause_button", {}).get("image")
+            if pause_image:
+                self.pause_button_image = self.assets.load_image(pause_image).convert_alpha()
+            else:
+                try:
+                    self.pause_button_image = loader.load_image("pause.png").convert_alpha()
+                except (FileNotFoundError, pygame.error):
+                    self.pause_button_image = None
             self._layout_pause_button()
             self.menu_renderer = self.renderer_override or self._create_menu_renderer()
             self._apply_audio_settings()
@@ -195,10 +201,7 @@ class Engine:
             return self.renderer_factory(self.assets, self.theme)
         if not self.has_project_theme:
             return FallbackMenuRenderer(self.assets, self.theme)
-        standard = DeclarativeMenuRenderer(self.assets, self.theme)
-        if self.theme.get("slot", {}).get("layout") == "tape":
-            self.tape_slot_renderer = TapeSlotRenderer(self.assets, self.theme)
-        return standard
+        return DeclarativeMenuRenderer(self.assets, self.theme)
 
     def _play_intro(self):
         for _ in self._intro_frames():
@@ -231,8 +234,18 @@ class Engine:
         cards = [
             {"image": logo, "kind": "logo", "hold": 3.0},
             {"image": self._intro_image(intro["credit_image"]), "kind": "credit", "hold": 2.5},
-            {"image": self._intro_image(intro["warning_image"]), "extra_image": self._intro_image(intro["headphones_image"]), "kind": "warning", "hold": 2.5},
         ]
+        warning_image = self._intro_image(intro["warning_image"])
+        headphones_image = self._intro_image(intro["headphones_image"])
+        if _intro_warning_card_needed(intro["warning_message"], warning_image, headphones_image):
+            cards.append(
+                {
+                    "image": warning_image,
+                    "extra_image": headphones_image,
+                    "kind": "warning",
+                    "hold": 2.5,
+                }
+            )
         sound_channel = None
         try:
             intro_sound = self.assets.load_sound("intro.wav")
@@ -492,8 +505,6 @@ class Engine:
     def _renderer_for_active_menu(self):
         if self.renderer_override is not None:
             return self.renderer_override
-        if self.mode == "slots" and self.tape_slot_renderer is not None:
-            return self.tape_slot_renderer
         return self.menu_renderer
 
     def _render_game(self):
@@ -515,7 +526,10 @@ class Engine:
         scene.blit(self.textbox.surface, self.textbox.rect)
         if self.flow.choices_visible:
             for button, option in zip(self.choice_buttons, self.flow.options):
-                button.render(option["label"])
+                button.render(
+                    option["label"],
+                    hovered=button.rect.collidepoint(pygame.mouse.get_pos()),
+                )
                 scene.blit(button.surface, button.rect)
 
         self.screen.fill(COLORS.background)
@@ -541,13 +555,19 @@ class Engine:
         image_name = textbox_theme.get("background")
         image = self.assets.load_image(image_name) if image_name else None
         color = textbox_theme.get("color")
+        screen_width, screen_height = self.window_size
+        x = round(screen_width * textbox_theme.get("x", 0.02))
+        bottom = round(screen_height * textbox_theme.get("bottom", 0.0))
+        width = max(1, round(screen_width * textbox_theme.get("width", 0.96)))
+        height = max(1, round(screen_height * textbox_theme.get("height", 0.21)))
         textbox = Textbox(
-            ui_size(40),
-            self.window_size[1] - ui_size(290),
-            max(ui_size(100), self.window_size[0] - ui_size(80)),
-            ui_size(250),
+            x,
+            screen_height - bottom - height,
+            width,
+            height,
             panel_color=tuple(color) if color is not None else COLORS.panel,
             panel_image=image,
+            panel_opacity=textbox_theme.get("opacity", 0.95),
         )
         if previous is not None:
             textbox.current_speaker = previous.current_speaker
@@ -561,11 +581,12 @@ class Engine:
         if self.screen is None:
             self.pause_button_rect = pygame.Rect(0, 0, 0, 0)
             return
-        side = ui_size(78)
-        margin = ui_size(16)
+        pause_theme = self.theme.get("pause_button", {})
+        side = max(1, ui_size(pause_theme.get("size", 78)))
+        margin = max(0, ui_size(pause_theme.get("margin", 16)))
         self.pause_button_rect = pygame.Rect(margin, margin, side, side)
         if self.pause_button_image is not None:
-            icon_side = ui_size(68)
+            icon_side = max(1, side - ui_size(10))
             self.scaled_pause_button_image = pygame.transform.smoothscale(
                 self.pause_button_image, (icon_side, icon_side)
             )
@@ -576,7 +597,7 @@ class Engine:
         if self.pause_button_image is None or self.mode != "game" or self.history_visible:
             return
         rect = self.pause_button_rect
-        disk_side = ui_size(62)
+        disk_side = max(1, rect.width - ui_size(16))
         pygame.draw.circle(self.screen, (242, 242, 247), rect.center, disk_side // 2)
         self.screen.blit(self.scaled_pause_button_image, self.scaled_pause_button_image.get_rect(center=rect.center))
 
@@ -835,20 +856,35 @@ class Engine:
             return
 
         count = len(options)
-        gap = ui_size(12)
-        button_width = min(ui_size(900), max(ui_size(120), self.window_size[0] - ui_size(96)))
+        button_theme = self.theme.get("choice_buttons", {})
+        gap = max(0, ui_size(button_theme.get("gap", 12)))
+        button_width = min(
+            ui_size(button_theme.get("width", 900)),
+            max(1, self.window_size[0] - ui_size(96)),
+        )
         top = ui_size(40)
         bottom = self.textbox.rect.top - ui_size(20)
         available_height = max(1, bottom - top)
-        max_button_height = max(ui_size(36), (available_height - (count - 1) * gap) // count)
-        button_height = min(ui_size(56), max_button_height)
+        max_button_height = max(1, (available_height - (count - 1) * gap) // count)
+        button_height = min(ui_size(button_theme.get("height", 56)), max_button_height)
         total_height = count * button_height + (count - 1) * gap
         start_y = top + max(0, (available_height - total_height) // 2)
         start_x = (self.window_size[0] - button_width) // 2
+        normal_name = button_theme.get("normal")
+        hovered_name = button_theme.get("hovered")
+        normal_image = self.assets.load_image(normal_name).convert_alpha() if normal_name else None
+        hovered_image = self.assets.load_image(hovered_name).convert_alpha() if hovered_name else None
         for index in range(count):
             y = start_y + index * (button_height + gap)
             self.choice_buttons.append(
-                Button(start_x, y, button_width, button_height)
+                Button(
+                    start_x,
+                    y,
+                    button_width,
+                    button_height,
+                    normal_image,
+                    hovered_image,
+                )
             )
 
     def _start_new_game(self):

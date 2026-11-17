@@ -1,6 +1,7 @@
 """Build a reusable Pygbag static-site template for VN Engine projects."""
 
 import argparse
+from copy import deepcopy
 import importlib.util
 import json
 import os
@@ -14,6 +15,12 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from engine.project import DEFAULT_PROJECT
+
+
 PYGBAG_RUNTIME_VERSION = "0.9.3"
 PYGBAG_CDN_URL = f"https://pygame-web.github.io/cdn/{PYGBAG_RUNTIME_VERSION}/"
 PYGBAG_PACKAGE_INDEX = f"index-{PYGBAG_RUNTIME_VERSION}-cp312.json"
@@ -307,14 +314,11 @@ def _write_starter_project(app_root: Path) -> None:
         encoding="utf-8",
         newline="\n",
     )
+    project = deepcopy(DEFAULT_PROJECT)
+    project["name"] = "My Visual Novel"
+    project["menus"]["main"]["title"] = "My Visual Novel"
     (data_root / "project.json").write_text(
-        '{\n'
-        '  "name": "My Visual Novel",\n'
-        '  "story": "story.yaml",\n'
-        '  "icon": null,\n'
-        '  "save_slots": 5,\n'
-        '  "paths": {"data": "data", "assets": "assets", "user_data": "user_data"}\n'
-        '}\n',
+        json.dumps(project, ensure_ascii=True, indent=2) + "\n",
         encoding="utf-8",
         newline="\n",
     )

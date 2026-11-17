@@ -26,6 +26,8 @@ class Panel(UIElement):
         self.surface.set_alpha(int(255 * opacity))
 
     def fade_sides(self, steps: int = 2, sides: float = 0.15):
+        surface_alpha = self.surface.get_alpha()
+        self.surface.set_alpha(255)
         temp_surf = pygame.Surface(self.rect.size, pygame.SRCALPHA)
         temp_surf.fill(COLORS.blank)
         space = min(int(self.rect.w * sides), self.rect.w // 2)
@@ -48,6 +50,7 @@ class Panel(UIElement):
         if middle_width > 0:
             middle = self.surface.subsurface((space, 0, middle_width, self.rect.h))
             temp_surf.blit(middle, (space, 0))
+        temp_surf.set_alpha(surface_alpha)
         self.surface = temp_surf
 
 
@@ -60,12 +63,13 @@ class Textbox(UIElement):
         height: int,
         panel_color: tuple[int, ...] | None = None,
         panel_image: pygame.Surface | None = None,
+        panel_opacity: float = 0.95,
     ):
         super().__init__(x, y, width, height)
         self.panel = Panel(0, 0, width, height)
         self.panel.set_background(
             panel_image if panel_image is not None else (panel_color or COLORS.panel),
-            opacity=0.95,
+            opacity=panel_opacity,
             base_color=panel_color or COLORS.panel,
         )
         self.panel.fade_sides(steps=2, sides=0.15)
@@ -168,11 +172,31 @@ class Textbox(UIElement):
 
 
 class Button(UIElement):
-    def __init__(self, x: int, y: int, width: int, height: int):
+    def __init__(
+        self,
+        x: int,
+        y: int,
+        width: int,
+        height: int,
+        normal_image: pygame.Surface | None = None,
+        hovered_image: pygame.Surface | None = None,
+    ):
         super().__init__(x, y, width, height)
         self.panel = Panel(0, 0, width, height)
         self.panel.set_background(COLORS.panel)
         self.panel.fade_sides(steps=2, sides=0.15)
+        if normal_image is None:
+            normal_image = hovered_image
+        if hovered_image is None:
+            hovered_image = normal_image
+        self.normal_image = (
+            pygame.transform.smoothscale(normal_image, self.rect.size)
+            if normal_image is not None else None
+        )
+        self.hovered_image = (
+            pygame.transform.smoothscale(hovered_image, self.rect.size)
+            if hovered_image is not None else None
+        )
         self.active = True
 
     def update(self, click: bool, position=None) -> bool:
@@ -182,9 +206,13 @@ class Button(UIElement):
             position = pygame.mouse.get_pos()
         return self.rect.collidepoint(position)
 
-    def render(self, msg: str):
+    def render(self, msg: str, hovered: bool = False):
         self.surface.fill(COLORS.blank)
-        self.surface.blit(self.panel.surface, (0, 0))
+        image = self.hovered_image if hovered else self.normal_image
+        if image is not None:
+            self.surface.blit(image, (0, 0))
+        else:
+            self.surface.blit(self.panel.surface, (0, 0))
 
         text_surf = FONTS.button_text.render(msg, True, COLORS.text)
         x = (self.rect.w - text_surf.get_width()) // 2

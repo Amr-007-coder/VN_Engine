@@ -1,6 +1,35 @@
 from copy import deepcopy
 
 
+MENU_SCREEN_NAMES = ("main", "pause", "settings", "slots", "credits")
+
+
+def validate_menu_grid(grid, item_count=None):
+    if not isinstance(grid, list) or not grid:
+        raise ValueError("Menu grid must be a non-empty list of rows.")
+    indexes = []
+    columns = 0
+    for row_index, row in enumerate(grid, 1):
+        if not isinstance(row, list):
+            raise ValueError(f"Menu grid row {row_index} must be a list.")
+        columns = max(columns, len(row))
+        for cell in row:
+            if cell is None or (
+                isinstance(cell, int) and not isinstance(cell, bool) and cell == 0
+            ):
+                continue
+            if not isinstance(cell, int) or isinstance(cell, bool) or cell < 1:
+                raise ValueError("Menu grid cells must be null, 0, or positive button indexes.")
+            indexes.append(cell)
+    if columns == 0 or not indexes:
+        raise ValueError("Menu grid must place at least one button.")
+    if len(indexes) != len(set(indexes)):
+        raise ValueError("Menu grid button indexes must not repeat.")
+    expected_count = item_count if item_count is not None else max(indexes)
+    if sorted(indexes) != list(range(1, expected_count + 1)):
+        raise ValueError(f"Menu grid must place every button exactly once from 1 to {expected_count}.")
+
+
 DEFAULT_THEME = {
     "colors": {
         "background": [30, 30, 45],
@@ -30,21 +59,54 @@ DEFAULT_THEME = {
         "title_y": 112,
         "top": 190,
         "border_radius": 8,
-    },
-    "slot": {
-        "layout": "list",
-        "normal": None,
-        "hovered": None,
-        "width": 900,
-        "row_height": 82,
-        "row_gap": 8,
-        "icon_width": 30,
-        "icon_height": 72,
-        "text_offset": 62,
+        "screens": {
+            "main": {
+                "background": None, "alignment": None, "top": None, "row_gap": None,
+                "button_width": None, "button_height": None, "grid": None,
+                "buttons": {"normal": None, "hovered": None},
+            },
+            "pause": {
+                "background": None, "alignment": None, "top": None, "row_gap": None,
+                "button_width": None, "button_height": None, "grid": None,
+                "buttons": {"normal": None, "hovered": None},
+            },
+            "settings": {
+                "background": None, "alignment": None, "top": None, "row_gap": None,
+                "button_width": None, "button_height": None, "grid": None,
+                "buttons": {"normal": None, "hovered": None},
+            },
+            "slots": {
+                "background": None, "alignment": None, "top": None, "row_gap": None,
+                "button_width": None, "button_height": None, "grid": None,
+                "buttons": {"normal": None, "hovered": None},
+            },
+            "credits": {
+                "background": None, "alignment": None, "top": None, "row_gap": None,
+                "button_width": None, "button_height": None,
+                "buttons": {"normal": None, "hovered": None},
+            },
+        },
     },
     "textbox": {
         "background": None,
         "color": None,
+        "x": 0.02,
+        "bottom": 0.0,
+        "width": 0.96,
+        "height": 0.21,
+        "opacity": 0.95,
+    },
+    "choice_buttons": {
+        "normal": None,
+        "hovered": None,
+        "width": 900,
+        "height": 56,
+        "gap": 12,
+    },
+    "pause_button": {
+        "image": None,
+        "size": 78,
+        "margin": 16,
     },
     "sounds": {
         "hover": "sounds/hover_button.wav",

@@ -193,12 +193,46 @@ DEFAULT_THEME = _literal_from_engine("engine/theme.py", "DEFAULT_THEME") or {
                "accent": [233, 79, 88], "panel": [0, 0, 0, 128]},
     "fonts": {"menu": None, "title": None, "item_size": 20,
               "detail_size": 16, "title_size": 30},
-    "menu": {"layout": "centered", "background": None, "width": 860,
-             "x": None, "row_height": 56, "row_gap": 9, "title_y": 112,
-             "top": 190, "border_radius": 8},
-    "slot": {"layout": "list", "normal": None, "hovered": None,
-             "width": 900, "row_height": 82, "row_gap": 8,
-             "icon_width": 30, "icon_height": 72, "text_offset": 62},
+    "menu": {
+        "layout": "centered", "background": None, "width": 860,
+        "x": None, "row_height": 56, "row_gap": 9, "title_y": 112,
+        "top": 190, "border_radius": 8,
+        "screens": {
+            "main": {
+                "background": None, "alignment": None, "top": None, "row_gap": None,
+                "button_width": None, "button_height": None, "grid": None,
+                "buttons": {"normal": None, "hovered": None},
+            },
+            "pause": {
+                "background": None, "alignment": None, "top": None, "row_gap": None,
+                "button_width": None, "button_height": None, "grid": None,
+                "buttons": {"normal": None, "hovered": None},
+            },
+            "settings": {
+                "background": None, "alignment": None, "top": None, "row_gap": None,
+                "button_width": None, "button_height": None, "grid": None,
+                "buttons": {"normal": None, "hovered": None},
+            },
+            "slots": {
+                "background": None, "alignment": None, "top": None, "row_gap": None,
+                "button_width": None, "button_height": None, "grid": None,
+                "buttons": {"normal": None, "hovered": None},
+            },
+            "credits": {
+                "background": None, "alignment": None, "top": None, "row_gap": None,
+                "button_width": None, "button_height": None,
+                "buttons": {"normal": None, "hovered": None},
+            },
+        },
+    },
+    "textbox": {
+        "background": None, "color": None, "x": 0.02, "bottom": 0.0,
+        "width": 0.96, "height": 0.21, "opacity": 0.95,
+    },
+    "choice_buttons": {
+        "normal": None, "hovered": None, "width": 900, "height": 56, "gap": 12,
+    },
+    "pause_button": {"image": None, "size": 78, "margin": 16},
     "sounds": {"hover": "sounds/hover_button.wav", "click": "sounds/click_button.wav",
                "cancel": "sounds/click_button.wav", "load": "sounds/click_button.wav"},
 }
@@ -214,6 +248,11 @@ def merge_defaults(defaults: Any, overrides: Any):
             result[key] = merge_defaults(result[key], value) if key in result else value
         return result
     return overrides
+
+
+DEFAULT_PROJECT["theme"] = merge_defaults(
+    DEFAULT_THEME, DEFAULT_PROJECT.get("theme", {})
+)
 
 
 def editor_index(start: str, offset: int) -> str:
@@ -982,20 +1021,250 @@ def _validate_project_object(values, raw, source, diagnostics):
     theme = raw.get("theme", {})
     if isinstance(theme, dict):
         check_unknown(theme, DEFAULT_THEME, "theme", _line_of_key(source, "theme"))
-        menu_theme = theme.get("menu")
+        theme_values = merge_defaults(DEFAULT_THEME, theme)
+        menu_theme = theme.get("menu", {})
+        resolved_menu = theme_values.get("menu", {})
+        if not isinstance(menu_theme, dict):
+            diagnostics.append(Diagnostic("error", "theme.menu must be an object.", _line_of_key(source, "menu")))
         if isinstance(menu_theme, dict) and menu_theme.get("layout") not in (None, "centered", "left", "right"):
             diagnostics.append(Diagnostic("error", "theme.menu.layout must be centered, left, or right.", _line_of_key(source, "layout", _line_of_key(source, "menu"))))
-        slot_theme = theme.get("slot")
-        if isinstance(slot_theme, dict) and slot_theme.get("layout") not in (None, "list", "tape"):
-            diagnostics.append(Diagnostic("error", "theme.slot.layout must be list or tape.", _line_of_key(source, "layout", _line_of_key(source, "slot"))))
-        textbox_theme = theme.get("textbox")
-        if isinstance(textbox_theme, dict):
-            color = textbox_theme.get("color")
+        raw_screens = menu_theme.get("screens", {}) if isinstance(menu_theme, dict) else {}
+        if not isinstance(raw_screens, dict):
+            diagnostics.append(Diagnostic(
+                "error",
+                "theme.menu.screens must be an object.",
+                _line_of_key(source, "screens", _line_of_key(source, "menu")),
+            ))
+        menu_configs = values.get("menus", {})
+        if not isinstance(menu_configs, dict):
+            menu_configs = {}
+
+        def menu_items(name):
+            config = menu_configs.get(name, {})
+            items = config.get("items", []) if isinstance(config, dict) else []
+            return items if isinstance(items, list) else []
+
+        main_items = menu_items("main")
+        pause_items = menu_items("pause")
+        settings_items = menu_items("settings")
+        slots_count = values.get("save_slots", 0)
+        if not isinstance(slots_count, int) or isinstance(slots_count, bool) or slots_count < 1:
+            slots_count = 0
+        menu_item_counts = {
+            "main": len(main_items),
+            "pause": len(pause_items),
+            "settings": len(settings_items)
+            + (
+                0
+                if any(
+                    item.get("setting") == "ui_scale"
+                    for item in settings_items
+                    if isinstance(item, dict)
+                )
+                else 1
+            ),
+            "slots": slots_count,
+        }
+
+        def grid_indexes(grid, screen_name, expected_count, line):
+            if screen_name == "credits":
+                diagnostics.append(Diagnostic("error", "Credits uses a scrolling list and does not support a grid.", line))
+                return
+            if not isinstance(grid, list) or not grid:
+                diagnostics.append(Diagnostic("error", "Menu grid must be a non-empty list of rows.", line))
+                return
+            indexes = []
+            columns = 0
+            valid = True
+            for row_index, row in enumerate(grid, 1):
+                if not isinstance(row, list):
+                    diagnostics.append(Diagnostic("error", f"Menu grid row {row_index} must be a list.", line))
+                    valid = False
+                    continue
+                columns = max(columns, len(row))
+                for cell in row:
+                    if cell is None or (
+                        isinstance(cell, int) and not isinstance(cell, bool) and cell == 0
+                    ):
+                        continue
+                    if not isinstance(cell, int) or isinstance(cell, bool) or cell < 1:
+                        diagnostics.append(Diagnostic("error", "Menu grid cells must be null, 0, or positive button indexes.", line))
+                        valid = False
+                    else:
+                        indexes.append(cell)
+            if not columns or not indexes:
+                diagnostics.append(Diagnostic("error", "Menu grid must place at least one button.", line))
+                valid = False
+            if len(indexes) != len(set(indexes)):
+                diagnostics.append(Diagnostic("error", "Menu grid button indexes must not repeat.", line))
+                valid = False
+            if valid and sorted(indexes) != list(range(1, expected_count + 1)):
+                diagnostics.append(Diagnostic(
+                    "error",
+                    f"Menu grid must place every button exactly once from 1 to {expected_count}.",
+                    line,
+                ))
+
+        if isinstance(raw_screens, dict):
+            for screen_name, screen in raw_screens.items():
+                if not isinstance(screen, dict):
+                    diagnostics.append(Diagnostic(
+                        "error",
+                        f"theme.menu.screens.{screen_name} must be an object.",
+                        _line_of_key(source, screen_name, _line_of_key(source, "screens", _line_of_key(source, "menu"))),
+                    ))
+                    continue
+                screen_line = _line_of_key(source, screen_name, _line_of_key(source, "screens", _line_of_key(source, "menu")))
+                alignment = screen.get("alignment")
+                if alignment is not None and (
+                    not isinstance(alignment, str)
+                    or alignment not in {"centered", "left", "right"}
+                ):
+                    diagnostics.append(Diagnostic(
+                        "error",
+                        f"theme.menu.screens.{screen_name}.alignment must be centered, left, or right.",
+                        _line_of_key(source, "alignment", screen_line),
+                    ))
+                for dimension in ("top", "row_gap", "button_width", "button_height"):
+                    value = screen.get(dimension)
+                    minimum = 0 if dimension in {"top", "row_gap"} else 1
+                    if value is not None and (
+                        not isinstance(value, int) or isinstance(value, bool) or value < minimum
+                    ):
+                        diagnostics.append(Diagnostic(
+                            "error",
+                            f"theme.menu.screens.{screen_name}.{dimension} must be an integer of at least {minimum}.",
+                            _line_of_key(source, dimension, screen_line),
+                        ))
+                background = screen.get("background")
+                if background is not None and not isinstance(background, str):
+                    diagnostics.append(Diagnostic(
+                        "error",
+                        f"theme.menu.screens.{screen_name}.background must be an image path or null.",
+                        _line_of_key(source, "background", screen_line),
+                    ))
+                buttons = screen.get("buttons", {})
+                if not isinstance(buttons, dict):
+                    diagnostics.append(Diagnostic(
+                        "error",
+                        f"theme.menu.screens.{screen_name}.buttons must be an object.",
+                        _line_of_key(source, "buttons", screen_line),
+                    ))
+                else:
+                    for state in ("normal", "hovered"):
+                        image = buttons.get(state)
+                        if image is not None and (
+                            not isinstance(image, str) or Path(image).suffix.casefold() != ".png"
+                        ):
+                            diagnostics.append(Diagnostic(
+                                "error",
+                                f"theme.menu.screens.{screen_name}.buttons.{state} must be a PNG path or null.",
+                                _line_of_key(source, state, _line_of_key(source, "buttons", screen_line)),
+                            ))
+                grid = screen.get("grid")
+                if grid is not None:
+                    grid_indexes(
+                        grid,
+                        screen_name,
+                        menu_item_counts.get(screen_name, 0),
+                        _line_of_key(source, "grid", screen_line),
+                    )
+
+        textbox_theme = theme_values.get("textbox", {})
+        raw_textbox = theme.get("textbox", {})
+        if not isinstance(raw_textbox, dict):
+            diagnostics.append(Diagnostic(
+                "error",
+                "theme.textbox must be an object.",
+                _line_of_key(source, "textbox"),
+            ))
+        if isinstance(raw_textbox, dict):
+            color = raw_textbox.get("color")
             if color is not None and (
                 not isinstance(color, list) or len(color) not in {3, 4}
                 or any(not isinstance(channel, int) or isinstance(channel, bool) or not 0 <= channel <= 255 for channel in color)
             ):
                 diagnostics.append(Diagnostic("error", "theme.textbox.color must be an RGB or RGBA array with values from 0 to 255.", _line_of_key(source, "color", _line_of_key(source, "textbox"))))
+        textbox_values = textbox_theme if isinstance(textbox_theme, dict) else {}
+        geometry = {}
+        for key in ("x", "bottom", "width", "height", "opacity"):
+            value = textbox_values.get(key)
+            if (
+                not isinstance(value, (int, float))
+                or isinstance(value, bool)
+                or not 0 <= value <= 1
+                or (key in {"width", "height"} and value == 0)
+            ):
+                diagnostics.append(Diagnostic(
+                    "error",
+                    f"theme.textbox.{key} must be a fraction from 0 to 1.",
+                    _line_of_key(source, key, _line_of_key(source, "textbox")),
+                ))
+            else:
+                geometry[key] = value
+        if (
+            all(key in geometry for key in ("x", "width", "bottom", "height"))
+            and (
+                geometry["x"] + geometry["width"] > 1
+                or geometry["bottom"] + geometry["height"] > 1
+            )
+        ):
+            diagnostics.append(Diagnostic(
+                "error",
+                "theme.textbox geometry must fit within the window.",
+                _line_of_key(source, "textbox"),
+            ))
+
+        choice_theme = theme.get("choice_buttons", {})
+        if not isinstance(choice_theme, dict):
+            diagnostics.append(Diagnostic(
+                "error",
+                "theme.choice_buttons must be an object.",
+                _line_of_key(source, "choice_buttons"),
+            ))
+        else:
+            for state in ("normal", "hovered"):
+                image = choice_theme.get(state)
+                if image is not None and (
+                    not isinstance(image, str) or Path(image).suffix.casefold() != ".png"
+                ):
+                    diagnostics.append(Diagnostic(
+                        "error",
+                        f"theme.choice_buttons.{state} must be a PNG path or null.",
+                        _line_of_key(source, state, _line_of_key(source, "choice_buttons")),
+                    ))
+            for dimension in ("width", "height"):
+                value = choice_theme.get(dimension, DEFAULT_THEME["choice_buttons"][dimension])
+                if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+                    diagnostics.append(Diagnostic(
+                        "error",
+                        f"theme.choice_buttons.{dimension} must be a positive integer.",
+                        _line_of_key(source, dimension, _line_of_key(source, "choice_buttons")),
+                    ))
+            gap = choice_theme.get("gap", DEFAULT_THEME["choice_buttons"]["gap"])
+            if not isinstance(gap, int) or isinstance(gap, bool) or gap < 0:
+                diagnostics.append(Diagnostic(
+                    "error",
+                    "theme.choice_buttons.gap must be a non-negative integer.",
+                    _line_of_key(source, "gap", _line_of_key(source, "choice_buttons")),
+                ))
+        pause_theme = theme.get("pause_button", {})
+        if not isinstance(pause_theme, dict):
+            diagnostics.append(Diagnostic(
+                "error",
+                "theme.pause_button must be an object.",
+                _line_of_key(source, "pause_button"),
+            ))
+        else:
+            image = pause_theme.get("image")
+            if image is not None and (
+                not isinstance(image, str) or Path(image).suffix.casefold() != ".png"
+            ):
+                diagnostics.append(Diagnostic(
+                    "error",
+                    "theme.pause_button.image must be a PNG path or null.",
+                    _line_of_key(source, "image", _line_of_key(source, "pause_button")),
+                ))
     elif "theme" in raw:
         diagnostics.append(Diagnostic("error", "theme must be an object.", _line_of_key(source, "theme")))
 
@@ -1998,8 +2267,22 @@ while ($true) {{
         if self.project_file.is_file():
             try:
                 raw_text = self.project_file.read_text(encoding="utf-8")
-                raw_project = json.loads(raw_text)
-                self.project_buffer = raw_text
+                if raw_text.strip():
+                    raw_project = json.loads(raw_text)
+                    if raw_project == {}:
+                        raw_project = DEFAULT_PROJECT
+                        self.project_buffer = json.dumps(
+                            DEFAULT_PROJECT, ensure_ascii=False, indent=2
+                        ) + "\n"
+                        project_dirty = True
+                    else:
+                        self.project_buffer = raw_text
+                else:
+                    raw_project = DEFAULT_PROJECT
+                    self.project_buffer = json.dumps(
+                        DEFAULT_PROJECT, ensure_ascii=False, indent=2
+                    ) + "\n"
+                    project_dirty = True
             except json.JSONDecodeError:
                 self.project_buffer = raw_text
             except OSError as error:
@@ -2823,14 +3106,17 @@ while ($true) {{
             elif key == "setting":
                 values = [(value, "setting") for value in sorted(SETTING_NAMES)]
             elif key == "layout":
-                options = ("list", "tape") if context[-1:] == ("slot",) else ("centered", "left", "right")
-                values = [(value, "layout") for value in options]
-            elif key in {"normal", "hovered"} and context[-1:] == ("slot",):
+                values = [(value, "layout") for value in ("centered", "left", "right")]
+            elif key in {"normal", "hovered"} and context[-1:] in {
+                ("buttons",), ("choice_buttons",),
+            }:
                 values = [(value, "image asset") for value in catalog.asset_suggestions("image")]
-            elif key == "background" and context[-1:] == ("menu",):
+            elif key == "image" and context[-1:] == ("pause_button",):
                 values = [(value, "image asset") for value in catalog.asset_suggestions("image")]
-            elif key == "background" and context[-1:] == ("textbox",):
-                values = [(value, "textbox image asset") for value in catalog.asset_suggestions("image")]
+            elif key == "background" and context[-1:] in {
+                ("menu",), ("textbox",), ("main",), ("pause",), ("settings",), ("slots",), ("credits",),
+            }:
+                values = [(value, "image asset") for value in catalog.asset_suggestions("image")]
             elif key == "color" and context[-1:] == ("textbox",):
                 values = [(json.dumps(DEFAULT_THEME.get("colors", {}).get("panel", [0, 0, 0, 128]), ensure_ascii=False), "default textbox color")]
             elif key in {"hover", "click", "cancel", "load"} and context[-1:] == ("sounds",):
@@ -2942,8 +3228,20 @@ while ($true) {{
             "theme.fonts": list(DEFAULT_THEME.get("fonts", {})),
             "theme.game_fonts": ["text", "name", "button"],
             "theme.menu": list(DEFAULT_THEME.get("menu", {})) + ["right_margin"],
-            "theme.slot": list(DEFAULT_THEME.get("slot", {})),
+            "theme.menu.screens": list(DEFAULT_THEME.get("menu", {}).get("screens", {})),
+            "theme.menu.screens.main": list(DEFAULT_THEME.get("menu", {}).get("screens", {}).get("main", {})),
+            "theme.menu.screens.pause": list(DEFAULT_THEME.get("menu", {}).get("screens", {}).get("pause", {})),
+            "theme.menu.screens.settings": list(DEFAULT_THEME.get("menu", {}).get("screens", {}).get("settings", {})),
+            "theme.menu.screens.slots": list(DEFAULT_THEME.get("menu", {}).get("screens", {}).get("slots", {})),
+            "theme.menu.screens.credits": list(DEFAULT_THEME.get("menu", {}).get("screens", {}).get("credits", {})),
+            "theme.menu.screens.main.buttons": ["normal", "hovered"],
+            "theme.menu.screens.pause.buttons": ["normal", "hovered"],
+            "theme.menu.screens.settings.buttons": ["normal", "hovered"],
+            "theme.menu.screens.slots.buttons": ["normal", "hovered"],
+            "theme.menu.screens.credits.buttons": ["normal", "hovered"],
             "theme.textbox": list(DEFAULT_THEME.get("textbox", {})),
+            "theme.choice_buttons": list(DEFAULT_THEME.get("choice_buttons", {})),
+            "theme.pause_button": list(DEFAULT_THEME.get("pause_button", {})),
             "theme.sounds": list(DEFAULT_THEME.get("sounds", {})),
             "messages": list(DEFAULT_PROJECT.get("messages", {})),
             "credits[]": ["label", "url"],

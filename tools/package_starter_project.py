@@ -1,11 +1,20 @@
 """Create the starter-project ZIP published with VN Engine releases."""
 
 import argparse
+from copy import deepcopy
 import json
 import os
 from pathlib import Path
+import sys
 import tempfile
 from zipfile import ZIP_DEFLATED, ZipFile
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from engine.project import DEFAULT_PROJECT
 
 
 STARTER_PROJECT_NAME = "VN_Engine-Starter-Project.zip"
@@ -27,18 +36,9 @@ def _write_starter_project(root: Path) -> None:
         encoding="utf-8",
         newline="\n",
     )
-    project = {
-        "name": "My Visual Novel",
-        "story": "story.yaml",
-        "icon": None,
-        "android": {
-            "app_name": "VN Engine",
-            "app_id": "com.example.vnengine",
-            "orientation": "landscape",
-        },
-        "save_slots": 5,
-        "paths": {"data": "data", "assets": "assets", "user_data": "user_data"},
-    }
+    project = deepcopy(DEFAULT_PROJECT)
+    project["name"] = "My Visual Novel"
+    project["menus"]["main"]["title"] = "My Visual Novel"
     (data / "project.json").write_text(
         json.dumps(project, ensure_ascii=True, indent=2) + "\n",
         encoding="utf-8",
