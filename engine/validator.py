@@ -1,3 +1,4 @@
+import math
 import re
 
 from engine.assets import AssetManager
@@ -14,9 +15,10 @@ class StoryValidationError(ValueError):
 class StoryValidator:
     CONDITION_OPERATORS = {"==", "!=", "<", "<=", ">", ">=", "in", "not_in"}
     ASSIGNMENT_ACTIONS = {"set", "add", "subtract"}
-    ROOT_KEYS = {"title", "start", "variables", "character_defaults", "dialogues"}
+    ROOT_KEYS = {"title", "start", "variables", "character_defaults", "localization", "dialogues"}
     DIALOGUE_KEYS = {
-        "chapter", "speaker", "text", "active_character", "voice", "next", "options", "actions"
+        "chapter", "speaker", "speaker_name", "text", "active_character", "voice", "next", "call", "return", "options", "actions",
+        "choice_timeout", "choice_timeout_target",
     }
     ACTION_FIELDS = {
         "set": {"type", "var", "value"},
@@ -28,23 +30,28 @@ class StoryValidator:
         "music": {"type", "track"},
         "stop_music": {"type"},
         "sound": {"type", "name"},
-        "show_character": {"type", "name", "expression", "position", "look"},
-        "hide_character": {"type", "name"},
+        "show_character": {"type", "name", "expression", "position", "look", "transition", "duration", "easing"},
+        "hide_character": {"type", "name", "transition", "duration", "easing"},
         "clear_characters": {"type"},
         "animate_character": {"type", "name", "frames", "look", "position", "frame_duration", "loop"},
         "fade": {"type", "direction", "duration", "color"},
         "shake": {"type", "duration", "intensity"},
         "autosave": {"type"},
+        "unlock_cg": {"type", "id", "image", "label"},
+        "unlock_music": {"type", "id", "track", "label"},
+        "achievement": {"type", "id", "title", "description"},
+        "complete_route": {"type", "id", "title"},
     }
     STORY_ACTIONS = {
         "background", "clear_background", "music", "stop_music", "sound",
         "show_character", "animate_character", "hide_character", "clear_characters",
         "fade", "shake", "autosave", "input", *ASSIGNMENT_ACTIONS,
+        "unlock_cg", "unlock_music", "achievement", "complete_route",
     }
     CHARACTER_POSITIONS = {"far_left", "left", "center", "right", "far_right"}
 
     @classmethod
-    def validate(cls, story: dict, project_assets_dir=None, fallback_assets_dir=None) -> list[str]:
+    def validate(cls, story: dict, project_assets_dir=None, fallback_assets_dir=None, asset_manager=None) -> list[str]:
         errors = []
         project_assets_dir = project_assets_dir or PATHS.project_assets
         fallback_assets_dir = fallback_assets_dir or PATHS.engine_assets
@@ -53,7 +60,11 @@ class StoryValidator:
         unknown_root_keys = set(story) - cls.ROOT_KEYS
         if unknown_root_keys:
             errors.append(f"Unknown story field(s): {', '.join(sorted(map(str, unknown_root_keys)))}.")
-        character_assets = CharacterAssetCatalog(project_assets_dir, fallback_assets_dir)
+        character_assets = CharacterAssetCatalog(
+            project_assets_dir,
+            fallback_assets_dir,
+            asset_manager.mod_asset_names("characters") if asset_manager else None,
+        )
         character_defaults = story.get("character_defaults", {})
         if not isinstance(character_defaults, dict):
             errors.append("'character_defaults' must be a mapping of character IDs to defaults.")
@@ -74,6 +85,48 @@ class StoryValidator:
         dialogues = story.get("dialogues")
         if "title" in story and not isinstance(story["title"], str):
             errors.append("'title' must be a string.")
+        localization = story.get(
+            "localization",
+            {"default_locale": "en", "locales": {"en": "English"}},
+        )
+        if not isinstance(localization, dict):
+            errors.append("'localization' must be a mapping.")
+            localization = {}
+        unknown_localization_keys = set(localization) - {"default_locale", "locales"}
+        if unknown_localization_keys:
+            errors.append(
+                "'localization' has unknown field(s): "
+                + ", ".join(sorted(map(str, unknown_localization_keys))) + "."
+            )
+        locales = localization.get("locales", {})
+        if not isinstance(locales, dict) or not locales:
+            errors.append("'localization.locales' must map locale IDs to display names.")
+            locales = {}
+        else:
+            for locale_id, label in locales.items():
+                if not isinstance(locale_id, str) or not re.fullmatch(r"[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*", locale_id):
+                    errors.append(f"Invalid locale ID {locale_id!r}; use a BCP-47 style ID such as 'en' or 'pt-BR'.")
+                if not isinstance(label, str) or not label.strip():
+                    errors.append(f"Localization display name for {locale_id!r} must be a non-empty string.")
+        default_locale = localization.get("default_locale")
+        if not isinstance(default_locale, str) or default_locale not in locales:
+            errors.append("'localization.default_locale' must name one of localization.locales.")
+
+        def validate_localized_text(value, where, required=False):
+            if isinstance(value, str):
+                if required and not value:
+                    errors.append(f"{where} must be a non-empty string.")
+                return
+            if not isinstance(value, dict):
+                errors.append(f"{where} must be a string or locale-to-string mapping.")
+                return
+            if default_locale not in value:
+                errors.append(f"{where} must include the default locale {default_locale!r}.")
+            for locale_id, translated in value.items():
+                if locale_id not in locales:
+                    errors.append(f"{where} uses undeclared locale {locale_id!r}.")
+                if not isinstance(translated, str) or (required and not translated):
+                    errors.append(f"{where}.{locale_id} must be a non-empty string.")
         if not isinstance(dialogues, dict) or not dialogues:
             errors.append("'dialogues' must be a non-empty mapping.")
             return errors
@@ -95,11 +148,20 @@ class StoryValidator:
                 )
             if not isinstance(dialogue.get("speaker"), str):
                 errors.append(f"{where}.speaker must be a string.")
-            if not isinstance(dialogue.get("text"), str):
-                errors.append(f"{where}.text must be a string.")
-            else:
+            validate_localized_text(dialogue.get("text"), f"{where}.text", required=True)
+            if isinstance(dialogue.get("text"), str):
                 cls._validate_inline_assets(
-                    dialogue["text"], where, errors, project_assets_dir, fallback_assets_dir
+                    dialogue["text"], where, errors, project_assets_dir, fallback_assets_dir, asset_manager
+                )
+            elif isinstance(dialogue.get("text"), dict):
+                for translated_text in dialogue["text"].values():
+                    if isinstance(translated_text, str):
+                        cls._validate_inline_assets(
+                            translated_text, where, errors, project_assets_dir, fallback_assets_dir, asset_manager
+                        )
+            if "speaker_name" in dialogue:
+                validate_localized_text(
+                    dialogue.get("speaker_name"), f"{where}.speaker_name", required=True
                 )
             if "chapter" in dialogue and not isinstance(dialogue["chapter"], str):
                 errors.append(f"{where}.chapter must be a string.")
@@ -109,7 +171,7 @@ class StoryValidator:
                     errors.append(f"{where}.voice must be a non-empty sound asset path.")
                 else:
                     cls._validate_asset_name(
-                        "sound", voice, where, errors, project_assets_dir, fallback_assets_dir
+                        "sound", voice, where, errors, project_assets_dir, fallback_assets_dir, asset_manager
                     )
             if "active_character" in dialogue:
                 active_character = dialogue["active_character"]
@@ -125,6 +187,26 @@ class StoryValidator:
                 else:
                     targets.append((where, next_target))
 
+            call_target = dialogue.get("call")
+            if call_target is not None:
+                if not isinstance(call_target, str):
+                    errors.append(f"{where}.call must be a dialogue ID.")
+                else:
+                    targets.append((where, call_target))
+                if not isinstance(next_target, str):
+                    errors.append(f"{where}.call requires a 'next' dialogue as its return continuation.")
+                if "options" in dialogue:
+                    errors.append(f"{where}.call cannot be combined with 'options'.")
+
+            return_value = dialogue.get("return", False)
+            if not isinstance(return_value, bool):
+                errors.append(f"{where}.return must be true or false.")
+            elif return_value:
+                if call_target is not None:
+                    errors.append(f"{where} cannot both call and return.")
+                if next_target is not None or "options" in dialogue:
+                    errors.append(f"{where}.return cannot be combined with 'next' or 'options'.")
+
             options = dialogue.get("options", [])
             if not isinstance(options, list):
                 errors.append(f"{where}.options must be a list.")
@@ -136,8 +218,7 @@ class StoryValidator:
                 if not isinstance(option, dict):
                     errors.append(f"{option_where} must be a mapping.")
                     continue
-                if not isinstance(option.get("label"), str) or not option.get("label"):
-                    errors.append(f"{option_where}.label must be a non-empty string.")
+                validate_localized_text(option.get("label"), f"{option_where}.label", required=True)
                 target = option.get("target")
                 if not isinstance(target, str):
                     errors.append(f"{option_where}.target must be a dialogue ID.")
@@ -145,6 +226,27 @@ class StoryValidator:
                     targets.append((option_where, target))
                 if "condition" in option:
                     cls._validate_condition(option["condition"], variables, option_where, errors)
+
+            choice_timeout = dialogue.get("choice_timeout")
+            timeout_target = dialogue.get("choice_timeout_target")
+            if choice_timeout is not None:
+                try:
+                    timeout_value = float(choice_timeout)
+                except (TypeError, ValueError, OverflowError):
+                    timeout_value = math.nan
+                if not isinstance(choice_timeout, (int, float)) or isinstance(choice_timeout, bool) or not math.isfinite(timeout_value) or not 0.1 <= timeout_value <= 3600:
+                    errors.append(f"{where}.choice_timeout must be from 0.1 to 3600 seconds.")
+                if not options:
+                    errors.append(f"{where}.choice_timeout requires at least one choice option.")
+            if timeout_target is not None:
+                option_targets = {
+                    option.get("target") for option in options
+                    if isinstance(option, dict) and isinstance(option.get("target"), str)
+                }
+                if not isinstance(timeout_target, str) or timeout_target not in option_targets:
+                    errors.append(f"{where}.choice_timeout_target must match one of the dialogue's option targets.")
+                if choice_timeout is None:
+                    errors.append(f"{where}.choice_timeout_target requires choice_timeout.")
 
             actions = dialogue.get("actions", [])
             if not isinstance(actions, list):
@@ -171,6 +273,7 @@ class StoryValidator:
                     fallback_assets_dir,
                     character_assets,
                     character_defaults,
+                    asset_manager,
                 )
 
         for where, target in targets:
@@ -179,18 +282,18 @@ class StoryValidator:
         return errors
 
     @classmethod
-    def validate_or_raise(cls, story: dict, project_assets_dir=None, fallback_assets_dir=None):
-        errors = cls.validate(story, project_assets_dir, fallback_assets_dir)
+    def validate_or_raise(cls, story: dict, project_assets_dir=None, fallback_assets_dir=None, asset_manager=None):
+        errors = cls.validate(story, project_assets_dir, fallback_assets_dir, asset_manager)
         if errors:
             raise StoryValidationError(errors)
 
     @classmethod
-    def validate_file(cls, filename: str, data_dir=None, project_assets_dir=None) -> list[str]:
+    def validate_file(cls, filename: str, data_dir=None, project_assets_dir=None, fallback_assets_dir=None, asset_manager=None) -> list[str]:
         try:
             story = loader.load_project_yaml(filename, data_dir)
         except (OSError, ValueError) as error:
             return [f"Could not read story {filename!r}: {error}"]
-        return cls.validate(story, project_assets_dir)
+        return cls.validate(story, project_assets_dir, fallback_assets_dir, asset_manager)
 
     @classmethod
     def _validate_condition(cls, condition, variables, where, errors):
@@ -254,6 +357,7 @@ class StoryValidator:
         fallback_assets_dir,
         character_assets,
         character_defaults,
+        asset_manager=None,
     ):
         if not isinstance(action, dict):
             errors.append(f"{where} must be a mapping.")
@@ -265,6 +369,26 @@ class StoryValidator:
         unknown_fields = set(action) - cls.ACTION_FIELDS[action_type]
         if unknown_fields:
             errors.append(f"{where} has unknown field(s): {', '.join(sorted(map(str, unknown_fields)))}.")
+
+        if action_type in {"show_character", "hide_character"}:
+            transition = action.get("transition", "none")
+            if not isinstance(transition, str) or transition not in {"none", "fade", "slide"}:
+                errors.append(f"{where}.transition must be 'none', 'fade', or 'slide'.")
+            duration = action.get("duration", 0.35)
+            try:
+                duration_value = float(duration)
+            except (TypeError, ValueError, OverflowError):
+                duration_value = math.nan
+            if (
+                not isinstance(duration, (int, float))
+                or isinstance(duration, bool)
+                or not math.isfinite(duration_value)
+                or not 0 < duration_value <= 30
+            ):
+                errors.append(f"{where}.duration must be greater than 0 and at most 30 seconds.")
+            easing = action.get("easing", "ease_out")
+            if not isinstance(easing, str) or easing not in {"linear", "ease_in", "ease_out", "ease_in_out"}:
+                errors.append(f"{where}.easing must be 'linear', 'ease_in', 'ease_out', or 'ease_in_out'.")
 
         if action_type in cls.ASSIGNMENT_ACTIONS:
             name = action.get("var")
@@ -279,6 +403,27 @@ class StoryValidator:
                     errors.append(f"{where} uses {action_type!r} on a non-numeric variable.")
                 if not isinstance(value, (int, float)) or isinstance(value, bool):
                     errors.append(f"{where}.value must be numeric for {action_type!r}.")
+        elif action_type in {"unlock_cg", "unlock_music", "achievement", "complete_route"}:
+            identifier = action.get("id")
+            if not isinstance(identifier, str) or not identifier.strip():
+                errors.append(f"{where}.id must be a non-empty stable ID.")
+            title_field = "label" if action_type in {"unlock_cg", "unlock_music"} else "title"
+            if title_field in action and (not isinstance(action[title_field], str) or not action[title_field].strip()):
+                errors.append(f"{where}.{title_field} must be a non-empty string when provided.")
+            if action_type == "unlock_cg":
+                image = action.get("image")
+                if not isinstance(image, str) or not image.strip():
+                    errors.append(f"{where}.image must be a non-empty image asset path.")
+                else:
+                    cls._validate_asset_name("image", image, where, errors, project_assets_dir, fallback_assets_dir, asset_manager)
+            elif action_type == "unlock_music":
+                track = action.get("track")
+                if not isinstance(track, str) or not track.strip():
+                    errors.append(f"{where}.track must be a non-empty music asset path.")
+                elif not (asset_manager.asset_exists("music", track) if asset_manager else AssetManager.find_asset_path("music", track, project_assets_dir, fallback_assets_dir)):
+                    errors.append(f"{where}.track points to missing music file {track!r}.")
+            if "description" in action and (not isinstance(action["description"], str) or not action["description"].strip()):
+                errors.append(f"{where}.description must be a non-empty string when provided.")
         elif action_type == "input":
             name = action.get("var")
             if not isinstance(name, str) or name not in variables:
@@ -303,15 +448,15 @@ class StoryValidator:
                 errors.append(f"{where}.{field} must be a non-empty string.")
             elif action_type == "background":
                 cls._validate_asset_name(
-                    "image", action[field], where, errors, project_assets_dir, fallback_assets_dir
+                    "image", action[field], where, errors, project_assets_dir, fallback_assets_dir, asset_manager
                 )
             elif action_type == "sound":
                 cls._validate_asset_name(
-                    "sound", action[field], where, errors, project_assets_dir, fallback_assets_dir
+                    "sound", action[field], where, errors, project_assets_dir, fallback_assets_dir, asset_manager
                 )
-            elif not AssetManager.find_asset_path(
+            elif not (asset_manager.asset_exists("music", action[field]) if asset_manager else AssetManager.find_asset_path(
                 "music", action[field], project_assets_dir, fallback_assets_dir
-            ):
+            )):
                 errors.append(f"{where}.track points to missing music file {action[field]!r}.")
         elif action_type in {"show_character", "hide_character"}:
             name = action.get("name")
@@ -441,20 +586,21 @@ class StoryValidator:
         )
 
     @classmethod
-    def _validate_inline_assets(cls, text, where, errors, project_assets_dir, fallback_assets_dir):
+    def _validate_inline_assets(cls, text, where, errors, project_assets_dir, fallback_assets_dir, asset_manager=None):
         for image_name in re.findall(r"%([^%]+)%", text):
             cls._validate_asset_name(
-                "image", image_name, where, errors, project_assets_dir, fallback_assets_dir
+                "image", image_name, where, errors, project_assets_dir, fallback_assets_dir, asset_manager
             )
         section = "\u00a7"
         for sound_name in re.findall(f"{section}([^{section}]+){section}", text):
             cls._validate_asset_name(
-                "sound", sound_name, where, errors, project_assets_dir, fallback_assets_dir
+                "sound", sound_name, where, errors, project_assets_dir, fallback_assets_dir, asset_manager
             )
 
     @staticmethod
-    def _validate_asset_name(kind, name, where, errors, project_assets_dir, fallback_assets_dir):
-        if not AssetManager.find_asset_path(kind, name, project_assets_dir, fallback_assets_dir):
+    def _validate_asset_name(kind, name, where, errors, project_assets_dir, fallback_assets_dir, asset_manager=None):
+        exists = asset_manager.asset_exists(kind, name) if asset_manager else AssetManager.find_asset_path(kind, name, project_assets_dir, fallback_assets_dir)
+        if not exists:
             errors.append(f"{where} references missing {kind} asset {name!r}.")
 
     @staticmethod

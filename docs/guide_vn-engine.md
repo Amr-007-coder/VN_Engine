@@ -48,7 +48,7 @@ Set the project title, window size, menus, credits, intro message, and visual th
 
 ## 3. Validate and test the project
 
-The editor opens `data/project.json`, the selected story, and every YAML file listed by `includes`. Its live diagnostics check YAML syntax, story structure, supported keys and actions, project values, and asset references while you edit. Press `Ctrl+Space` for context-aware YAML keys, action names, character looks, expressions, asset paths, or JSON values. Use `Ctrl+F` to search the active tab; press `Enter` for the next match and `Shift+Enter` for the previous match. The expandable **Asset hierarchy** panel on the left shows project images, sounds, music, fonts, and character/look/expression folders; double-click a file to insert its reference at the cursor. The Markdown guide tabs are read-only.
+The editor opens `data/project.json`, the selected story, and every YAML file listed by `includes`. Its live diagnostics check YAML syntax, story structure, supported keys and actions, project values, and asset references while you edit. Press `Ctrl+Space` for context-aware YAML keys, action names, character looks, expressions, asset paths, or JSON values. Use `Ctrl+F` to search the active tab; press `Enter` for the next match and `Shift+Enter` for the previous match. **Replace...** previews and replaces across open story and include tabs while leaving project settings out of scope. The **Edit** menu and `Ctrl+Z`/`Ctrl+Y` provide Undo and Redo. The expandable **Asset hierarchy** panel on the left shows project images, sounds, music, fonts, and character/look/expression folders; double-click a file to insert its reference at the cursor. The Markdown guide tabs are read-only.
 
 `Ctrl+S` saves the active file; `Ctrl+Shift+S` saves the project configuration and all open story files. Included YAML files open in their own tabs after they are listed in `includes` and saved.
 
@@ -56,7 +56,11 @@ Press `F5` to save the open files and run the engine validator. The editor uses 
 
 Click **Test Play** to save and check the project, prepare a temporary game using the current platform template, and launch it. The project’s `assets/` and `data/` are embedded in the temporary game executable. Test Play uses a temporary `user_data/` folder. When the game closes, the editor removes the temporary build and its temporary saves. Closing the editor also stops an active test game and removes its temporary folder.
 
+Use **Test from Dialogue...** to start at any dialogue ID and optionally change the starting story variables for that run. In a test game, press `F3` to inspect live variable values. Move with `Up`/`Down`, press `Enter` to edit, use `+`/`-` for numbers, or `Space` to toggle booleans. Changes apply only to the current test run. When Test Play closes, its coverage report lists visited and unreachable dialogues, terminal endings or return points, and selected or unselected branches. Open **Story Graph** (or press `Ctrl+G`) to view branches, endings, and unreachable dialogues; double-click a node to open its YAML definition.
+
 The editor command pane starts in the project folder. It uses PowerShell on Windows and the available bash, zsh, or sh shell on Linux/macOS. Commands can change the working folder; use **Restart** to start a fresh shell in the project root.
+
+The **Add** menu above the Asset hierarchy inserts a dialogue block, dialogue text, a choice option, a story variable, or an input action. Place the cursor in the target dialogue before adding text, a choice, or an input action. **Input Action (with variable)** also declares a new null-valued story variable, so its generated action passes story validation.
 
 ## 4. Play controls
 
@@ -68,7 +72,14 @@ The editor command pane starts in the project folder. It uses PowerShell on Wind
 | Pause | `Esc` or the on-screen pause button in the upper-left corner |
 | Open/close dialogue history | `H` |
 | Scroll dialogue history | `Up`/`Down`, `Page Up`/`Page Down`, or mouse wheel |
+| Auto advance | `A`, the controller Auto binding, or the **Auto** button below the textbox |
+| Mute all audio | `M`, the controller Mute binding, or the **Mute** button below the textbox |
+| Skip read text | `Tab` |
+| Skip all text | `Shift+Tab` |
+| Roll back | `Backspace` or right-click |
 | Replay the current voice line | `V` |
+| Move through choices | `Up`/`Down` or controller D-pad |
+| Select a choice | `Enter`, controller advance button, or click |
 | Move through a menu | `Up`/`Down` or `W`/`S`; you can also move the mouse |
 | Activate a menu item | `Enter` or click |
 | Go back from a submenu | `Esc` or `Backspace` |
@@ -77,7 +88,9 @@ The editor command pane starts in the project folder. It uses PowerShell on Wind
 | Delete the selected save | `Delete` or the Delete button |
 | Scroll the credits list | Mouse wheel or `Page Up`/`Page Down` |
 
-The settings menu provides type speed, music volume, sound-effects volume, UI size, and windowed/fullscreen display mode. UI size defaults to 120% and can be changed from 80% to 160%. Settings are remembered between launches. Choices are selected with the mouse or touch. On Android, the game requests that the display stay awake while the app is active. The main menu provides Load; the pause menu provides Save and Load. Continue loads whichever is newer: the story autosave or the most recent populated numbered save slot.
+Menus, settings, choices, and the live Test Play variable inspector support controller D-pad and left-stick navigation. Use the configured advance button to select and the back/pause button to return. The Test Play variable panel opens with `F3`; its on-screen hint appears only in editor test runs.
+
+The Settings menu uses a scrollable panel; use the mouse wheel, `Page Up`/`Page Down`, or controller navigation to reach every item. It provides type speed and auto wait, separate dialogue and speaker sizing, high contrast, reduced motion, voice and subtitle playback, animated text, audio volume, touch advance area, UI size, and windowed/fullscreen display mode. Auto Advance and Mute are buttons in the small strip below the textbox. Settings are remembered between launches. Keyboard bindings and controller button numbers can be changed in the player's `settings.json`. On Android, the game requests that the display stay awake while the app is active. The main menu provides Load; the pause menu provides Save and Load. Continue loads whichever is newer: the latest rotating autosave or the most recent populated numbered save slot.
 
 ## 5. Assets and built-in art
 
@@ -92,6 +105,16 @@ Use these folders for project assets:
 | Character portraits | `assets/characters/` | `characters/Aiko/Summer/Uniform/Smile.png` |
 
 For images and sound effects, a filename without its extension is convenient: `station` finds `station.png`, and `door` finds `door.wav`, if the name is unique in that category. You can also use a relative path such as `images/station.png`. For music, use the filename with its extension, such as `station-theme.ogg`.
+
+#### Package and install asset add-ons
+
+An asset add-on is a data-only `.vnmod` ZIP containing a `manifest.json` and files under `assets/images/`, `assets/sounds/`, `assets/music/`, `assets/fonts/`, or `assets/characters/`. In the editor, choose **Project > Package Asset Add-on...**, select the folder containing those asset folders, then save the package into `assets/mods/`. A source-checkout command is also available:
+
+```powershell
+python -m engine.mods assets -o MyContent.vnmod --id my-content --name "My Content" --version 1.0.0
+```
+
+Put the resulting archive in the project's `assets/mods/` folder to share or export it with the project. To install an add-on for one player's copy only, put it in `<user_data>/mods/`; the game scans both locations at startup. Project files keep priority over add-on files, which keep priority over built-in assets. Packages can add or replace art, music, sounds, and fonts without running package code.
 
 The runtime includes these assets, and the engine searches them after the project’s own `assets/` folder:
 
@@ -122,6 +145,8 @@ The first launch screen uses the engine logo, followed by a creator credit and a
 The dialogue textbox can use a color, an image, or both. Set `theme.textbox.color` and `theme.textbox.background` in `data/project.json`; the image is scaled to the panel and transparent parts show the configured color. See [the textbox theme reference](./project-config.md#dialogue-textbox-image-and-color).
 
 The credits menu lists the project’s configured `credits` and also includes the engine creator’s credit. A credit may be plain text or an object with a label and an optional `http://` or `https://` URL.
+
+The main and pause menus include **Extras**. It opens the CG Gallery, Music Room, Achievements, and Routes. Story actions unlock entries as the player reaches them; unlocks persist in `user_data/progress.json` separately from saves. See [optional extras](./story-format.md#unlock-optional-extras) for the YAML action format.
 
 ## 7. Share the editable project
 
@@ -167,11 +192,27 @@ The optional `icon` field in `data/project.json` sets the exported game's window
 
 The starter project's `assets/` and `data/` live separately from the editor package under `Documents/VN Engine Projects/My Visual Novel`. The editor creates the project locally from its bundled defaults; no starter-project release asset is required. Only exported game archives embed the project files in the game executable.
 
-Linux and macOS archives preserve executable permissions for the main program and shared libraries. The macOS exporter removes the template bundle signature because it changes the app bundle; exported macOS apps are not signed or notarized. Players need the matching OS to run a desktop export.
+Linux and macOS archives preserve executable permissions for the main program and shared libraries. Unsigned exports run without signing credentials, but public macOS distribution should use a Developer ID signature and notarization. Players need the matching OS to run a desktop export.
 
 A Web export uses `template-web.zip` from a selected local templates folder or downloads it from GitHub Releases. It creates a static website ZIP containing `index.html`, the packaged game data, and the Pygbag runtime files. Upload the ZIP contents to a static web host, or start an HTTP server in the extracted folder to preview it; opening `index.html` directly as a `file://` URL is not supported. The exported files include the game's runtime; project sound and music files must be OGG (`.ogg`). Convert WAV, MP3, and AIFF files before exporting.
 
-An Android export lets you choose a published runtime release and recommends the release matching the editor's version. It downloads that release's Web template and temporarily fetches its matching engine source from GitHub, then creates a new project-specific Web archive and packages it as a Capacitor debug APK. It does not reuse a previously exported `web.zip` or require Python/Pygbag. Install Node.js/npm, a Java JDK, and the Android SDK (for example, through Android Studio) on the export computer. The build downloads Capacitor and Android build dependencies, so it needs an internet connection. The APK uses `android.app_name`, `android.app_id`, and `android.orientation` from `data/project.json`; `icon` sets its launcher icon. The orientation defaults to landscape. Debug APKs are for testing and sideloading; Play Store distribution requires a signed release build.
+An Android export uses a local Web template and matching source when available; otherwise it downloads a published runtime release and its source. The exporter checks the runtime's declared WebView hook version before packaging it, then creates a new project-specific Web archive and builds a Capacitor APK. It does not reuse a previously exported `web.zip` or require Python/Pygbag. Install Node.js/npm, a Java JDK, and the Android SDK (for example, through Android Studio) on the export computer. The build downloads Capacitor and Android build dependencies, so it needs an internet connection. The APK uses `android.app_name`, `android.app_id`, and `android.orientation` from `data/project.json`; `icon` sets its launcher icon. The orientation defaults to landscape. Exports are debug APKs unless you pass `--sign-release`; Play Store distribution needs a signed release APK.
+
+### Signing release exports
+
+Signing is opt-in and reads credentials from environment variables so secrets do not enter project files. Add `--sign-release` to a Windows, macOS, or Android export command:
+
+```powershell
+engine.exe --build-game --platform android --sign-release
+engine.exe --build-game --platform windows --sign-release
+engine.exe --build-game --platform macos --sign-release
+```
+
+For Android, set `VN_ANDROID_KEYSTORE`, `VN_ANDROID_KEY_ALIAS`, and `VN_ANDROID_STORE_PASSWORD`; optionally set `VN_ANDROID_KEY_PASSWORD` (it defaults to the store password). The exporter creates a signed release APK. For Windows, set `VN_WINDOWS_SIGN_CERT` to a PFX file and optionally `VN_WINDOWS_SIGN_PASSWORD`; `signtool.exe` must be on `PATH` or selected with `VN_WINDOWS_SIGNTOOL`. `VN_WINDOWS_TIMESTAMP_URL` can override the default timestamp service.
+
+For macOS, set `VN_MACOS_SIGN_IDENTITY` to a Developer ID Application identity. If you also set `VN_MACOS_NOTARY_APPLE_ID`, `VN_MACOS_NOTARY_TEAM_ID`, and `VN_MACOS_NOTARY_PASSWORD`, the exporter submits the app for notarization and staples the ticket before rebuilding the ZIP. Xcode Command Line Tools provide `codesign`, `xcrun`, and `ditto`. Keep signing credentials in your OS secret store or CI secrets. Linux and Web exports do not use `--sign-release`.
+
+Windowed desktop games fit the configured design resolution inside the primary monitor and open centered. If a window is moved off-screen, press **Ctrl+Shift+Home** to resize and recenter it. Windows builds request per-monitor DPI awareness before opening the display.
 
 ### Command-line export
 
@@ -185,7 +226,9 @@ The editor ZIP is a graphical application and does not include the command-line 
 .\VN_Engine\engine.exe --build-game --platform android --templates-dir "D:\vn-templates" --output-dir output
 ```
 
-The source engine checks `engine/templates/` and the project folder for local templates before downloading a missing desktop or Web template from the latest GitHub release. Pass `--templates-dir` to select another folder. Android uses the latest published Web template and matching source from GitHub. For example, the Linux command creates `output/<Game Name>-linux.zip`. Editor exports do not require Python or Pygbag; Android still requires Node.js/npm, a Java JDK, the Android SDK, and internet access.
+The source engine checks `engine/templates/` and the project folder for local templates before downloading a missing desktop or Web template from the latest GitHub release. Pass `--templates-dir` to select another folder. Android uses a local template/source pair when present, or a matching published pair otherwise. For example, the Linux command creates `output/<Game Name>-linux.zip`. Editor exports do not require Python or Pygbag; Android still requires Node.js/npm, a Java JDK, the Android SDK, and internet access.
+
+The GitHub Actions CI workflow runs the unit suite, builds and launches desktop exports on their matching operating systems, and validates a Web export's nested project bundle. Its optional manual Android emulator job builds, installs, and launches the APK.
 
 ## 9. User data and common fixes
 
@@ -197,6 +240,39 @@ Settings and save slots are kept outside the editable project so an engine updat
 
 The project name is converted to a folder-safe name. Windows uses `%LOCALAPPDATA%\Visual Novel Engine\<project name>\user_data\`; macOS uses `~/Library/Application Support/Visual Novel Engine/<project name>/user_data/`; Linux uses `$XDG_DATA_HOME/visual-novel-engine/<project name>/user_data/` or `~/.local/share/visual-novel-engine/<project name>/user_data/`. `paths.user_data` in `data/project.json` can select a different location; see [user data, settings, and saves](./project-config.md#user-data-settings-and-saves).
 
+Numbered slots can be exported to and imported from `.vnsave.json` files on desktop. Import checks the story identity and confirms before replacing a slot, so saves can move by USB, local file sharing, or backups without a cloud service. Achievements, gallery unlocks, and route records are kept in `progress.json` next to settings and saves.
+
 If a story does not start, press `F5` to run the engine validator or use **Test Play** to launch the current platform build. If a portrait reference is unclear, use the editor asset hierarchy or character inventory command from a separate engine distribution. If files appear missing, confirm the project root contains the configured `assets/` and `data/` folders.
 
 For YAML field syntax, start with the [story format](./story-format.md). For menu, path, and theme options, use [project configuration](./project-config.md).
+
+## 10. Mod, translation, and playthrough tools
+
+Open **Extras → Mods** in the game to install `.vnmod` files, inspect their manifest and load issues, enable or disable them, and remove packages installed in the user's mods folder. Packages already inside the project can be disabled there and removed from the editor's project assets. Conflicting asset names show which package wins; direct project assets have priority. Changes take effect after the next launch.
+
+The editor's **Project** menu includes **Asset Diagnostics**, which lists likely unused files, duplicate asset names, images over 10 MB or 4096 pixels in either dimension, invalid packages, and asset conflicts. The unused check reads story actions, inline asset markers, character IDs, and project theme references. Dynamically constructed asset names may need manual review.
+
+Use **Export Translation Template**, **Import Translation Catalog**, and **Translation Preview and Missing Strings** in the editor's **Project** menu to work with JSON catalogs under `data/locales/`. Declared locale catalogs can translate dialogue, choices, story action labels/prompts, and engine UI text. The preview includes string-length expansion and right-aligned RTL samples.
+
+Repeatable playthrough suites are JSON files with ordered choice steps and assertions. A step can select a choice by label, target dialogue ID, or index:
+
+```json
+{
+  "scenarios": [
+    {
+      "name": "Take the station route",
+      "choices": [{"dialogue": "opening", "target": "station_route"}],
+      "expect": {
+        "ending": "station_ending",
+        "finished": true,
+        "variables": {"trust": 1},
+        "unlocks": {"routes": ["station"], "achievements": ["first_route"]}
+      }
+    }
+  ]
+}
+```
+
+Run one from the project root with `python -m engine.playthrough path/to/suite.vnplay.json`, or choose it in **Project → Run Playthrough Suite**. The runner advances non-choice dialogue automatically, supplies `input` action values from an optional scenario `inputs` object, and checks final dialogue, completion state, selected variable values, and reached unlocks.
+
+Speech announcements are optional under **Settings → Speech Announcements**. They announce dialogue, presented choices, and menu focus for players who use audio output. Install `pyttsx3` or enable an operating-system speech service if the machine does not provide one.

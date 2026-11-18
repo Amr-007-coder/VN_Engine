@@ -4,6 +4,22 @@ from engine.theme import DEFAULT_THEME, validate_menu_grid
 from engine.ui_scale import ui_size
 
 
+def _draw_menu_panel(screen, menu):
+    rect = getattr(menu, "panel_rect", None)
+    if not isinstance(rect, pygame.Rect):
+        return
+    panel = pygame.Surface(rect.size, pygame.SRCALPHA)
+    panel.fill((8, 8, 16, 210))
+    screen.blit(panel, rect)
+    pygame.draw.rect(
+        screen,
+        (95, 84, 112),
+        rect,
+        width=max(1, ui_size(1)),
+        border_radius=ui_size(10),
+    )
+
+
 class MenuRenderer:
     """Renderer interface. Implement render(screen, menu) for a custom layout."""
 
@@ -35,6 +51,7 @@ class FallbackMenuRenderer(MenuRenderer):
 
     def render(self, screen, menu):
         width, height = screen.get_size()
+        _draw_menu_panel(screen, menu)
         title = self.title_font.render(menu.title, True, (238, 238, 242))
         row_gap = ui_size(9)
         available_top = ui_size(78)
@@ -59,7 +76,30 @@ class FallbackMenuRenderer(MenuRenderer):
             fill = self.theme.get("colors", {}).get("selected", (45, 92, 78)) if persistent and not selected else (73, 50, 65) if selected else (18, 18, 29)
             pygame.draw.rect(screen, fill, rect, border_radius=ui_size(8))
             pygame.draw.rect(screen, (112, 86, 101), rect, width=ui_size(1), border_radius=ui_size(8))
-            self._draw_item_text(screen, rect, item, selected, self.item_font, self.detail_font)
+            self._draw_menu_item(screen, rect, item, selected, self.item_font, self.detail_font)
+
+    @classmethod
+    def _draw_menu_item(cls, screen, rect, item, selected, item_font, detail_font):
+        text_rect = rect
+        preview = item.get("preview_surface")
+        if isinstance(preview, pygame.Surface):
+            height = max(1, min(rect.height - ui_size(8), ui_size(48)))
+            width = max(1, round(height * preview.get_width() / max(1, preview.get_height())))
+            thumb = pygame.transform.smoothscale(preview, (width, height))
+            thumb_rect = thumb.get_rect(midleft=(rect.left + ui_size(8), rect.centery))
+            screen.blit(thumb, thumb_rect)
+            pygame.draw.rect(screen, (210, 210, 220), thumb_rect, width=max(1, ui_size(1)))
+            text_rect = rect.copy()
+            text_rect.left += width + ui_size(20)
+        cls._draw_item_text(
+            screen,
+            text_rect,
+            item,
+            selected,
+            item_font,
+            detail_font,
+            left_offset=ui_size(8),
+        )
 
     @staticmethod
     def _draw_item_text(screen, rect, item, selected, item_font, detail_font, left_offset=None):
@@ -134,6 +174,7 @@ class DeclarativeMenuRenderer(MenuRenderer):
         self._draw_background(screen, screen_theme)
         width, height = screen.get_size()
         colors = self.theme.get("colors", DEFAULT_THEME["colors"])
+        _draw_menu_panel(screen, menu)
         title = self.title_font.render(menu.title, True, self._color(colors, "text"))
         title_y = ui_size(menu_theme.get("title_y", 112))
         grid = screen_theme.get("grid")
@@ -174,7 +215,7 @@ class DeclarativeMenuRenderer(MenuRenderer):
                     width=ui_size(1),
                     border_radius=radius,
                 )
-            FallbackMenuRenderer._draw_item_text(
+            FallbackMenuRenderer._draw_menu_item(
                 screen,
                 rect,
                 item,

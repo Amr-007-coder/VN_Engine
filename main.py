@@ -45,6 +45,11 @@ def main():
             "missing desktop/Web templates download from GitHub Releases"
         ),
     )
+    argument_parser.add_argument(
+        "--sign-release",
+        action="store_true",
+        help="Sign the selected Windows, macOS, or Android export using signing environment variables",
+    )
     argument_parser.add_argument("--story", help="Override the YAML story filename from data/project.json")
     argument_parser.add_argument("--validate", action="store_true", help="Validate the story and exit")
     argument_parser.add_argument(
@@ -62,6 +67,8 @@ def main():
     if args.build_game:
         if args.story is not None or args.validate or args.list_character_assets is not None or args.look is not None:
             argument_parser.error("--build-game cannot be combined with story validation or asset-listing options")
+        if args.sign_release and args.platform not in {"windows", "macos", "android"}:
+            argument_parser.error("--sign-release requires --platform windows, macos, or android")
         if args.platform is None:
             if args.templates_dir is not None:
                 argument_parser.error("--templates-dir requires --platform")
@@ -74,12 +81,14 @@ def main():
         from export_pipeline import export_project, safe_project_name
 
         project = ProjectConfig.load()
-        errors = StoryValidator.validate_file(project.story_file, project.data_dir, project.assets_dir)
+        assets = AssetManager(project.assets_dir, project.user_data_dir / "mods")
+        errors = StoryValidator.validate_file(
+            project.story_file, project.data_dir, project.assets_dir,
+            asset_manager=assets,
+        )
         textbox_theme = project.theme.get("textbox", {})
         textbox_image = textbox_theme.get("background") if isinstance(textbox_theme, dict) else None
-        if textbox_image and not AssetManager.find_asset_path(
-            "image", textbox_image, project.assets_dir, PATHS.engine_assets
-        ):
+        if textbox_image and not assets.asset_exists("image", textbox_image):
             errors.append(f"Project theme textbox.background references missing image asset {textbox_image!r}.")
         if errors:
             print("Story validation failed:", file=sys.stderr)
@@ -115,14 +124,15 @@ def main():
                 templates_dir,
                 args.platform,
                 output_file,
+                sign_release=args.sign_release,
             )
         except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
             print(f"Game export failed: {error}", file=sys.stderr)
             return 1
         print(f"Game export created: {output}")
         return 0
-    if args.platform is not None or args.templates_dir is not None:
-        argument_parser.error("--platform and --templates-dir can only be used with --build-game")
+    if args.platform is not None or args.templates_dir is not None or args.sign_release:
+        argument_parser.error("--platform, --templates-dir, and --sign-release can only be used with --build-game")
     if args.output_dir is not None:
         argument_parser.error("--output-dir can only be used with --build-game")
     if args.look is not None and args.list_character_assets is None:
@@ -131,7 +141,10 @@ def main():
 
     if args.list_character_assets is not None:
         character = None if args.list_character_assets == "*" else args.list_character_assets
-        catalog = CharacterAssetCatalog(project.assets_dir, PATHS.engine_assets)
+        mods = AssetManager(project.assets_dir, project.user_data_dir / "mods")
+        catalog = CharacterAssetCatalog(
+            project.assets_dir, PATHS.engine_assets, mods.mod_asset_names("characters")
+        )
         try:
             print(catalog.format_inventory(character, args.look))
         except CharacterAssetError as error:
@@ -142,12 +155,14 @@ def main():
     story_file = args.story or project.story_file
 
     if args.validate:
-        errors = StoryValidator.validate_file(story_file, project.data_dir, project.assets_dir)
+        assets = AssetManager(project.assets_dir, project.user_data_dir / "mods")
+        errors = StoryValidator.validate_file(
+            story_file, project.data_dir, project.assets_dir,
+            asset_manager=assets,
+        )
         textbox_theme = project.theme.get("textbox", {})
         textbox_image = textbox_theme.get("background") if isinstance(textbox_theme, dict) else None
-        if textbox_image and not AssetManager.find_asset_path(
-            "image", textbox_image, project.assets_dir, PATHS.engine_assets
-        ):
+        if textbox_image and not assets.asset_exists("image", textbox_image):
             errors.append(f"Project theme textbox.background references missing image asset {textbox_image!r}.")
         if errors:
             print("Story validation failed:")

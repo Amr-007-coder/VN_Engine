@@ -9,6 +9,7 @@ import tempfile
 from zipfile import ZIP_DEFLATED, ZipFile
 
 from engine.embedded import PROJECT_BUNDLE_COMMENT, project_bundle_present
+from engine.assets import AssetManager
 from engine.loader import PATHS
 from engine.project import ProjectConfig
 from engine.validator import StoryValidator
@@ -67,10 +68,12 @@ def _write_resource_bundle(bundle_path: Path, project: ProjectConfig) -> int:
         raise FileNotFoundError(f"Project assets folder was not found: {assets_root}")
 
     story_relative = _story_relative_path(project)
+    assets = AssetManager(assets_root, project.user_data_dir / "mods")
     errors = StoryValidator.validate_file(
         story_relative.as_posix(),
         data_root,
         assets_root,
+        asset_manager=assets,
     )
     if errors:
         raise ValueError("Story validation failed:\n" + "\n".join(f"- {error}" for error in errors))

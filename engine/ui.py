@@ -64,14 +64,21 @@ class Textbox(UIElement):
         panel_color: tuple[int, ...] | None = None,
         panel_image: pygame.Surface | None = None,
         panel_opacity: float = 0.95,
+        high_contrast: bool = False,
+        subtitles_enabled: bool = True,
     ):
         super().__init__(x, y, width, height)
+        self.high_contrast = high_contrast
+        self.subtitles_enabled = subtitles_enabled
         self.panel = Panel(0, 0, width, height)
-        self.panel.set_background(
-            panel_image if panel_image is not None else (panel_color or COLORS.panel),
-            opacity=panel_opacity,
-            base_color=panel_color or COLORS.panel,
-        )
+        if high_contrast:
+            self.panel.set_background((0, 0, 0, 255), opacity=1.0, base_color=(0, 0, 0, 255))
+        else:
+            self.panel.set_background(
+                panel_image if panel_image is not None else (panel_color or COLORS.panel),
+                opacity=panel_opacity,
+                base_color=panel_color or COLORS.panel,
+            )
         self.panel.fade_sides(steps=2, sides=0.15)
 
         # Each item is (character, color, bold, italic, strike).
@@ -81,6 +88,10 @@ class Textbox(UIElement):
         self.ms_per_char = 30
         self.last_update_time = 0
         self.text_bottom_padding = 0
+        font = FONTS.normal_text
+        get_point_size = getattr(font, "get_point_size", None)
+        self.base_font_size = get_point_size() if callable(get_point_size) else None
+        self.message_font_size = self.base_font_size
 
     @property
     def complete(self) -> bool:
@@ -104,11 +115,81 @@ class Textbox(UIElement):
                 continue
 
             color = COLORS.text_highlight if "highlight" in style else COLORS.text
+            if self.high_contrast:
+                color = (255, 230, 96) if "highlight" in style else (255, 255, 255)
             is_bold = "bold" in style
             is_italic = "italic" in style
             strike = "strike" in style
             for char in word:
                 self.full_parsed_text.append((char, color, is_bold, is_italic, strike))
+        self._fit_font_to_message()
+
+    def _fit_font_to_message(self):
+        font = FONTS.normal_text
+        if font is None or self.base_font_size is None:
+            return
+
+        base_size = max(1, int(self.base_font_size))
+        self.message_font_size = base_size
+        if self._message_fits_at_size(base_size):
+            return
+
+        minimum_size = 1
+        if not self._message_fits_at_size(minimum_size):
+            self.message_font_size = minimum_size
+            return
+
+        lower = minimum_size
+        upper = base_size - 1
+        while lower <= upper:
+            candidate = (lower + upper) // 2
+            if self._message_fits_at_size(candidate):
+                self.message_font_size = candidate
+                lower = candidate + 1
+            else:
+                upper = candidate - 1
+
+    def _message_fits_at_size(self, size: int) -> bool:
+        font = FONTS.normal_text
+        get_point_size = getattr(font, "get_point_size", None)
+        set_point_size = getattr(font, "set_point_size", None)
+        original_size = get_point_size() if callable(get_point_size) else None
+        old_bold = font.get_bold()
+        old_italic = font.get_italic()
+        try:
+            if callable(set_point_size):
+                set_point_size(size)
+            margin = ui_size(40)
+            right_edge = self.rect.width - margin
+            cursor_x = margin
+            cursor_y = ui_size(55)
+            line_height = font.get_linesize()
+            content_height = max(0, self.rect.height - self.text_bottom_padding)
+
+            for char, _, is_bold, is_italic, _ in self.full_parsed_text:
+                font.set_bold(is_bold)
+                font.set_italic(is_italic)
+                if char == "\n":
+                    cursor_x = margin
+                    cursor_y += line_height
+                    continue
+                if char == " ":
+                    cursor_x += font.size(" ")[0]
+                    continue
+
+                char_width = font.size(char)[0]
+                if cursor_x + char_width > right_edge:
+                    cursor_x = margin
+                    cursor_y += line_height
+                if cursor_y + line_height > content_height:
+                    return False
+                cursor_x += char_width
+            return True
+        finally:
+            font.set_bold(old_bold)
+            font.set_italic(old_italic)
+            if original_size is not None and callable(set_point_size):
+                set_point_size(original_size)
 
     def reveal_all(self):
         self.visible_chars = len(self.full_parsed_text)
@@ -130,13 +211,18 @@ class Textbox(UIElement):
 
         if self.current_speaker:
             name_surf = FONTS.char_name.render(
-                f" {self.current_speaker} ", True, COLORS.text_highlight
+                f" {self.current_speaker} ",
+                True,
+                (255, 230, 96) if self.high_contrast else COLORS.text_highlight,
             )
             self.surface.blit(name_surf, (ui_size(40), ui_size(15)))
 
         font = FONTS.normal_text
         cursor_x = ui_size(40)
         cursor_y = ui_size(55)
+        original_size = font.get_point_size() if hasattr(font, "get_point_size") else None
+        if self.message_font_size is not None and hasattr(font, "set_point_size"):
+            font.set_point_size(self.message_font_size)
         line_height = font.get_linesize()
         original_clip = self.surface.get_clip()
         content_height = max(0, self.rect.height - self.text_bottom_padding)
@@ -144,36 +230,42 @@ class Textbox(UIElement):
 
         old_bold = font.get_bold()
         old_italic = font.get_italic()
-        for char, color, is_bold, is_italic, strike in self.full_parsed_text[:self.visible_chars]:
-            font.set_bold(is_bold)
-            font.set_italic(is_italic)
+        try:
+            visible_text = self.full_parsed_text[:self.visible_chars] if self.subtitles_enabled else ()
+            for char, color, is_bold, is_italic, strike in visible_text:
+                if self.high_contrast:
+                    color = (255, 230, 96) if color == COLORS.text_highlight else (255, 255, 255)
+                font.set_bold(is_bold)
+                font.set_italic(is_italic)
 
-            if char == "\n":
-                cursor_x = ui_size(40)
-                cursor_y += line_height
-                continue
-            if char == " ":
-                cursor_x += font.size(" ")[0]
-                continue
+                if char == "\n":
+                    cursor_x = ui_size(40)
+                    cursor_y += line_height
+                    continue
+                if char == " ":
+                    cursor_x += font.size(" ")[0]
+                    continue
 
-            char_surf = font.render(char, True, color)
-            if cursor_x + char_surf.get_width() > self.rect.w - ui_size(40):
-                cursor_x = ui_size(40)
-                cursor_y += line_height
+                char_surf = font.render(char, True, color)
+                if cursor_x + char_surf.get_width() > self.rect.w - ui_size(40):
+                    cursor_x = ui_size(40)
+                    cursor_y += line_height
 
-            if strike:
-                pygame.draw.line(
-                    char_surf,
-                    COLORS.text_highlight,
-                    (0, char_surf.get_height() // 2),
-                    (char_surf.get_width(), char_surf.get_height() // 2),
-                )
-            self.surface.blit(char_surf, (cursor_x, cursor_y))
-            cursor_x += char_surf.get_width()
-
-        font.set_bold(old_bold)
-        font.set_italic(old_italic)
-        self.surface.set_clip(original_clip)
+                if strike:
+                    pygame.draw.line(
+                        char_surf,
+                        COLORS.text_highlight,
+                        (0, char_surf.get_height() // 2),
+                        (char_surf.get_width(), char_surf.get_height() // 2),
+                    )
+                self.surface.blit(char_surf, (cursor_x, cursor_y))
+                cursor_x += char_surf.get_width()
+        finally:
+            font.set_bold(old_bold)
+            font.set_italic(old_italic)
+            if original_size is not None and hasattr(font, "set_point_size"):
+                font.set_point_size(original_size)
+            self.surface.set_clip(original_clip)
 
 
 class Button(UIElement):

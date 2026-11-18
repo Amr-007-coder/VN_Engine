@@ -383,7 +383,12 @@ def export_web_project(
 
     from engine.validator import StoryValidator
 
-    errors = StoryValidator.validate_file(story_path.as_posix(), data_root, assets_root)
+    from engine.assets import AssetManager
+
+    assets = AssetManager(assets_root, assets_root / "mods")
+    errors = StoryValidator.validate_file(
+        story_path.as_posix(), data_root, assets_root, asset_manager=assets
+    )
     if errors:
         raise ValueError("Story validation failed:\n" + "\n".join(f"- {error}" for error in errors))
 
@@ -545,8 +550,14 @@ def _extract_web_site(archive_path: Path, destination: Path) -> None:
 
 def _adapt_android_runtime_archive(
     archive_contents: bytes,
-    android_sources: tuple[bytes, bytes] | None = None,
+    android_sources: tuple[bytes, bytes, bytes] | None = None,
 ) -> bytes:
+    """Install runtime sources that expose the supported WebView hook API.
+
+    Android sizing lives in Engine's platform hook. The exporter only swaps in
+    source files for the matching release and checks that their hook version is
+    supported; it does not rewrite Python statements in the template.
+    """
     source_buffer = BytesIO(archive_contents)
     output_buffer = BytesIO()
     try:
@@ -558,6 +569,10 @@ def _adapt_android_runtime_archive(
             engine_files = [
                 item for item in members if item.name == "assets/engine/engine.py" and item.isfile()
             ]
+            platform_runtime_files = [
+                item for item in members
+                if item.name == "assets/engine/platform_runtime.py" and item.isfile()
+            ]
             if len(engine_files) > 1 or (android_sources is None and len(engine_files) != 1):
                 raise ValueError("Pygbag runtime archive must contain exactly one assets/engine/engine.py entry.")
             main_file = source.extractfile(main_files[0])
@@ -567,107 +582,47 @@ def _adapt_android_runtime_archive(
             if android_sources is None:
                 if engine_file is None:
                     raise ValueError("Could not read assets/engine/engine.py from the Pygbag runtime archive.")
-                main_source = main_file.read().decode("utf-8")
-                engine_source = engine_file.read().decode("utf-8")
+                main_contents = main_file.read()
+                engine_contents = engine_file.read()
+                platform_runtime_contents = None
+                if len(platform_runtime_files) != 1:
+                    raise ValueError("Pygbag runtime archive must contain the WebView display hook module.")
             else:
-                main_source = android_sources[0].decode("utf-8")
-                engine_source = android_sources[1].decode("utf-8")
-            replacements = (
-                (
-                    "import pygame.surface\n",
-                    "import pygame.surface\nimport platform\n",
-                    "Pygbag runtime platform imports",
-                ),
-                (
-                    "engine = Engine(project_config=project)\n",
-                    "# Convert the WebView's CSS-sized game canvas to device pixels at runtime.\n"
-                    "device_pixel_ratio = max(1.0, float(getattr(platform.window, 'devicePixelRatio', 1.0) or 1.0))\n"
-                    "viewport_width = max(1, round(float(platform.window.canvas.clientWidth) * device_pixel_ratio))\n"
-                    "viewport_height = max(1, round(float(platform.window.canvas.clientHeight) * device_pixel_ratio))\n"
-                    "viewport_size = (viewport_width, viewport_height)\n"
-                    "platform.window.canvas.width = viewport_width\n"
-                    "platform.window.canvas.height = viewport_height\n"
-                    "platform.window.config.gui_divider = 1\n"
-                    "platform.window.config.gui_debug = 1\n"
-                    "platform.window.config.fb_ar = viewport_width / viewport_height\n"
-                    "platform.window.config.fb_width = viewport_width\n"
-                    "platform.window.config.fb_height = viewport_height\n"
-                    "project.values['window']['width'] = viewport_width\n"
-                    "project.values['window']['height'] = viewport_height\n"
-                    "menu_theme = project.values.setdefault('theme', {}).get('menu')\n"
-                    "if not isinstance(menu_theme, dict):\n"
-                    "    menu_theme = {}\n"
-                    "    project.values['theme']['menu'] = menu_theme\n"
-                    "row_height_value = menu_theme.get('row_height', 56)\n"
-                    "row_gap_value = menu_theme.get('row_gap', 9)\n"
-                    "menu_top_value = menu_theme.get('top', 190)\n"
-                    "menu_title_value = menu_theme.get('title_y', 112)\n"
-                    "row_height_value = 56 if row_height_value is None else row_height_value\n"
-                    "row_gap_value = 9 if row_gap_value is None else row_gap_value\n"
-                    "menu_top_value = 190 if menu_top_value is None else menu_top_value\n"
-                    "menu_title_value = 112 if menu_title_value is None else menu_title_value\n"
-                    "menu_items = project.menus['main']['items']\n"
-                    "row_height = max(1, int(row_height_value))\n"
-                    "row_gap = max(0, int(row_gap_value))\n"
-                    "menu_height = len(menu_items) * row_height + max(0, len(menu_items) - 1) * row_gap\n"
-                    "centered_top = max(0, (viewport_height - menu_height) // 2)\n"
-                    "menu_theme['top'] = min(int(menu_top_value), centered_top)\n"
-                    "menu_theme['title_y'] = min(int(menu_title_value), max(30, centered_top // 2))\n"
-                    "project.menus['settings']['items'] = [\n"
-                    "    item for item in project.menus['settings']['items']\n"
-                    "    if not isinstance(item, dict) or item.get('setting') != 'fullscreen'\n"
-                    "]\n"
-                    "engine = Engine(project_config=project, window_size=viewport_size)\n",
-                    "Pygbag viewport-sized Android display",
-                ),
-                (
-                    "engine.initialize()\n",
-                    "engine.initialize()\n"
-                    "actual_width, actual_height = engine.screen.get_size()\n"
-                    "engine.windowed_size = (actual_width, actual_height)\n"
-                    "platform.window.canvas.width = actual_width\n"
-                    "platform.window.canvas.height = actual_height\n"
-                    "platform.window.config.fb_ar = actual_width / actual_height\n"
-                    "platform.window.config.fb_width = actual_width\n"
-                    "platform.window.config.fb_height = actual_height\n"
-                    "centered_top = max(0, (actual_height - menu_height) // 2)\n"
-                    "engine.theme['menu']['top'] = min(int(engine.theme['menu'].get('top', 190)), centered_top)\n"
-                    "engine.theme['menu']['title_y'] = min(int(engine.theme['menu'].get('title_y', 112)), max(30, centered_top // 2))\n"
-                    "platform.window.console.info(\n"
-                    "    f'VN Android canvas: {viewport_width}x{viewport_height} device px; '\n"
-                    "    f'Pygame: {actual_width}x{actual_height}; DPR: {device_pixel_ratio}'\n"
-                    ")\n"
-                    "platform.window.window_resize()\n",
-                    "Pygbag Android canvas layout",
-                ),
-            )
-            for old, new, description in replacements:
-                if main_source.count(old) != 1:
-                    raise ValueError(
-                        f"Could not adapt Android export: expected one {description} in assets/main.py."
-                    )
-                main_source = main_source.replace(old, new, 1)
-            main_contents = main_source.encode("utf-8")
+                if len(android_sources) != 3:
+                    raise ValueError("Android runtime source bundle must include entrypoint, engine, and display hook files.")
+                main_contents, engine_contents, platform_runtime_contents = android_sources
 
-            display_flags = re.compile(
-                r'(?m)^([ \t]*)flags = pygame\.FULLSCREEN if '
-                r'(?:self\.allow_fullscreen and )?self\.settings\.values\["fullscreen"\] else 0[ \t]*$'
+            try:
+                engine_source = engine_contents.decode("utf-8")
+            except UnicodeDecodeError as error:
+                raise ValueError("Android runtime engine source must be UTF-8 text.") from error
+            hook_version = re.search(
+                r"(?m)^ANDROID_WEBVIEW_HOOK_VERSION\s*=\s*(\d+)\s*$",
+                engine_source,
             )
-            engine_source, display_flag_count = display_flags.subn(r"\1flags = 0", engine_source)
-            if display_flag_count != 2:
+            if hook_version is None:
                 raise ValueError(
-                    "Could not adapt Android export: expected both display mode flag assignments "
-                    "in assets/engine/engine.py."
+                    "Android runtime source does not declare ANDROID_WEBVIEW_HOOK_VERSION. "
+                    "Choose an engine release with the WebView display hook."
                 )
-            engine_contents = engine_source.encode("utf-8")
+            if int(hook_version.group(1)) != 1:
+                raise ValueError(
+                    f"Unsupported Android WebView hook version {hook_version.group(1)}; "
+                    "this exporter supports version 1."
+                )
 
             with tarfile.open(fileobj=output_buffer, mode="w") as destination:
                 engine_written = False
+                platform_runtime_written = False
                 for item in members:
-                    if android_sources is not None and item.name in {
-                        "assets/engine/_web_main.pyc",
-                        "assets/engine/engine.pyc",
-                    }:
+                    bytecode_name = PurePosixPath(item.name).name
+                    bytecode_stem = bytecode_name.split(".", 1)[0]
+                    if (
+                        android_sources is not None
+                        and item.name.startswith("assets/")
+                        and item.name.casefold().endswith(".pyc")
+                        and bytecode_stem in {"_web_main", "web_main", "engine", "platform_runtime"}
+                    ):
                         continue
                     member = copy(item)
                     if item.name == "assets/main.py":
@@ -677,6 +632,10 @@ def _adapt_android_runtime_archive(
                         member.size = len(engine_contents)
                         destination.addfile(member, BytesIO(engine_contents))
                         engine_written = True
+                    elif item.name == "assets/engine/platform_runtime.py" and platform_runtime_contents is not None:
+                        member.size = len(platform_runtime_contents)
+                        destination.addfile(member, BytesIO(platform_runtime_contents))
+                        platform_runtime_written = True
                     elif item.isfile():
                         contents = source.extractfile(item)
                         if contents is None:
@@ -689,6 +648,11 @@ def _adapt_android_runtime_archive(
                     engine_member.size = len(engine_contents)
                     engine_member.mode = 0o644
                     destination.addfile(engine_member, BytesIO(engine_contents))
+                if android_sources is not None and not platform_runtime_written:
+                    runtime_member = tarfile.TarInfo("assets/engine/platform_runtime.py")
+                    runtime_member.size = len(platform_runtime_contents)
+                    runtime_member.mode = 0o644
+                    destination.addfile(runtime_member, BytesIO(platform_runtime_contents))
     except (OSError, EOFError, tarfile.TarError, UnicodeDecodeError) as error:
         raise ValueError("Android web export contains an invalid Pygbag runtime archive.") from error
     return output_buffer.getvalue()
@@ -697,7 +661,7 @@ def _adapt_android_runtime_archive(
 def _prepare_android_web_site(
     web_directory: Path,
     window_size: tuple[int, int],
-    android_sources: tuple[bytes, bytes] | None = None,
+    android_sources: tuple[bytes, bytes, bytes] | None = None,
 ) -> None:
     width, height = window_size
     if (
@@ -782,30 +746,37 @@ def _prepare_android_web_site(
             raise ValueError(f"Could not adapt Android export: expected one {description} in {index_path}.")
         page = pattern.sub(lambda match: f"{match.group(1)}{value}{match.group(2)}", page, count=1)
 
-    replacements = (
+    source_updates = (
         (
-            'platform.fopen("vn-engine-web.tar.gz", "rb")',
+            r"platform\.fopen\s*\(\s*(['\"])vn-engine-web\.tar\.gz\1\s*,\s*(['\"])rb\2\s*\)",
             'platform.fopen("vn-engine-web.tar", "rb")',
             "Pygbag runtime archive path",
         ),
-        ('mode="r:gz"', 'mode="r:"', "Pygbag runtime archive mode"),
         (
-            "    platform.window.transfer.hidden = true\n",
+            r"tarfile\.open\s*\(\s*fileobj\s*=\s*archive\s*,\s*mode\s*=\s*(['\"])r:gz\1\s*\)",
+            'tarfile.open(fileobj=archive, mode="r:")',
+            "Pygbag runtime archive mode",
+        ),
+        (
+            r"(?m)^[ \t]*platform\.window\.transfer\.hidden\s*=\s*true[ \t]*\n",
             "",
             "Pygbag early loader hide",
         ),
         (
-            '    platform.window.infobox.style.display = "none"',
-            '    platform.window.transfer.hidden = true\n'
-            '    platform.window.infobox.style.display = "none"',
+            r"(?m)^([ \t]*)platform\.window\.infobox\.style\.display\s*=\s*(['\"])none\2[ \t]*$",
+            r'\1platform.window.transfer.hidden = true' + "\n" + r'\1platform.window.infobox.style.display = "none"',
             "Pygbag loader completion",
         ),
-        ("        transfer.hidden = debug_hidden\n", "", "Pygbag debug loader toggle"),
+        (
+            r"(?m)^[ \t]*transfer\.hidden\s*=\s*debug_hidden[ \t]*\n",
+            "",
+            "Pygbag debug loader toggle",
+        ),
     )
-    for old, new, description in replacements:
-        if page.count(old) != 1:
+    for pattern, replacement, description in source_updates:
+        page, count = re.subn(pattern, replacement, page, count=1)
+        if count != 1:
             raise ValueError(f"Could not adapt Android export: expected one {description} in {index_path}.")
-        page = page.replace(old, new, 1)
     index_path.write_text(page, encoding="utf-8", newline="\n")
 
 
@@ -929,12 +900,200 @@ def _add_status_bar_hide_script(web_directory: Path, wrapper_directory: Path, np
         index_path.write_text(page, encoding="utf-8")
 
 
+def _android_signing_environment(environ=None) -> dict[str, str]:
+    environ = os.environ if environ is None else environ
+    names = {
+        "keystore": "VN_ANDROID_KEYSTORE",
+        "alias": "VN_ANDROID_KEY_ALIAS",
+        "store_password": "VN_ANDROID_STORE_PASSWORD",
+        "key_password": "VN_ANDROID_KEY_PASSWORD",
+    }
+    values = {key: environ.get(name, "").strip() for key, name in names.items()}
+    missing = [names[key] for key, value in values.items() if not value and key != "key_password"]
+    if missing:
+        raise ValueError("Android release signing needs these environment variables: " + ", ".join(missing))
+    keystore = Path(values["keystore"]).expanduser().resolve()
+    if not keystore.is_file():
+        raise FileNotFoundError(f"Android signing keystore was not found: {keystore}")
+    values["keystore"] = str(keystore)
+    if not values["key_password"]:
+        values["key_password"] = values["store_password"]
+    return values
+
+
+def _configure_android_release_signing(app_gradle: Path) -> None:
+    if not app_gradle.is_file():
+        raise FileNotFoundError(f"Capacitor did not create the Android app Gradle file: {app_gradle}")
+    if app_gradle.suffix != ".gradle":
+        raise ValueError("Android release signing currently requires the generated Groovy build.gradle file.")
+    _android_signing_environment()
+    gradle = app_gradle.read_text(encoding="utf-8")
+    if "signingConfigs.vnRelease" in gradle:
+        raise ValueError("The generated Android project already defines the vnRelease signing configuration.")
+    gradle += (
+        "\n\n// Signing values are read from the export process environment; secrets stay out of the project.\n"
+        "android {\n"
+        "    signingConfigs {\n"
+        "        vnRelease {\n"
+        "            storeFile file(System.getenv('VN_ANDROID_KEYSTORE'))\n"
+        "            storePassword System.getenv('VN_ANDROID_STORE_PASSWORD')\n"
+        "            keyAlias System.getenv('VN_ANDROID_KEY_ALIAS')\n"
+        "            keyPassword System.getenv('VN_ANDROID_KEY_PASSWORD') ?: System.getenv('VN_ANDROID_STORE_PASSWORD')\n"
+        "        }\n"
+        "    }\n"
+        "    buildTypes {\n"
+        "        release { signingConfig signingConfigs.vnRelease }\n"
+        "    }\n"
+        "}\n"
+    )
+    app_gradle.write_text(gradle, encoding="utf-8", newline="\n")
+
+
+def _windows_signing_settings() -> tuple[Path, str, str]:
+    certificate = os.environ.get("VN_WINDOWS_SIGN_CERT", "").strip()
+    password = os.environ.get("VN_WINDOWS_SIGN_PASSWORD", "")
+    if not certificate:
+        raise ValueError("Windows release signing needs VN_WINDOWS_SIGN_CERT (a PFX file).")
+    certificate_path = Path(certificate).expanduser().resolve()
+    if not certificate_path.is_file():
+        raise FileNotFoundError(f"Windows signing certificate was not found: {certificate_path}")
+    sign_tool = os.environ.get("VN_WINDOWS_SIGNTOOL") or shutil.which("signtool")
+    if not sign_tool:
+        raise RuntimeError("Windows release signing needs signtool.exe on PATH or VN_WINDOWS_SIGNTOOL.")
+    return certificate_path, password, sign_tool
+
+
+def _sign_windows_executable(executable: Path) -> None:
+    certificate_path, password, sign_tool = _windows_signing_settings()
+    command = [
+        sign_tool, "sign", "/fd", "SHA256", "/f", str(certificate_path),
+        "/tr", os.environ.get("VN_WINDOWS_TIMESTAMP_URL", "http://timestamp.digicert.com"),
+        "/td", "SHA256",
+    ]
+    if password:
+        command.extend(["/p", password])
+    command.append(str(executable))
+    subprocess.run(command, check=True, timeout=180, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+
+def _macos_signing_environment() -> tuple[str, tuple[str, str, str] | None]:
+    identity = os.environ.get("VN_MACOS_SIGN_IDENTITY", "").strip()
+    if not identity:
+        raise ValueError("macOS release signing needs VN_MACOS_SIGN_IDENTITY.")
+    names = ("VN_MACOS_NOTARY_APPLE_ID", "VN_MACOS_NOTARY_TEAM_ID", "VN_MACOS_NOTARY_PASSWORD")
+    values = tuple(os.environ.get(name, "").strip() for name in names)
+    if any(values) and not all(values):
+        missing = [name for name, value in zip(names, values) if not value]
+        raise ValueError("macOS notarization needs these environment variables: " + ", ".join(missing))
+    return identity, values if all(values) else None
+
+
+def _extract_export_zip(archive_path: Path, destination: Path) -> None:
+    root = destination.resolve()
+    with ZipFile(archive_path, "r") as archive:
+        for info in archive.infolist():
+            relative = _validate_zip_name(info.filename)
+            path = root.joinpath(*relative.parts)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            mode = info.external_attr >> 16
+            if stat.S_ISLNK(mode):
+                target = archive.read(info).decode("utf-8")
+                if Path(target).is_absolute() or not _is_within((path.parent / target).resolve(), root):
+                    raise ValueError(f"Export contains an unsafe symbolic link: {info.filename!r}.")
+                path.symlink_to(target)
+            elif info.is_dir():
+                path.mkdir(parents=True, exist_ok=True)
+            else:
+                with archive.open(info, "r") as source, path.open("wb") as output:
+                    shutil.copyfileobj(source, output)
+                if mode:
+                    path.chmod(mode & 0o777)
+
+
+def _write_export_zip(root: Path, archive_path: Path) -> None:
+    with ZipFile(archive_path, "w", compression=ZIP_DEFLATED, compresslevel=6) as archive:
+        for path in sorted(root.rglob("*"), key=lambda item: item.as_posix().casefold()):
+            relative = path.relative_to(root).as_posix()
+            info_name = relative + ("/" if path.is_dir() and not path.is_symlink() else "")
+            info = ZipInfo(info_name)
+            info.create_system = 3
+            mode = path.lstat().st_mode
+            if path.is_symlink():
+                info.external_attr = (stat.S_IFLNK | 0o777) << 16
+                content = os.readlink(path).encode("utf-8")
+            elif path.is_dir():
+                info.external_attr = (stat.S_IFDIR | (stat.S_IMODE(mode) or 0o755)) << 16
+                content = b""
+            else:
+                info.external_attr = (stat.S_IFREG | stat.S_IMODE(mode)) << 16
+                content = path.read_bytes()
+            archive.writestr(info, content)
+
+
+def _sign_macos_export(output_file: Path, app_name: str) -> None:
+    identity, notarization = _macos_signing_environment()
+    codesign = shutil.which("codesign")
+    if not codesign:
+        raise RuntimeError("macOS release signing needs codesign from Xcode Command Line Tools.")
+    with tempfile.TemporaryDirectory(prefix=".vn_macos_sign_", dir=output_file.parent) as temporary:
+        workspace = Path(temporary)
+        contents = workspace / "contents"
+        contents.mkdir()
+        _extract_export_zip(output_file, contents)
+        app = contents / f"{app_name}.app"
+        if not app.is_dir():
+            raise FileNotFoundError(f"macOS export is missing its app bundle: {app}")
+        subprocess.run(
+            [codesign, "--force", "--deep", "--options", "runtime", "--timestamp", "--sign", identity, str(app)],
+            check=True, timeout=600, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        subprocess.run(
+            [codesign, "--verify", "--deep", "--strict", "--verbose=2", str(app)],
+            check=True, timeout=180, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        if notarization is not None:
+            ditto = shutil.which("ditto")
+            xcrun = shutil.which("xcrun")
+            if not ditto or not xcrun:
+                raise RuntimeError("macOS notarization needs ditto and xcrun from Xcode Command Line Tools.")
+            notarization_zip = workspace / "notarization.zip"
+            subprocess.run(
+                [ditto, "-c", "-k", "--keepParent", str(app), str(notarization_zip)],
+                check=True, timeout=600, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            apple_id, team_id, password = notarization
+            subprocess.run(
+                [
+                    xcrun, "notarytool", "submit", str(notarization_zip), "--wait",
+                    "--apple-id", apple_id, "--team-id", team_id, "--password", password,
+                ],
+                check=True, timeout=3600, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            subprocess.run(
+                [xcrun, "stapler", "staple", str(app)],
+                check=True, timeout=600, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+        signed_zip = workspace / "signed-export.zip"
+        _write_export_zip(contents, signed_zip)
+        os.replace(signed_zip, output_file)
+
+
+def _local_android_runtime_sources() -> tuple[bytes, bytes, bytes] | None:
+    roots = (Path(__file__).resolve().parent, Path(__file__).resolve().parent.parent)
+    for root in roots:
+        paths = (root / "web_main.py", root / "engine" / "engine.py", root / "engine" / "platform_runtime.py")
+        if all(path.is_file() for path in paths):
+            return tuple(path.read_bytes() for path in paths)
+    return None
+
+
 def export_android_project(
     project_root: Path,
     project_file: Path,
     templates_dir: Path,
     output_file: Path,
     release_tag: str | None = None,
+    sign_release: bool = False,
 ) -> Path:
     """Build a Capacitor APK from a new project-specific archive and web template."""
     project_root = Path(project_root).resolve()
@@ -946,6 +1105,8 @@ def export_android_project(
     if not isinstance(project_values, dict):
         raise ValueError("Project configuration must be a JSON object.")
     app_name, app_id, orientation = _android_export_settings(project_values)
+    if sign_release:
+        _android_signing_environment()
     window = project_values.get("window", {})
     if not isinstance(window, dict):
         raise ValueError("Project configuration 'window' must be an object.")
@@ -963,11 +1124,17 @@ def export_android_project(
     if java is None:
         raise RuntimeError("Android export requires a Java JDK on PATH or configured with JAVA_HOME.")
     sdk_directory = _android_sdk_directory()
-    release_tag = release_tag or latest_template_release_tag()
-    template_file = _resolve_template_file(templates_dir, "web", release_tag)
+    local_template = templates_dir / "template-web.zip"
+    local_sources = _local_android_runtime_sources()
+    if release_tag is None and local_template.is_file() and local_sources is not None:
+        template_file = local_template
+        android_sources = local_sources
+    else:
+        release_tag = release_tag or latest_template_release_tag()
+        template_file = _resolve_template_file(templates_dir, "web", release_tag)
+        android_sources = fetch_android_sources(release_tag)
     if output_file == template_file.resolve():
         raise ValueError("The Android APK cannot overwrite the web export template.")
-    android_sources = fetch_android_sources(release_tag)
 
     output_file.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".vn_android_export_", dir=output_file.parent) as temporary:
@@ -1007,6 +1174,9 @@ def export_android_project(
             wrapper / "android" / "app" / "src" / "main" / "AndroidManifest.xml",
             orientation,
         )
+        app_gradle = wrapper / "android" / "app" / "build.gradle"
+        if sign_release:
+            _configure_android_release_signing(app_gradle)
         (wrapper / "android" / "local.properties").write_text(
             f"sdk.dir={sdk_directory.as_posix()}\n",
             encoding="utf-8",
@@ -1028,8 +1198,12 @@ def export_android_project(
         _run_android_command([npx, "cap", "sync", "android"], wrapper)
         gradle_name = "gradlew.bat" if sys.platform == "win32" else "gradlew"
         gradle_wrapper = wrapper / "android" / gradle_name
-        _run_android_command([str(gradle_wrapper), "assembleDebug"], gradle_wrapper.parent)
-        built_apk = wrapper / "android" / "app" / "build" / "outputs" / "apk" / "debug" / "app-debug.apk"
+        build_variant = "release" if sign_release else "debug"
+        _run_android_command([str(gradle_wrapper), f"assemble{build_variant.title()}"], gradle_wrapper.parent)
+        built_apk = (
+            wrapper / "android" / "app" / "build" / "outputs" / "apk"
+            / build_variant / f"app-{build_variant}.apk"
+        )
         if not built_apk.is_file():
             raise FileNotFoundError(f"Android build completed without producing the expected APK: {built_apk}")
         temporary_apk = workspace / output_file.name
@@ -1045,10 +1219,18 @@ def export_project(
     platform: str,
     output_file: Path,
     android_release_tag: str | None = None,
+    sign_release: bool = False,
 ) -> Path:
     """Create a standalone desktop/web ZIP or Android APK for the project."""
     if platform not in PLATFORMS:
         raise ValueError(f"Platform must be one of: {', '.join(sorted(PLATFORMS))}.")
+
+    if sign_release and platform not in {"windows", "macos", "android"}:
+        raise ValueError("Release signing is supported for Windows, macOS, and Android exports.")
+    if sign_release and platform == "windows":
+        _windows_signing_settings()
+    elif sign_release and platform == "macos":
+        _macos_signing_environment()
 
     if platform == "web":
         return export_web_project(project_root, project_file, templates_dir, output_file)
@@ -1059,6 +1241,7 @@ def export_project(
             templates_dir,
             output_file,
             android_release_tag,
+            sign_release,
         )
 
     project_root = Path(project_root).resolve()
@@ -1154,6 +1337,8 @@ def export_project(
                     update_windows_executable_icon(staged_executable, windows_icon)
                 with staged_executable.open("ab") as target, bundle_path.open("rb") as bundle:
                     shutil.copyfileobj(bundle, target)
+                if platform == "windows" and sign_release:
+                    _sign_windows_executable(staged_executable)
                 if platform in {"linux", "macos"}:
                     staged_executable.chmod(staged_executable.stat().st_mode | 0o111)
         except BadZipFile as error:
@@ -1224,6 +1409,8 @@ def export_project(
                     archive.writestr(shortcut_info, (workspace / shortcut_name).read_bytes())
 
             os.replace(temporary_zip, output_file)
+            if platform == "macos" and sign_release:
+                _sign_macos_export(output_file, name)
         except BadZipFile as error:
             raise ValueError(f"Export template is not a valid ZIP file: {template_file}") from error
     return output_file

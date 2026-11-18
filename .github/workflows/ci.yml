@@ -1,0 +1,137 @@
+name: Tests and export smoke checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      android_emulator_smoke:
+        description: Build, install, and launch the Android APK on an emulator
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Run test suite
+        run: python -m pytest -q -p no:cacheprovider
+
+  desktop-export-smoke:
+    name: ${{ matrix.platform }} export smoke test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows
+          - os: ubuntu-22.04
+            platform: linux
+          - os: macos-latest
+            platform: macos
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Install Linux build tools
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y patchelf ccache
+      - name: Install Python dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Compile Windows runtime
+        if: matrix.platform == 'windows'
+        run: python compile.py --engine-only --output-dir build --output-name Runner.exe --windows-console-mode disable
+      - name: Compile Linux runtime
+        if: matrix.platform == 'linux'
+        run: python compile.py --engine-only --output-dir build --output-name Runner
+      - name: Compile macOS runtime
+        if: matrix.platform == 'macos'
+        run: python compile.py --engine-only --output-dir build --output-name Runner --macos-app-bundle
+      - name: Package runtime template
+        run: python tools/package_template.py --platform ${{ matrix.platform }} --build-dir build --output templates/template-${{ matrix.platform }}.zip
+      - name: Export the sample project
+        run: python main.py --build-game --platform ${{ matrix.platform }} --templates-dir templates --output-dir build/smoke
+      - name: Launch and validate the exported game
+        run: python tools/smoke_export.py --platform ${{ matrix.platform }} --artifact "build/smoke/Visual Novel-${{ matrix.platform }}.zip"
+
+  web-export-smoke:
+    name: Web export smoke test
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Install browser audio conversion tool
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+      - name: Install Python dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Build Web runtime template
+        run: python tools/build_web_template.py --output templates/template-web.zip
+      - name: Export the sample project
+        run: python main.py --build-game --platform web --templates-dir templates --output-dir build/smoke
+      - name: Validate the Web artifact and embedded project
+        run: python tools/smoke_export.py --platform web --artifact "build/smoke/Visual Novel-web.zip"
+
+  android-emulator-smoke:
+    name: Android export, install, and launch
+    if: github.event_name == 'workflow_dispatch' && inputs.android_emulator_smoke
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: android-actions/setup-android@v3
+      - name: Install Android SDK packages
+        run: sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+      - name: Install browser audio conversion tool
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+      - name: Install Python dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Build Web runtime template
+        run: python tools/build_web_template.py --output templates/template-web.zip
+      - name: Export Android APK
+        run: python main.py --build-game --platform android --templates-dir templates --output-dir build/smoke
+      - name: Install and launch APK on emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          script: ANDROID_SERIAL=emulator-5554 python tools/smoke_export.py --platform android --artifact "build/smoke/Visual Novel-android.apk" --app-id com.example.vnengine

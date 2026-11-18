@@ -26,6 +26,22 @@ My Visual Novel/
 
 For temporary runs such as the editor's **Test Play**, the engine honors the `VN_ENGINE_USER_DATA_DIR` environment variable as an override. The editor sets it to a temporary folder and removes that folder when the test game closes.
 
+## Workspace source Test Play
+
+Set the top-level `"USER"` value in `data/project.json` to control how VN_Editor prepares **Test Play**:
+
+```json
+{
+  "USER": "admin"
+}
+```
+
+- Exactly `"admin"` runs Test Play from the engine source code in the workspace (`main.py` and `engine/`) instead of downloading or using a GitHub compiled runtime template.
+- `"user"` and every other value use the normal compiled-template workflow.
+- The value must be a string. This setting does not change normal exports.
+
+Admin source mode stages the workspace source together with the project's `assets/` and `data/` in a temporary folder, which keeps test saves isolated and avoids modifying the project.
+
 ## A practical `project.json`
 
 This example changes the project name, window, credits, menu labels, intro text, and colors. Unspecified pause-menu items, settings items, slot settings, and theme values keep their defaults.
@@ -141,8 +157,11 @@ If you copy this example, add `assets/images/menu-background.jpg` or set `theme.
 | `icon` | `null` | Optional PNG path inside project `assets/`, used for the game window and native/browser app icon where supported. |
 | `android` | See [Android export](#android-export) | Android app name, application ID, and screen orientation. |
 | `save_slots` | `5` | Number of save/load slots. Must be a positive integer. |
+| `autosave_slots` | `3` | Number of rotating automatic-save slots. Must be a positive integer. |
+| `autosave_interval_seconds` | `300` | Seconds between automatic saves while a game is active. Set to `0` to disable timed autosaves; story `autosave` actions still work. |
+| `save_migrations` | Empty mappings | Optional old-to-new dialogue and variable names used when loading saves after story edits. |
 | `paths` | See [paths](#paths) | Project data, asset, and user-data locations. |
-| `window` | `1920` × `1200`, caption `VN Engine` | Initial window size and operating-system window caption. Fullscreen can also be toggled in Settings. |
+| `window` | `1920` × `1200`, caption `VN Engine` | Design window size and operating-system caption. Windowed desktop games scale down to fit the primary monitor and open centered; press Ctrl+Shift+Home to recover an off-screen window. Fullscreen can also be toggled in Settings. |
 | `intro` | See [intro cards](#intro-cards) | Creator/version text and optional credit/warning card images. |
 | `credits` | `[]` | Additional credits shown in the Credits menu. |
 | `messages` | Built-in messages | Text for save/load/status messages; see [messages](#messages). |
@@ -243,18 +262,19 @@ The engine has a main menu, pause menu, settings menu, generated save/load slot 
 | `open_save_slots` | Open the generated save-slot screen. |
 | `open_settings` | Open the settings menu. |
 | `open_credits` | Open project credits and the engine creator credit. |
+| `open_extras` | Open the CG Gallery, Music Room, Achievements, and Routes. The default main and pause menus include this item automatically. |
 | `quit` | Close the engine. |
 | `resume` | Return from the pause menu to the current game. |
 | `return_to_main_menu` | Leave the current game and show the main menu. |
 | `back` | Return to the previous menu. |
-| `adjust_setting` | Adjust a setting. Provide `setting` as `type_speed`, `music_volume`, `sfx_volume`, or `ui_scale`. |
-| `toggle_setting` | Toggle a setting. Provide `setting: fullscreen`. |
+| `adjust_setting` | Adjust a setting such as `type_speed`, `auto_wait`, `touch_advance_mode`, `music_volume`, `sfx_volume`, `dialogue_font_scale`, `speaker_font_scale`, or `ui_scale`. |
+| `toggle_setting` | Toggle settings such as `high_contrast`, `reduced_motion`, `voice_enabled`, `subtitles_enabled`, `animated_text`, or `fullscreen`. |
 
-The default main menu provides New Game, Continue, Load Game, Settings, Credits, and Quit. The default pause menu provides Resume, Save Game, Load Game, Settings, and Main Menu. You can replace their labels or item lists in `menus.main.items` and `menus.pause.items`.
+The default main menu provides New Game, Continue, Load Game, Settings, Credits, Extras, and Quit. The default pause menu provides Resume, Save Game, Load Game, Settings, Extras, and Main Menu. You can replace their labels or item lists in `menus.main.items` and `menus.pause.items`; Extras is added if a custom list omits it.
 
-Setting items display their current value. `Left`/`Right` changes the selected setting; clicking the left or right half of an `adjust_setting` row decreases or increases it. Type speed ranges from `0.25x` to `4x` in `0.25x` steps. Music and SFX volume range from `0%` to `100%` in `10%` steps. UI Size ranges from `80%` to `160%` in `10%` steps and scales the engine's dialogue, menus, choices, and other interface controls. The engine adds this setting automatically if a custom settings menu does not include it. Fullscreen toggles between windowed and fullscreen mode.
+Setting items display their current value. `Left`/`Right` changes the selected setting; clicking the left or right half of an `adjust_setting` row decreases or increases it. Type speed ranges from `0.25x` to `4x` in `0.25x` steps. Auto wait changes in `0.25` second steps. Touch Advance Area switches between the whole screen and the textbox. Music and SFX volume range from `0%` to `100%` in `10%` steps. Dialogue and speaker font scaling range from `60%` to `200%`. UI Size ranges from `80%` to `160%` in `10%` steps and scales the engine's dialogue, menus, choices, and other interface controls. Fullscreen toggles between windowed and fullscreen mode. Auto Advance and Mute remain in the compact button strip below the textbox.
 
-Slot rows are created by the engine according to `save_slots`; do not add them manually to `menus.main.items`. The `save_slot` and `load_slot` IDs are used internally for generated slot rows and require a slot number supplied by the engine. The slot screen has built-in Delete, Save/Load, and Back buttons.
+Slot rows are created by the engine according to `save_slots`; do not add them manually to `menus.main.items`. The `save_slot` and `load_slot` IDs are used internally for generated slot rows and require a slot number supplied by the engine. The slot screen has built-in Delete, Copy, Save/Load, and Back buttons.
 
 ### Save-slot labels
 
@@ -264,6 +284,7 @@ The `menus.slots` object controls slot screen titles and row text. Defaults are:
 "slots": {
   "title_save": "Save Game",
   "title_load": "Load Game",
+  "title_copy": "Copy Save",
   "labels": {
     "slot": "Slot {slot}",
     "saved": "Slot {slot}: {chapter}",
@@ -350,13 +371,17 @@ The default controls appear along the bottom of the textbox. Each control has a 
   "back": { "visible": true, "label": "Back" },
   "history": { "visible": true, "label": "History" },
   "quick_save": { "visible": true, "label": "Q. Save" },
-  "quick_load": { "visible": true, "label": "Q. Load" }
+  "quick_load": { "visible": true, "label": "Q. Load" },
+  "auto": { "visible": true, "label": "Auto" },
+  "mute": { "visible": true, "label": "Mute" }
 }
 ```
 
 **Back** returns to the previous dialogue step, restoring its story variables, scene, and choice state when applicable. It is disabled until there is a previous step. **History** opens the dialogue-history panel; the `H` key remains available as a shortcut.
 
 **Q. Save** writes to a separate Quick Save file, outside the numbered save slots. **Q. Load** loads that save when it belongs to the current story; otherwise it follows the Continue behavior and loads the most recent available save. Both controls ask for confirmation before saving or loading.
+
+**Auto** toggles automatic dialogue advance. **Mute** toggles all audio. Their active states are highlighted. Both controls are available below the textbox and are omitted from the Settings menu.
 
 ### Fonts
 
@@ -398,7 +423,7 @@ Use `fonts` for menus:
 
 Font names can refer to files in `assets/fonts/` or the built-in font folder. The built-in files are `standard.ttf`, `Joystix.ttf`, `MS Gothic.ttf`, `PermanentMarker.ttf`, `rpg-maker-2k.ttf`, `Toriko.ttf`, and `VCR_OSD_Mono.ttf`. Set a font path to `null` to use the system font; missing or unreadable font files also fall back to a system font.
 
-`game_font_sizes.text`, `name`, and `button` control dialogue text, speaker names, and choice/button text. `dialogue_controls` sizes the Back, History, Quick Save, and Quick Load labels. `intro` and `intro_small` size the main and small intro-card text. Menu title, item, and detail sizes are set by `fonts.title_size`, `item_size`, and `detail_size`. All values are positive design-pixel sizes and are scaled by the player's UI Size setting.
+`game_font_sizes.text`, `name`, and `button` control dialogue text, speaker names, and choice/button text. `dialogue_controls` sizes the Back, History, Quick Save, Quick Load, Auto, and Mute labels. `intro` and `intro_small` size the main and small intro-card text. Menu title, item, and detail sizes are set by `fonts.title_size`, `item_size`, and `detail_size`. All values are positive design-pixel sizes and are scaled by the player's UI Size setting. Dialogue text keeps the configured size when it fits; an overflowing message temporarily shrinks only as much as needed, down to 1 point for unusually dense text. The next message starts again at the configured size. Very dense dialogue may become difficult to read at small sizes, so consider splitting it across multiple story steps.
 
 ### Standard menu layout
 
@@ -536,6 +561,21 @@ The engine writes user settings and saves outside its bundled resources. On Wind
 %LOCALAPPDATA%\Visual Novel Engine\<folder-safe project name>\user_data\
 ```
 
-Settings are stored in `settings.json`; numbered saves are stored under `saves/slot_1.json`, `saves/slot_2.json`, and so on. Story `autosave` actions overwrite `saves/autosave.json` and do not take a numbered slot. The engine appends a project-specific folder and the configured `paths.user_data` value to the platform root. On macOS, the root is `~/Library/Application Support/Visual Novel Engine/`; on Linux it is `$XDG_DATA_HOME/visual-novel-engine/`, or `~/.local/share/visual-novel-engine/` when `XDG_DATA_HOME` is unset. Set `paths.user_data` to an absolute path to choose a different location. Relative `paths.user_data` values are resolved from this platform-specific root.
+Settings are stored in `settings.json`; numbered saves are stored under `saves/slot_1.json`, `saves/slot_2.json`, and so on. Automatic saves rotate through `saves/autosave_1.json` up to `saves/autosave_N.json`, where `N` is `autosave_slots`; the older `autosave.json` is still read. Each save keeps a `.bak` copy of the previous version, and a corrupt save is recovered from that backup when possible. Story `autosave` actions and the configured timer both write rotating autosaves. The engine appends a project-specific folder and the configured `paths.user_data` value to the platform root. On macOS, the root is `~/Library/Application Support/Visual Novel Engine/`; on Linux it is `$XDG_DATA_HOME/visual-novel-engine/`, or `~/.local/share/visual-novel-engine/` when `XDG_DATA_HOME` is unset. Set `paths.user_data` to an absolute path to choose a different location. Relative `paths.user_data` values are resolved from this platform-specific root.
 
-The settings menu controls type speed (`0.25x`–`4x`), music/SFX volume (`0`–`1`), UI size (`0.8`–`1.6`), and fullscreen mode. Numbered saves and autosaves store the current dialogue, story variables, background, music, visible character portraits, and dialogue history. Increasing `save_slots` exposes additional slots; reducing it hides higher-numbered slots but does not automatically delete their files.
+The Settings menu controls type speed, Auto Wait, dialogue and speaker font size, high contrast, reduced motion, voice and subtitle playback, speech announcements, text reveal animation, audio volume, touch advance area, UI size, and fullscreen mode. Auto Advance and Mute are the dedicated buttons below the dialogue textbox. Speech announcements read dialogue, choices, and menu selections using an installed system speech service or the optional `pyttsx3` package. Keyboard and controller bindings can be customized in `settings.json` using the `key_bindings` and `controller_bindings` maps. Keyboard values use Pygame key names and optional `shift+`, `ctrl+`, or `alt+` modifiers. Controller values are button numbers, starting at `0`.
+
+Installed `.vnmod` packages are managed from **Extras → Mods**. The screen can install a package, enable or disable it, remove copies installed in the user's mods folder, and show package metadata, load failures, and asset conflicts. Project packages in `assets/mods/` can be disabled there; remove project packages from the project folder. Mod enablement is stored as `user_data/mods.json` and takes effect after restarting the game. Project assets take priority over mod assets. When two enabled packages provide the same asset, the first package in filename and folder-path order wins; the manager reports that winner.
+
+Optional speech announcements can use `pyttsx3` (`python -m pip install pyttsx3`). Without it, the engine uses Windows System.Speech, macOS `say`, or Linux `spd-say`/`espeak` when available.
+
+Numbered saves include a screenshot preview, custom name, timestamp, play time, the current dialogue and variables, scene, portraits, dialogue history, visited dialogue IDs, and choice history. The slot screen can copy a save to another slot, and deleting a save asks for confirmation. Desktop slot screens can import and export portable `.vnsave.json` files independently of cloud sync. The engine checks story identity and asks before replacing a slot. Achievements, route completions, and gallery unlocks are stored in `progress.json` separately from saves. Save files use format version 2; version 1 saves are migrated when read. To preserve progress after renaming story IDs or variables, configure explicit mappings:
+
+```json
+"save_migrations": {
+  "dialogues": { "old_dialogue_id": "new_dialogue_id" },
+  "variables": { "old_variable": "new_variable", "removed_variable": null }
+}
+```
+
+Unmapped variables that no longer exist in the story are discarded. Increasing `save_slots` exposes additional slots; reducing it hides higher-numbered slots but does not automatically delete their files. `SaveSystem.copy_slot(source_slot, destination_slot)`, `export_slot(slot, path)`, and `import_slot(path, slot)` are available to tools that manage save files.

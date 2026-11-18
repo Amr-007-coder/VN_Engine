@@ -27,8 +27,16 @@ The starter project is stored separately at `Documents/VN Engine Projects/My Vis
 - Dialogue with a typewriter effect, speaker names, text formatting, variable substitution, branching choices, optional voice lines, and a scrollable dialogue history.
 - Story variables, player text/integer input, conditional choices, and actions for backgrounds, static and animated character portraits, music, sound effects, fades, screen shake, and command-triggered autosaves.
 - Multi-file YAML stories with recursive includes for chapter-sized files.
+- Locale tables for translated dialogue, speaker names, and choice labels, with a runtime language setting and fallback translations.
 - Automatic discovery of character looks and PNG expressions from folders.
-- Main and pause menus, save/load slots, continue, credits, and settings for text speed, volume, fullscreen, and adjustable UI size.
+- Main and pause menus, save/load slots, portable save import/export, continue, credits, scrollable settings, and optional CG, music, achievements, and route galleries.
+- Data-only `.vnmod` asset packages for project art, portraits, music, sounds, and fonts.
+- Controller navigation for menus, settings, choices, history, and the live Test Play variable inspector.
+- An in-game mod manager with enable/disable, install/remove, package diagnostics, and asset conflict reporting.
+- Editor translation catalogs for dialogue and engine UI, missing-string and expansion previews, plus RTL right-alignment previews.
+- Deterministic playthrough suites with choice scripts and ending, variable, and unlock assertions.
+- Optional text-to-speech announcements for dialogue, choices, and menu navigation.
+- Editor asset diagnostics for unused and duplicate names, large images, package errors, and mod conflicts.
 - A touch-friendly pause button during gameplay, alongside the Escape key on desktop.
 - Project-level menu labels, window size, intro cards, credits, textbox image/color, and a declarative menu theme.
 - Story validation and a character-asset inventory from the command line.

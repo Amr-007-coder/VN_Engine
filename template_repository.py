@@ -466,12 +466,13 @@ def _write_starter_project(root: Path, project_template: dict) -> None:
     )
 
 
-def fetch_android_sources(release_tag: str) -> tuple[bytes, bytes]:
-    """Fetch the Android entrypoint and engine source for one matching release tag."""
+def fetch_android_sources(release_tag: str) -> tuple[bytes, bytes, bytes]:
+    """Fetch the Android entrypoint and platform runtime sources for one release."""
     tag = _validate_tag(release_tag)
     encoded_tag = quote(tag, safe="")
     source_files = (
         f"https://raw.githubusercontent.com/{REPOSITORY}/{encoded_tag}/web_main.py",
         f"https://raw.githubusercontent.com/{REPOSITORY}/{encoded_tag}/engine/engine.py",
+        f"https://raw.githubusercontent.com/{REPOSITORY}/{encoded_tag}/engine/platform_runtime.py",
     )
     return tuple(_request_bytes(url) for url in source_files)

@@ -1,3 +1,5 @@
+import math
+
 import pygame
 
 from engine.character_assets import CharacterAssetCatalog
@@ -18,7 +20,15 @@ class CharacterLayer:
 
     def __init__(self, assets, defaults=None, scale_settings=None):
         self.assets = assets
-        self.catalog = CharacterAssetCatalog(assets.project_assets, assets.fallback_assets)
+        mod_character_assets = (
+            assets.mod_asset_names("characters")
+            if hasattr(assets, "mod_asset_names") else []
+        )
+        self.catalog = CharacterAssetCatalog(
+            assets.project_assets,
+            assets.fallback_assets,
+            mod_character_assets,
+        )
         self.defaults = defaults or {}
         self.scale_percentages = {
             name.casefold(): settings.get("scale", 100)
@@ -33,6 +43,9 @@ class CharacterLayer:
         expression: str,
         position: str | None = None,
         look: str | None = None,
+        transition: str = "none",
+        duration: float = 0.35,
+        easing: str = "ease_out",
     ):
         previous_name = self._existing_name(name)
         previous = self.characters.get(previous_name, {})
@@ -43,6 +56,7 @@ class CharacterLayer:
             raise ValueError(f"Character position must be one of {sorted(self.POSITIONS)}.")
 
         position = position or previous.get("position") or defaults.get("position", "center")
+        self._validate_transition(transition, duration, easing)
         if previous.get("look") == resolved["look"] and previous.get("expression") == resolved["expression"]:
             source = previous["image"]
         else:
@@ -54,6 +68,7 @@ class CharacterLayer:
             "position": position,
             "image": source,
             "animation": None,
+            "transition": self._make_transition(transition, duration, easing, "in"),
         }
 
     def animate(
@@ -95,6 +110,7 @@ class CharacterLayer:
                 "loop": bool(loop),
                 "started_at": pygame.time.get_ticks(),
             },
+            "transition": None,
         }
         self._discard_cached_sprites(first["name"])
 
@@ -103,6 +119,24 @@ class CharacterLayer:
         if existing_name is not None:
             self.characters.pop(existing_name, None)
             self._discard_cached_sprites(existing_name)
+
+    def hide_with_transition(
+        self,
+        name: str,
+        transition: str = "none",
+        duration: float = 0.35,
+        easing: str = "ease_out",
+    ):
+        self._validate_transition(transition, duration, easing)
+        existing_name = self._existing_name(name)
+        if existing_name is None:
+            return
+        if transition == "none":
+            self.hide(existing_name)
+            return
+        self.characters[existing_name]["transition"] = self._make_transition(
+            transition, duration, easing, "out"
+        )
 
     def clear(self):
         self.characters.clear()
@@ -126,6 +160,10 @@ class CharacterLayer:
                 ),
             }
             for name, character in self.characters.items()
+            if not (
+                isinstance(character.get("transition"), dict)
+                and character["transition"].get("direction") == "out"
+            )
         }
 
     def restore(self, characters):
@@ -150,6 +188,7 @@ class CharacterLayer:
                 "position": position,
                 "image": self.assets.load_image(resolved["asset"], cache=False),
                 "animation": None,
+                "transition": None,
             }
         self.characters = restored
         self._surface_cache.clear()
@@ -174,13 +213,93 @@ class CharacterLayer:
             self.characters.items(),
             key=lambda item: item[0].casefold() == active_key,
         )
+        remove_after_render = []
         for name, character in ordered:
             self._select_animation_frame(name, character)
             is_active = name.casefold() == active_key
             sprite = self._prepared_sprite(name, character, surface.get_size(), is_active)
             x = self._position_x(character["position"], surface.get_width(), sprite.get_width())
             y = surface.get_height() - sprite.get_height()
+            transition = character.get("transition")
+            if transition is not None:
+                progress = self._transition_progress(transition)
+                eased = self._ease(progress, transition["easing"])
+                if transition["direction"] == "out":
+                    visibility = 1.0 - eased
+                    displacement = eased
+                else:
+                    visibility = eased
+                    displacement = 1.0 - eased
+                if transition["kind"] == "fade":
+                    sprite = sprite.copy()
+                    sprite.set_alpha(round(255 * visibility))
+                elif transition["kind"] == "slide":
+                    dx, dy = self._slide_displacement(character["position"], surface.get_size())
+                    x += round(dx * displacement)
+                    y += round(dy * displacement)
+                if progress >= 1.0:
+                    if transition["direction"] == "out":
+                        remove_after_render.append(name)
+                    else:
+                        character["transition"] = None
             surface.blit(sprite, (x, y))
+        for name in remove_after_render:
+            self.hide(name)
+
+    @staticmethod
+    def _validate_transition(kind, duration, easing):
+        if not isinstance(kind, str) or kind not in {"none", "fade", "slide"}:
+            raise ValueError("Character transition must be 'none', 'fade', or 'slide'.")
+        try:
+            duration_value = float(duration)
+        except (TypeError, ValueError, OverflowError):
+            duration_value = math.nan
+        if (
+            not isinstance(duration, (int, float))
+            or isinstance(duration, bool)
+            or not math.isfinite(duration_value)
+            or not 0 < duration_value <= 30
+        ):
+            raise ValueError("Character transition duration must be greater than 0 and at most 30 seconds.")
+        if not isinstance(easing, str) or easing not in {"linear", "ease_in", "ease_out", "ease_in_out"}:
+            raise ValueError("Character transition easing is invalid.")
+
+    @staticmethod
+    def _make_transition(kind, duration, easing, direction):
+        if kind == "none":
+            return None
+        return {
+            "kind": kind,
+            "duration": float(duration),
+            "easing": easing,
+            "direction": direction,
+            "started_at": pygame.time.get_ticks(),
+        }
+
+    @staticmethod
+    def _transition_progress(transition):
+        duration_ms = max(1, round(transition["duration"] * 1000))
+        elapsed = pygame.time.get_ticks() - transition["started_at"]
+        return max(0.0, min(1.0, elapsed / duration_ms))
+
+    @staticmethod
+    def _ease(progress, easing):
+        if easing == "ease_in":
+            return progress * progress
+        if easing == "ease_out":
+            return 1.0 - (1.0 - progress) ** 2
+        if easing == "ease_in_out":
+            return 3 * progress ** 2 - 2 * progress ** 3
+        return progress
+
+    @staticmethod
+    def _slide_displacement(position, screen_size):
+        width, height = screen_size
+        if position in {"far_left", "left"}:
+            return -width * 0.3, 0
+        if position in {"far_right", "right"}:
+            return width * 0.3, 0
+        return 0, height * 0.25
 
     def _select_animation_frame(self, name, character):
         animation = character.get("animation")

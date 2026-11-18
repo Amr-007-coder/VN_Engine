@@ -14,7 +14,6 @@ template-*.zip
 editor.build/
 editor.dist/
 editor.onefile-build/
-tests/
 yaml-helper/
 feedback.email
 *.pyc

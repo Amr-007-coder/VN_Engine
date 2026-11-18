@@ -21,16 +21,20 @@ import re
 import shlex
 import shutil
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
 import threading
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 from typing import Any
-from zipfile import ZipFile
+from zipfile import BadZipFile, ZipFile
 
 from export_pipeline import PLATFORMS, export_project, safe_project_name
+from engine.mods import build_asset_package
+from engine.localization import catalog_report, load_catalog, translation_template, write_catalog
+from engine.ui_text import UI_LABEL_KEYS
 from template_repository import install_starter_project, list_template_release_tags
 
 try:
@@ -40,14 +44,17 @@ except ImportError:
 
 
 APP_TITLE = "VN Engine Editor"
-STORY_TOP_KEYS = {"title", "start", "includes", "variables", "character_defaults", "dialogues"}
-DIALOGUE_KEYS = {"chapter", "speaker", "text", "next", "options", "actions", "active_character", "voice"}
+STORY_TOP_KEYS = {"title", "start", "includes", "variables", "character_defaults", "localization", "dialogues"}
+DIALOGUE_KEYS = {
+    "chapter", "speaker", "speaker_name", "text", "next", "call", "return", "options", "actions", "active_character", "voice",
+    "choice_timeout", "choice_timeout_target",
+}
 OPTION_KEYS = {"label", "target", "condition"}
 CONDITION_KEYS = {"var", "op", "value", "all", "any", "not"}
 ACTION_TYPES = {
     "set", "add", "subtract", "background", "clear_background", "music", "stop_music",
     "sound", "show_character", "animate_character", "hide_character", "clear_characters", "fade", "shake", "autosave",
-    "input",
+    "input", "unlock_cg", "unlock_music", "achievement", "complete_route",
 }
 ACTION_FIELDS = {
     "set": {"type", "var", "value"},
@@ -59,13 +66,17 @@ ACTION_FIELDS = {
     "music": {"type", "track"},
     "stop_music": {"type"},
     "sound": {"type", "name"},
-    "show_character": {"type", "name", "look", "expression", "position"},
+    "show_character": {"type", "name", "look", "expression", "position", "transition", "duration", "easing"},
     "animate_character": {"type", "name", "frames", "look", "position", "frame_duration", "loop"},
-    "hide_character": {"type", "name"},
+    "hide_character": {"type", "name", "transition", "duration", "easing"},
     "clear_characters": {"type"},
     "fade": {"type", "direction", "duration", "color"},
     "shake": {"type", "duration", "intensity"},
     "autosave": {"type"},
+    "unlock_cg": {"type", "id", "image", "label"},
+    "unlock_music": {"type", "id", "track", "label"},
+    "achievement": {"type", "id", "title", "description"},
+    "complete_route": {"type", "id", "title"},
 }
 REQUIRED_ACTION_FIELDS = {
     "set": {"var", "value"},
@@ -79,15 +90,24 @@ REQUIRED_ACTION_FIELDS = {
     "animate_character": {"name", "frames"},
     "hide_character": {"name"},
     "fade": {"direction"},
+    "unlock_cg": {"id", "image"},
+    "unlock_music": {"id", "track"},
+    "achievement": {"id"},
+    "complete_route": {"id"},
 }
 CONDITION_OPERATORS = {"==", "!=", "<", "<=", ">", ">=", "in", "not_in"}
 CHARACTER_POSITIONS = {"far_left", "left", "center", "right", "far_right"}
 MENU_ACTIONS = {
     "new_game", "continue_game", "open_load_slots", "open_save_slots", "open_settings",
     "open_credits", "quit", "resume", "return_to_main_menu", "back", "adjust_setting",
-    "toggle_setting", "save_slot", "load_slot", "delete_selected_slot",
+    "toggle_setting", "save_slot", "load_slot", "delete_selected_slot", "open_extras",
 }
 SETTING_NAMES = {"type_speed", "music_volume", "sfx_volume", "fullscreen", "ui_scale"}
+SETTING_NAMES = SETTING_NAMES | {
+    "auto_advance", "auto_wait", "dialogue_font_scale", "speaker_font_scale",
+    "high_contrast", "muted", "reduced_motion", "voice_enabled",
+    "subtitles_enabled", "animated_text", "touch_advance_mode", "locale", "speech_enabled",
+}
 BUILTIN_ASSETS = {
     "image": {"logo.png", "content_warning.png", "headphones.png", "test.png"},
     "sound": {"intro.wav", "hover_button.wav", "click_button.wav"},
@@ -123,6 +143,7 @@ def _literal_from_engine(relative_file: str, variable: str):
 
 
 FALLBACK_DEFAULT_PROJECT = {
+    "USER": "user",
     "name": "Visual Novel",
     "story": "story.yaml",
     "icon": None,
@@ -158,6 +179,8 @@ FALLBACK_DEFAULT_PROJECT = {
         "history": {"visible": True, "label": "History"},
         "quick_save": {"visible": True, "label": "Q. Save"},
         "quick_load": {"visible": True, "label": "Q. Load"},
+        "auto": {"visible": True, "label": "Auto"},
+        "mute": {"visible": True, "label": "Mute"},
     },
     "menus": {
         "main": {"title": "Visual Novel", "items": [
@@ -166,6 +189,7 @@ FALLBACK_DEFAULT_PROJECT = {
             {"label": "Load Game", "action": "open_load_slots"},
             {"label": "Settings", "action": "open_settings"},
             {"label": "Credits", "action": "open_credits"},
+            {"label": "Extras", "action": "open_extras"},
             {"label": "Quit", "action": "quit"},
         ]},
         "pause": {"title": "Paused", "items": [
@@ -173,6 +197,7 @@ FALLBACK_DEFAULT_PROJECT = {
             {"label": "Save Game", "action": "open_save_slots"},
             {"label": "Load Game", "action": "open_load_slots"},
             {"label": "Settings", "action": "open_settings"},
+            {"label": "Extras", "action": "open_extras"},
             {"label": "Main Menu", "action": "return_to_main_menu"},
         ]},
         "settings": {"title": "Settings", "items": [
@@ -420,7 +445,9 @@ class AssetCatalog:
         self.engine_assets_dir = project_root / "engine" / "assets"
         self.roots = [self.assets_dir, self.engine_assets_dir]
         self.characters: dict[str, dict] = {}
+        self.mod_assets = {"images": [], "sounds": [], "music": [], "fonts": [], "characters": []}
         self._suggestion_cache = {}
+        self._scan_mod_packages()
         self._scan_characters()
 
     @staticmethod
@@ -467,6 +494,49 @@ class AssetCatalog:
                     continue
                 expressions.append({"expression": expression, "path": file_path, "priority": priority})
 
+        for asset_name in self.mod_assets["characters"]:
+            relative = PurePosixPath(asset_name)
+            if len(relative.parts) < 2 or relative.suffix.casefold() != ".png":
+                continue
+            character_name = relative.parts[0]
+            look = "/".join(relative.parts[1:-1])
+            expression = relative.stem
+            char_key = character_name.casefold()
+            look_key = look.casefold()
+            expr_key = expression.casefold()
+            character = self.characters.setdefault(char_key, {"name": character_name, "looks": {}})
+            look_data = character["looks"].setdefault(look_key, {"name": look, "expressions": {}})
+            expressions = look_data["expressions"].setdefault(expr_key, [])
+            if any(item["priority"] < 0.5 for item in expressions):
+                continue
+            expressions[:] = [item for item in expressions if item["priority"] < 0.5]
+            expressions.append({"expression": expression, "path": self.assets_dir / "mods" / asset_name, "priority": 0.5})
+
+    def _scan_mod_packages(self):
+        mod_directory = self.assets_dir / "mods"
+        if not mod_directory.is_dir():
+            return
+        for package_path in sorted(mod_directory.glob("*.vnmod"), key=lambda path: path.name.casefold()):
+            try:
+                with ZipFile(package_path) as archive:
+                    manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
+                    if not isinstance(manifest, dict) or manifest.get("format_version") != 1:
+                        continue
+                    for info in archive.infolist():
+                        if info.is_dir():
+                            continue
+                        path = PurePosixPath(info.filename.replace("\\", "/"))
+                        if path.is_absolute() or ".." in path.parts or len(path.parts) < 3 or path.parts[0] != "assets":
+                            continue
+                        category = path.parts[1]
+                        if category not in self.mod_assets or (info.external_attr >> 16) & 0o170000 == 0o120000:
+                            continue
+                        self.mod_assets[category].append("/".join(path.parts[2:]))
+            except (OSError, ValueError, KeyError, UnicodeDecodeError, BadZipFile):
+                continue
+        for category, names in self.mod_assets.items():
+            self.mod_assets[category] = sorted(set(names), key=str.casefold)
+
     def character_names(self):
         return sorted((item["name"] for item in self.characters.values()), key=str.casefold)
 
@@ -504,6 +574,18 @@ class AssetCatalog:
             return candidate.is_file()
         normalized = name.replace("\\", "/")
         wanted = normalized.casefold()
+        mod_names = self.mod_assets.get(ASSET_FOLDER.get(kind, ""), [])
+        for item in mod_names:
+            candidates = {item.casefold(), f"{ASSET_FOLDER[kind]}/{item}".casefold()}
+            if wanted in candidates:
+                return True
+            if not candidate.suffix and (
+                Path(item).stem.casefold() == wanted
+                or Path(item).with_suffix("").as_posix().casefold() == wanted
+            ):
+                matches = [value for value in mod_names if Path(value).stem.casefold() == wanted]
+                if len(matches) == 1:
+                    return True
         for root in self.roots:
             folder = ASSET_FOLDER[kind]
             for base in (root, root / folder):
@@ -555,6 +637,10 @@ class AssetCatalog:
                 pass
         for filename in BUILTIN_ASSETS[kind]:
             result.add(Path(filename).stem if kind in {"image", "sound"} else filename)
+        result.update(
+            Path(filename).stem if kind in {"image", "sound"} else filename
+            for filename in self.mod_assets.get(folder, [])
+        )
         suggestions = sorted(result, key=str.casefold)
         self._suggestion_cache[kind] = suggestions
         return suggestions
@@ -691,6 +777,54 @@ def analyze_story(
                 diagnostics.append(Diagnostic("error", f"Story include {include!r} was not found under {catalog.data_dir}.", _line_of_key(source, "includes")))
     if not fragment and "title" in data and not isinstance(data["title"], str):
         diagnostics.append(Diagnostic("error", "Story title must be a string.", _line_of_key(source, "title")))
+    localization = data.get(
+        "localization",
+        {"default_locale": "en", "locales": {"en": "English"}},
+    )
+    if not fragment:
+        if not isinstance(localization, dict):
+            diagnostics.append(Diagnostic("error", "localization must be a mapping.", _line_of_key(source, "localization")))
+            localization = {"default_locale": "en", "locales": {"en": "English"}}
+        diagnostics.extend(_mapping_key_diagnostics(
+            localization, {"default_locale", "locales"}, source,
+            _line_of_key(source, "localization"), "localization",
+        ))
+        locale_names = localization.get("locales", {})
+        if not isinstance(locale_names, dict) or not locale_names:
+            diagnostics.append(Diagnostic("error", "localization.locales must map locale IDs to display names.", _line_of_key(source, "locales", _line_of_key(source, "localization"))))
+            locale_names = {"en": "English"}
+        else:
+            for locale_id, display_name in locale_names.items():
+                if not isinstance(locale_id, str) or re.fullmatch(r"[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*", locale_id) is None:
+                    diagnostics.append(Diagnostic("error", f"Invalid locale ID {locale_id!r}; use a BCP-47 style ID such as 'en' or 'pt-BR'.", _line_of_key(source, locale_id, _line_of_key(source, "locales"))))
+                if not isinstance(display_name, str) or not display_name.strip():
+                    diagnostics.append(Diagnostic("error", f"Display name for locale {locale_id!r} must be a non-empty string.", _line_of_key(source, locale_id, _line_of_key(source, "locales"))))
+        default_locale = localization.get("default_locale", "en")
+        if not isinstance(default_locale, str) or default_locale not in locale_names:
+            diagnostics.append(Diagnostic("error", "localization.default_locale must name one of localization.locales.", _line_of_key(source, "default_locale", _line_of_key(source, "localization"))))
+            default_locale = next(iter(locale_names), "en")
+    else:
+        locale_names = {"en": "English"}
+        default_locale = "en"
+
+    def validate_localized_text(value, field, line, required=False):
+        if isinstance(value, str):
+            if required and not value:
+                diagnostics.append(Diagnostic("error", f"{field} must be a non-empty string.", line))
+            return
+        if not isinstance(value, dict):
+            diagnostics.append(Diagnostic("error", f"{field} must be a string or locale-to-string mapping.", line))
+            return
+        if default_locale not in value:
+            diagnostics.append(Diagnostic("error", f"{field} must include the default locale '{default_locale}'.", line))
+        for locale_id, translated in value.items():
+            if locale_id not in locale_names:
+                diagnostics.append(Diagnostic("error", f"{field} uses undeclared locale '{locale_id}'.", _line_of_key(source, locale_id, line)))
+            if not isinstance(translated, str) or (required and not translated):
+                diagnostics.append(Diagnostic("error", f"{field}.{locale_id} must be a non-empty string.", _line_of_key(source, locale_id, line)))
+        missing = set(locale_names) - set(value)
+        if missing:
+            diagnostics.append(Diagnostic("warning", f"{field} is missing translations for {', '.join(sorted(missing))}; the default locale will be used.", line))
     variables = data.get("variables", {})
     if not isinstance(variables, dict):
         diagnostics.append(Diagnostic("error", "'variables' must be a mapping of names to scalar starting values.", _line_of_key(source, "variables")))
@@ -746,9 +880,11 @@ def analyze_story(
             diagnostics.append(Diagnostic("error", f"dialogues.{dialogue_id} must be a mapping.", line))
             continue
         diagnostics.extend(_mapping_key_diagnostics(dialogue, DIALOGUE_KEYS, source, line, f"dialogues.{dialogue_id}"))
-        for required in ("speaker", "text"):
-            if not isinstance(dialogue.get(required), str):
-                diagnostics.append(Diagnostic("error", f"dialogues.{dialogue_id}.{required} must be a string.", _line_of_key(source, required, line)))
+        if not isinstance(dialogue.get("speaker"), str) or not dialogue.get("speaker"):
+            diagnostics.append(Diagnostic("error", f"dialogues.{dialogue_id}.speaker must be a non-empty string.", _line_of_key(source, "speaker", line)))
+        validate_localized_text(dialogue.get("text"), f"dialogues.{dialogue_id}.text", _line_of_key(source, "text", line), required=True)
+        if "speaker_name" in dialogue:
+            validate_localized_text(dialogue.get("speaker_name"), f"dialogues.{dialogue_id}.speaker_name", _line_of_key(source, "speaker_name", line), required=True)
         chapter = dialogue.get("chapter")
         if "chapter" in dialogue and not isinstance(chapter, str):
             diagnostics.append(Diagnostic("error", f"dialogues.{dialogue_id}.chapter must be a string.", _line_of_key(source, "chapter", line)))
@@ -772,6 +908,24 @@ def analyze_story(
                 diagnostics.append(Diagnostic("error", f"dialogues.{dialogue_id}.next must be a dialogue ID.", _line_of_key(source, "next", line)))
             else:
                 targets.append((next_id, _line_of_key(source, "next", line), f"dialogues.{dialogue_id}.next"))
+        call_id = dialogue.get("call")
+        if call_id is not None:
+            if not isinstance(call_id, str):
+                diagnostics.append(Diagnostic("error", f"dialogues.{dialogue_id}.call must be a dialogue ID.", _line_of_key(source, "call", line)))
+            else:
+                targets.append((call_id, _line_of_key(source, "call", line), f"dialogues.{dialogue_id}.call"))
+            if not isinstance(next_id, str):
+                diagnostics.append(Diagnostic("error", f"dialogues.{dialogue_id}.call requires a 'next' dialogue as its return continuation.", _line_of_key(source, "call", line)))
+            if "options" in dialogue:
+                diagnostics.append(Diagnostic("error", f"dialogues.{dialogue_id}.call cannot be combined with 'options'.", line))
+        return_value = dialogue.get("return", False)
+        if not isinstance(return_value, bool):
+            diagnostics.append(Diagnostic("error", f"dialogues.{dialogue_id}.return must be true or false.", _line_of_key(source, "return", line)))
+        elif return_value:
+            if call_id is not None:
+                diagnostics.append(Diagnostic("error", f"dialogues.{dialogue_id} cannot both call and return.", line))
+            if next_id is not None or "options" in dialogue:
+                diagnostics.append(Diagnostic("error", f"dialogues.{dialogue_id}.return cannot be combined with 'next' or 'options'.", line))
         options = dialogue.get("options", [])
         if not isinstance(options, list):
             diagnostics.append(Diagnostic("error", f"dialogues.{dialogue_id}.options must be a list.", _line_of_key(source, "options", line)))
@@ -784,8 +938,7 @@ def analyze_story(
                 continue
             option_line = _line_of_key(source, "label", _line_of_key(source, "options", line))
             diagnostics.extend(_mapping_key_diagnostics(option, OPTION_KEYS, source, option_line, f"dialogues.{dialogue_id}.options"))
-            if not isinstance(option.get("label"), str) or not option.get("label"):
-                diagnostics.append(Diagnostic("error", "Choice label must be a non-empty string.", _line_of_key(source, "label", option_line)))
+            validate_localized_text(option.get("label"), f"dialogues.{dialogue_id}.options.label", _line_of_key(source, "label", option_line), required=True)
             target = option.get("target")
             if not isinstance(target, str):
                 diagnostics.append(Diagnostic("error", "Choice target must be a dialogue ID.", _line_of_key(source, "target", option_line)))
@@ -793,6 +946,32 @@ def analyze_story(
                 targets.append((target, _line_of_key(source, "target", option_line), f"dialogues.{dialogue_id}.options"))
             if "condition" in option:
                 diagnostics.extend(_validate_condition(option["condition"], variables, source, option_line, f"dialogues.{dialogue_id}.options.condition"))
+
+        choice_timeout = dialogue.get("choice_timeout")
+        timeout_target = dialogue.get("choice_timeout_target")
+        if choice_timeout is not None:
+            try:
+                timeout_value = float(choice_timeout)
+            except (TypeError, ValueError, OverflowError):
+                timeout_value = math.nan
+            if (
+                not isinstance(choice_timeout, (int, float))
+                or isinstance(choice_timeout, bool)
+                or not math.isfinite(timeout_value)
+                or not 0.1 <= timeout_value <= 3600
+            ):
+                diagnostics.append(Diagnostic("error", "choice_timeout must be from 0.1 to 3600 seconds.", _line_of_key(source, "choice_timeout", line)))
+            if not options:
+                diagnostics.append(Diagnostic("error", "choice_timeout requires at least one choice option.", _line_of_key(source, "choice_timeout", line)))
+        if timeout_target is not None:
+            option_targets = {
+                option.get("target") for option in options
+                if isinstance(option, dict) and isinstance(option.get("target"), str)
+            }
+            if not isinstance(timeout_target, str) or timeout_target not in option_targets:
+                diagnostics.append(Diagnostic("error", "choice_timeout_target must match one of this dialogue's option targets.", _line_of_key(source, "choice_timeout_target", line)))
+            if choice_timeout is None:
+                diagnostics.append(Diagnostic("error", "choice_timeout_target requires choice_timeout.", _line_of_key(source, "choice_timeout_target", line)))
 
         actions = dialogue.get("actions", [])
         if not isinstance(actions, list):
@@ -900,6 +1079,25 @@ def _validate_action(action, variables, catalog, source, dialogue_line, dialogue
     for key in required:
         if key not in action:
             result.append(Diagnostic("error", f"Action '{kind}' requires '{key}'.", action_line))
+    if kind in {"show_character", "hide_character"}:
+        transition = action.get("transition", "none")
+        if not isinstance(transition, str) or transition not in {"none", "fade", "slide"}:
+            result.append(Diagnostic("error", "Character transition must be 'none', 'fade', or 'slide'.", _line_of_key(source, "transition", action_line)))
+        duration = action.get("duration", 0.35)
+        try:
+            duration_value = float(duration)
+        except (TypeError, ValueError, OverflowError):
+            duration_value = math.nan
+        if (
+            not isinstance(duration, (int, float))
+            or isinstance(duration, bool)
+            or not math.isfinite(duration_value)
+            or not 0 < duration_value <= 30
+        ):
+            result.append(Diagnostic("error", "Character transition duration must be greater than 0 and at most 30 seconds.", _line_of_key(source, "duration", action_line)))
+        easing = action.get("easing", "ease_out")
+        if not isinstance(easing, str) or easing not in {"linear", "ease_in", "ease_out", "ease_in_out"}:
+            result.append(Diagnostic("error", "Character transition easing must be linear, ease_in, ease_out, or ease_in_out.", _line_of_key(source, "easing", action_line)))
     if kind in {"set", "add", "subtract"}:
         variable = action.get("var")
         value = action.get("value")
@@ -938,6 +1136,27 @@ def _validate_action(action, variables, catalog, source, dialogue_line, dialogue
             result.append(Diagnostic("error", f"Action '{kind}' requires a non-empty '{field}'.", _line_of_key(source, field, action_line)))
         elif not catalog.asset_exists(category, asset_name):
             result.append(Diagnostic("error", f"Missing {category} asset '{asset_name}'. Check project assets and built-in engine assets.", _line_of_key(source, field, action_line)))
+    elif kind in {"unlock_cg", "unlock_music", "achievement", "complete_route"}:
+        identifier = action.get("id")
+        if not isinstance(identifier, str) or not identifier.strip():
+            result.append(Diagnostic("error", f"Action '{kind}' requires a non-empty stable id.", _line_of_key(source, "id", action_line)))
+        title_field = "label" if kind in {"unlock_cg", "unlock_music"} else "title"
+        if title_field in action and (not isinstance(action[title_field], str) or not action[title_field].strip()):
+            result.append(Diagnostic("error", f"Action '{kind}' {title_field} must be a non-empty string.", _line_of_key(source, title_field, action_line)))
+        if kind == "unlock_cg":
+            image_name = action.get("image")
+            if not isinstance(image_name, str) or not image_name.strip():
+                result.append(Diagnostic("error", "Action 'unlock_cg' requires an image asset path.", _line_of_key(source, "image", action_line)))
+            elif not catalog.asset_exists("image", image_name):
+                result.append(Diagnostic("error", f"Missing image asset '{image_name}'.", _line_of_key(source, "image", action_line)))
+        elif kind == "unlock_music":
+            track_name = action.get("track")
+            if not isinstance(track_name, str) or not track_name.strip():
+                result.append(Diagnostic("error", "Action 'unlock_music' requires a music track path.", _line_of_key(source, "track", action_line)))
+            elif not catalog.asset_exists("music", track_name):
+                result.append(Diagnostic("error", f"Missing music asset '{track_name}'.", _line_of_key(source, "track", action_line)))
+        if "description" in action and (not isinstance(action["description"], str) or not action["description"].strip()):
+            result.append(Diagnostic("error", "Action 'achievement' description must be a non-empty string.", _line_of_key(source, "description", action_line)))
     elif kind in {"show_character", "hide_character"}:
         name = action.get("name")
         character = catalog.find_character(name)
@@ -1054,6 +1273,12 @@ def _validate_project_object(values, raw, source, diagnostics):
                 check_unknown(child, schema[key], path + "." + str(key), _line_of_key(source, key, line))
 
     diagnostics.extend(_mapping_key_diagnostics(raw, set(DEFAULT_PROJECT), source, 1, "project.json"))
+    if "USER" in raw and not isinstance(raw["USER"], str):
+        diagnostics.append(Diagnostic(
+            "error",
+            "USER must be a string; use 'admin' for workspace-source Test Play or 'user' for templates.",
+            _line_of_key(source, "USER"),
+        ))
     for key, child in raw.items():
         if (
             key not in {"theme", "characters"}
@@ -1115,7 +1340,7 @@ def _validate_project_object(values, raw, source, diagnostics):
             _line_of_key(source, "dialogue_buttons"),
         ))
     else:
-        for button_name in ("back", "history", "quick_save", "quick_load"):
+        for button_name in ("back", "history", "quick_save", "quick_load", "auto", "mute"):
             button = dialogue_buttons.get(button_name)
             if button is None:
                 continue
@@ -1517,8 +1742,20 @@ def _validate_project_object(values, raw, source, diagnostics):
                     diagnostics.append(Diagnostic("error", f"Unknown setting {item.get('setting')!r}.", _line_of_key(source, "setting", item_line)))
                 if action == "adjust_setting" and setting == "fullscreen":
                     diagnostics.append(Diagnostic("warning", "Use toggle_setting for fullscreen; adjust_setting does not change it.", _line_of_key(source, "action", item_line)))
-                if action == "toggle_setting" and setting != "fullscreen":
-                    diagnostics.append(Diagnostic("warning", "toggle_setting only changes fullscreen; use adjust_setting for speed, volume, or UI size.", _line_of_key(source, "action", item_line)))
+                adjust_settings = {
+                    "type_speed", "music_volume", "sfx_volume", "ui_scale",
+                    "auto_wait", "dialogue_font_scale", "speaker_font_scale",
+                    "touch_advance_mode",
+                }
+                toggle_settings = {
+                    "fullscreen", "auto_advance", "high_contrast", "muted",
+                    "reduced_motion", "voice_enabled", "subtitles_enabled", "speech_enabled",
+                    "animated_text",
+                }
+                if action == "adjust_setting" and setting in toggle_settings:
+                    diagnostics.append(Diagnostic("warning", f"Use toggle_setting for {setting!r}; it is an on/off setting.", _line_of_key(source, "action", item_line)))
+                if action == "toggle_setting" and setting in adjust_settings:
+                    diagnostics.append(Diagnostic("warning", f"Use adjust_setting for {setting!r}; it has adjustable values.", _line_of_key(source, "action", item_line)))
 
         slot_menu = menus.get("slots")
         if not isinstance(slot_menu, dict):
@@ -1659,6 +1896,8 @@ class CodeEditor(ttk.Frame):
         self.text.bind("<ButtonRelease-1>", self._on_button_release)
         self.text.bind("<Configure>", lambda _event: self.redraw_gutter())
         self.text.bind("<Control-space>", self.show_completion)
+        self.text.bind("<Control-z>", lambda _event: self._edit_history("undo"))
+        self.text.bind("<Control-y>", lambda _event: self._edit_history("redo"))
         self.text.bind("<Tab>", self._tab_key)
         self.text.bind("<Return>", self._return_key)
         self.text.bind("<Escape>", self._escape_key)
@@ -1669,6 +1908,16 @@ class CodeEditor(ttk.Frame):
 
     def get_text(self):
         return self.text.get("1.0", "end-1c")
+
+    def _edit_history(self, operation):
+        try:
+            if operation == "undo":
+                self.text.edit_undo()
+            else:
+                self.text.edit_redo()
+        except tk.TclError:
+            self.app.set_status(f"Nothing to {operation}.")
+        return "break"
 
     def set_text(self, content: str):
         self.text.delete("1.0", "end")
@@ -1976,6 +2225,7 @@ class VNEditorApp:
         self.test_play_process = None
         self.test_play_tempdir = None
         self.test_play_poll_job = None
+        self.test_play_coverage_path = None
 
         self.root.title(f"{APP_TITLE} — {self.project_root.name}")
         self.root.geometry("1320x880")
@@ -1985,6 +2235,7 @@ class VNEditorApp:
         self.root.bind("<Control-s>", lambda _event: self.save_active())
         self.root.bind("<Control-Shift-S>", lambda _event: self.save_all())
         self.root.bind("<Control-f>", lambda _event: self.show_find())
+        self.root.bind("<Control-g>", lambda _event: self.open_story_graph())
         self.root.bind("<F5>", lambda _event: self.validate_with_engine())
         self.root.protocol("WM_DELETE_WINDOW", self.close)
 
@@ -1998,6 +2249,23 @@ class VNEditorApp:
         style.configure("Treeview", rowheight=23)
         style.configure("Treeview.Heading", font=("Segoe UI", 9, "bold"))
 
+        menu_bar = tk.Menu(self.root)
+        edit_menu = tk.Menu(menu_bar, tearoff=False)
+        edit_menu.add_command(label="Undo", accelerator="Ctrl+Z", command=lambda: self._edit_active("undo"))
+        edit_menu.add_command(label="Redo", accelerator="Ctrl+Y", command=lambda: self._edit_active("redo"))
+        menu_bar.add_cascade(label="Edit", menu=edit_menu)
+        project_menu = tk.Menu(menu_bar, tearoff=False)
+        project_menu.add_command(label="Package Asset Add-on...", command=self.package_asset_addon)
+        project_menu.add_command(label="Asset Diagnostics...", command=self.show_asset_diagnostics)
+        project_menu.add_separator()
+        project_menu.add_command(label="Export Translation Template...", command=self.export_translation_template)
+        project_menu.add_command(label="Import Translation Catalog...", command=self.import_translation_catalog)
+        project_menu.add_command(label="Translation Preview and Missing Strings...", command=self.show_translation_preview)
+        project_menu.add_separator()
+        project_menu.add_command(label="Run Playthrough Suite...", command=self.run_playthrough_suite)
+        menu_bar.add_cascade(label="Project", menu=project_menu)
+        self.root.configure(menu=menu_bar)
+
         toolbar = ttk.Frame(self.root, padding=(8, 8, 8, 4))
         toolbar.pack(side="top", fill="x")
         ttk.Button(toolbar, text="Open Project…", command=self.choose_project).pack(side="left")
@@ -2005,6 +2273,8 @@ class VNEditorApp:
         ttk.Button(toolbar, text="Save All", command=self.save_all).pack(side="left", padx=(5, 0))
         ttk.Button(toolbar, text="Validate Story (F5)", command=self.validate_with_engine).pack(side="left", padx=(18, 0))
         ttk.Button(toolbar, text="Test Play", command=self.test_play).pack(side="left", padx=(5, 0))
+        ttk.Button(toolbar, text="Test from Dialogue...", command=self.test_from_dialogue).pack(side="left", padx=(5, 0))
+        ttk.Button(toolbar, text="Story Graph", command=self.open_story_graph).pack(side="left", padx=(5, 0))
         ttk.Button(toolbar, text="Export Game…", command=self.export_game).pack(side="left", padx=(5, 0))
         ttk.Button(toolbar, text="Refresh Assets", command=self.refresh_asset_tree).pack(side="left", padx=(5, 0))
         ttk.Button(toolbar, text="Find (Ctrl+F)", command=self.show_find).pack(side="left", padx=(5, 0))
@@ -2030,6 +2300,8 @@ class VNEditorApp:
         asset_header = ttk.Frame(left)
         asset_header.pack(fill="x", pady=(0, 4))
         ttk.Label(asset_header, text="Asset hierarchy", font=("Segoe UI", 10, "bold")).pack(side="left")
+        self.add_button = ttk.Button(asset_header, text="Add", width=6, command=self.show_add_menu)
+        self.add_button.pack(side="right", padx=(5, 0))
         ttk.Button(asset_header, text="Insert", width=7, command=self.insert_selected_asset).pack(side="right")
         ttk.Label(left, text="Double-click a file to insert its reference.", foreground="#707987").pack(anchor="w", pady=(0, 5))
         tree_frame = ttk.Frame(left)
@@ -2520,6 +2792,12 @@ while ($true) {{
             label = Path(path).name
         return label + (" *" if dirty else "")
 
+    def _story_source_label(self, path):
+        try:
+            return Path(path).resolve().relative_to(self._story_data_dir().resolve()).as_posix()
+        except ValueError:
+            return Path(path).name
+
     def _sync_included_story_tabs(self):
         if not hasattr(self, "notebook") or not hasattr(self, "story_editor"):
             return
@@ -2668,6 +2946,535 @@ while ($true) {{
         self.asset_tree.tag_configure("folder", foreground="#b7c7e0")
         self.asset_tree.tag_configure("file", foreground="#d1d7df")
 
+    def package_asset_addon(self):
+        values = self._current_project_values()
+        paths = values.get("paths", {}) if isinstance(values.get("paths", {}), dict) else {}
+        assets_dir = AssetCatalog._resolve_path(paths.get("assets", "assets"), self.project_root)
+        source = filedialog.askdirectory(
+            title="Choose an add-on assets folder",
+            initialdir=assets_dir if assets_dir.is_dir() else self.project_root,
+            parent=self.root,
+        )
+        if not source:
+            return
+        source_path = Path(source)
+        default_name = re.sub(r"[^a-z0-9-]+", "-", source_path.name.casefold()).strip("-") or "asset-pack"
+        mods_folder = assets_dir / "mods"
+        output_folder = mods_folder if mods_folder.is_dir() else assets_dir if assets_dir.is_dir() else self.project_root
+        destination = filedialog.asksaveasfilename(
+            title="Save add-on in project assets/mods",
+            initialdir=output_folder,
+            initialfile=f"{source_path.name}.vnmod",
+            defaultextension=".vnmod",
+            filetypes=(("VN asset add-on", "*.vnmod"),),
+            parent=self.root,
+        )
+        if not destination:
+            return
+        try:
+            output = build_asset_package(source_path, destination, mod_id=default_name)
+        except (OSError, ValueError) as error:
+            messagebox.showerror("Add-on Packaging Failed", str(error), parent=self.root)
+            return
+        self.refresh_asset_tree()
+        try:
+            Path(output).resolve().relative_to(mods_folder.resolve())
+            install_note = "The game will load it from assets/mods when restarted."
+        except ValueError:
+            install_note = "Copy it into assets/mods to load it with this project."
+        messagebox.showinfo(
+            "Add-on Packaged",
+            f"Created {output.name}. {install_note}",
+            parent=self.root,
+        )
+
+    def _story_model_from_open_tabs(self):
+        if yaml is None:
+            raise ValueError("Install PyYAML to use localization and asset diagnostics.")
+        root_editor = self.story_editors.get(self.story_file)
+        if root_editor is None:
+            root_editor = self.story_editor
+        root_data = yaml.safe_load(root_editor.get_text())
+        if not isinstance(root_data, dict):
+            raise ValueError("The root story must be a YAML mapping.")
+        merged = dict(root_data)
+        merged_dialogues = dict(root_data.get("dialogues", {}))
+        merged_variables = dict(root_data.get("variables", {}))
+        for path, editor in self.story_editors.items():
+            if path.resolve() == self.story_file.resolve():
+                continue
+            document = yaml.safe_load(editor.get_text())
+            if not isinstance(document, dict):
+                continue
+            dialogues = document.get("dialogues", {})
+            if isinstance(dialogues, dict):
+                merged_dialogues.update(dialogues)
+            variables = document.get("variables", {})
+            if isinstance(variables, dict):
+                merged_variables.update(variables)
+        merged["dialogues"] = merged_dialogues
+        if merged_variables:
+            merged["variables"] = merged_variables
+        return merged
+
+    def _translation_ui_sources(self):
+        sources = {key: label for label, key in UI_LABEL_KEYS.items()}
+        values = self._current_project_values()
+        messages = values.get("messages", {})
+        if isinstance(messages, dict):
+            sources.update({f"message.{key}": value for key, value in messages.items() if isinstance(value, str)})
+        menus = values.get("menus", {})
+        if isinstance(menus, dict):
+            for menu_name in ("main", "pause", "settings"):
+                menu = menus.get(menu_name, {})
+                if not isinstance(menu, dict):
+                    continue
+                if isinstance(menu.get("title"), str):
+                    sources[f"project.menus.{menu_name}.title"] = menu["title"]
+                menu_items = menu.get("items", [])
+                if isinstance(menu_items, list):
+                    for index, item in enumerate(menu_items):
+                        if not isinstance(item, dict):
+                            continue
+                        if isinstance(item.get("label"), str):
+                            sources[f"project.menus.{menu_name}.items.{index}.label"] = item["label"]
+                        if isinstance(item.get("detail"), str):
+                            sources[f"project.menus.{menu_name}.items.{index}.detail"] = item["detail"]
+            slots = menus.get("slots", {})
+            if isinstance(slots, dict):
+                for key in ("title_save", "title_load", "title_copy"):
+                    if isinstance(slots.get(key), str):
+                        sources[f"project.menus.slots.{key}"] = slots[key]
+                labels = slots.get("labels", {})
+                if isinstance(labels, dict):
+                    for key, value in labels.items():
+                        if isinstance(value, str):
+                            sources[f"project.menus.slots.labels.{key}"] = value
+                    sources.setdefault("project.menus.slots.labels.slot_custom", "Slot {slot}: {name}")
+        return sources
+
+    def export_translation_template(self):
+        try:
+            story = self._story_model_from_open_tabs()
+            catalog = self._catalog()
+            localization = story.get("localization", {})
+            locales = localization.get("locales", {}) if isinstance(localization, dict) else {}
+            locale = simpledialog.askstring(
+                "Export Translation Template",
+                "Target locale ID (declare it in localization.locales first):",
+                parent=self.root,
+            )
+            if not locale:
+                return
+            if locale not in locales:
+                messagebox.showerror("Translation Template", f"Locale {locale!r} is not declared in the root story.", parent=self.root)
+                return
+            destination = filedialog.asksaveasfilename(
+                parent=self.root,
+                title="Export Translation Template",
+                initialdir=(catalog.data_dir / "locales") if (catalog.data_dir / "locales").is_dir() else catalog.data_dir,
+                initialfile=f"{locale}.template.json",
+                defaultextension=".json",
+                filetypes=(("JSON", "*.json"),),
+            )
+            if not destination:
+                return
+            ui_sources = self._translation_ui_sources()
+            template = translation_template(story, locale, ui_sources)
+            Path(destination).write_text(json.dumps(template, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            self.set_status(f"Exported translation template for {locale}.")
+        except (OSError, ValueError, yaml.YAMLError if yaml is not None else ValueError) as error:
+            messagebox.showerror("Translation Template", str(error), parent=self.root)
+
+    def import_translation_catalog(self):
+        try:
+            story = self._story_model_from_open_tabs()
+            catalog = self._catalog()
+            source = filedialog.askopenfilename(
+                parent=self.root,
+                title="Import Translation Catalog",
+                filetypes=(("JSON catalogs", "*.json"),),
+            )
+            if not source:
+                return
+            raw_catalog = json.loads(Path(source).read_text(encoding="utf-8"))
+            locale = raw_catalog.get("locale") if isinstance(raw_catalog, dict) else None
+            locales = story.get("localization", {}).get("locales", {})
+            if not isinstance(locale, str) or re.fullmatch(r"[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*", locale) is None or locale not in locales:
+                messagebox.showerror("Translation Catalog", f"Locale {locale!r} is not declared in the root story.", parent=self.root)
+                return
+            data_root = catalog.data_dir.resolve()
+            locale_dir = (data_root / "locales").resolve()
+            locale_dir.relative_to(data_root)
+            locale_dir.mkdir(parents=True, exist_ok=True)
+            destination = (locale_dir / f"{locale}.json").resolve()
+            destination.relative_to(locale_dir)
+            if destination.exists() and not messagebox.askyesno(
+                "Replace Translation Catalog",
+                f"Replace the existing catalog at {destination}?",
+                parent=self.root,
+            ):
+                return
+            write_catalog(destination, raw_catalog, locale)
+            self.set_status(f"Imported {locale} catalog to data/locales/{locale}.json.")
+            self.analyze_document("story")
+        except (OSError, ValueError, json.JSONDecodeError) as error:
+            messagebox.showerror("Translation Catalog", str(error), parent=self.root)
+
+    def show_translation_preview(self):
+        try:
+            story = self._story_model_from_open_tabs()
+            catalog = self._catalog()
+            locales = story.get("localization", {}).get("locales", {})
+            locale = simpledialog.askstring(
+                "Translation Preview",
+                "Locale ID to compare:",
+                initialvalue=next((key for key in locales if key != story.get("localization", {}).get("default_locale")), story.get("localization", {}).get("default_locale", "en")),
+                parent=self.root,
+            )
+            if not locale:
+                return
+            if locale not in locales:
+                raise ValueError(f"Locale {locale!r} is not declared in the root story.")
+            path = catalog.data_dir / "locales" / f"{locale}.json"
+            loaded = load_catalog(path, locale) if path.is_file() else {"strings": {}, "ui": {}}
+            rows = catalog_report(story, locale, loaded)
+            ui_sources = self._translation_ui_sources()
+            for key, source in ui_sources.items():
+                value = loaded.get("ui", {}).get(key, "")
+                rows.append({
+                    "key": f"ui.{key}", "source": source, "translation": value,
+                    "missing": not bool(value.strip()), "source_chars": len(source),
+                    "translation_chars": len(value),
+                    "expansion": round(len(value) / max(1, len(source)), 2),
+                })
+            missing = sum(row["missing"] for row in rows)
+            rtl = locale.split("-", 1)[0].casefold() in {"ar", "fa", "he", "ur", "ps", "sd", "ug", "yi"}
+            window = tk.Toplevel(self.root)
+            window.title(f"Translation Preview — {locale}")
+            window.geometry("980x680")
+            toolbar = ttk.Frame(window, padding=8)
+            toolbar.pack(fill="x")
+            direction = "right-aligned RTL preview" if rtl else "left-aligned LTR preview"
+            ttk.Label(toolbar, text=f"{missing} missing of {len(rows)} strings · {direction}").pack(side="left")
+            content = tk.Text(window, wrap="word", font=("Segoe UI", 10), padx=12, pady=10)
+            scroll = ttk.Scrollbar(window, orient="vertical", command=content.yview)
+            content.configure(yscrollcommand=scroll.set)
+            content.pack(side="left", fill="both", expand=True)
+            scroll.pack(side="right", fill="y")
+            content.tag_configure("rtl", justify="right")
+            content.tag_configure("ltr", justify="left")
+            for row in rows:
+                status = "MISSING" if row["missing"] else f"{row['expansion']:.2f}× length"
+                content.insert("end", f"{status} · {row['key']}\n", "rtl" if rtl else "ltr")
+                content.insert("end", f"Source ({row['source_chars']} chars): {row['source']}\n", "rtl" if rtl else "ltr")
+                content.insert("end", f"Preview ({row['translation_chars']} chars): {row['translation']}\n\n", "rtl" if rtl else "ltr")
+            content.configure(state="disabled")
+        except (OSError, ValueError, yaml.YAMLError if yaml is not None else ValueError) as error:
+            messagebox.showerror("Translation Preview", str(error), parent=self.root)
+
+    def show_asset_diagnostics(self):
+        try:
+            story = self._story_model_from_open_tabs()
+            catalog = self._catalog()
+            report = self._build_asset_diagnostics(story, catalog)
+            window = tk.Toplevel(self.root)
+            window.title("Asset Diagnostics")
+            window.geometry("900x620")
+            content = tk.Text(window, wrap="word", font=("Consolas", 10), padx=12, pady=10)
+            scroll = ttk.Scrollbar(window, orient="vertical", command=content.yview)
+            content.configure(yscrollcommand=scroll.set)
+            content.pack(side="left", fill="both", expand=True)
+            scroll.pack(side="right", fill="y")
+            content.insert("1.0", "\n".join(report))
+            content.configure(state="disabled")
+        except (OSError, ValueError, yaml.YAMLError if yaml is not None else ValueError) as error:
+            messagebox.showerror("Asset Diagnostics", str(error), parent=self.root)
+
+    def run_playthrough_suite(self):
+        suite_path = filedialog.askopenfilename(
+            parent=self.root,
+            title="Run Playthrough Suite",
+            initialdir=self.project_root,
+            filetypes=(("VN Playthrough Suites", "*.vnplay.json"), ("JSON files", "*.json")),
+        )
+        if not suite_path:
+            return
+        if not self.save_all():
+            return
+        try:
+            from engine.playthrough import run_suite
+
+            results = run_suite(self.project_root, Path(suite_path))
+            passed = sum(result["passed"] for result in results)
+            window = tk.Toplevel(self.root)
+            window.title(f"Playthrough Results — {passed}/{len(results)} passed")
+            window.geometry("850x540")
+            content = tk.Text(window, wrap="word", font=("Consolas", 10), padx=12, pady=10)
+            scroll = ttk.Scrollbar(window, orient="vertical", command=content.yview)
+            content.configure(yscrollcommand=scroll.set)
+            content.pack(side="left", fill="both", expand=True)
+            scroll.pack(side="right", fill="y")
+            for result in results:
+                label = "PASS" if result["passed"] else "FAIL"
+                content.insert("end", f"{label}: {result['name']}\n")
+                content.insert("end", f"  {result.get('error', result.get('outcome', {}))}\n\n")
+            content.configure(state="disabled")
+        except Exception as error:
+            messagebox.showerror("Playthrough Suite", str(error), parent=self.root)
+
+    def _build_asset_diagnostics(self, story, catalog):
+        notes = []
+        references = {"images": set(), "sounds": set(), "music": set(), "fonts": set(), "characters": set()}
+
+        def add_reference(category, value):
+            if isinstance(value, str) and value.strip():
+                references[category].add(value.replace("\\", "/").casefold())
+
+        for dialogue in story.get("dialogues", {}).values():
+            if not isinstance(dialogue, dict):
+                continue
+            add_reference("sounds", dialogue.get("voice"))
+            text_value = dialogue.get("text", "")
+            if isinstance(text_value, dict):
+                text_value = " ".join(value for value in text_value.values() if isinstance(value, str))
+            if isinstance(text_value, str):
+                for match in re.findall(r"%([^%]+)%", text_value):
+                    add_reference("images", match)
+                for match in re.findall(r"§([^§]+)§", text_value):
+                    add_reference("sounds", match)
+            for action in dialogue.get("actions", []):
+                if not isinstance(action, dict):
+                    continue
+                action_type = action.get("type")
+                if action_type in {"background", "unlock_cg"}:
+                    add_reference("images", action.get("image"))
+                elif action_type in {"music", "unlock_music"}:
+                    add_reference("music", action.get("track"))
+                elif action_type == "sound":
+                    add_reference("sounds", action.get("name"))
+                elif action_type in {"show_character", "animate_character", "hide_character"}:
+                    add_reference("characters", action.get("name"))
+        for character in story.get("character_defaults", {}):
+            add_reference("characters", character)
+        for dialogue in story.get("dialogues", {}).values():
+            if isinstance(dialogue, dict):
+                add_reference("characters", dialogue.get("speaker"))
+                add_reference("characters", dialogue.get("active_character"))
+
+        project_values = self._current_project_values()
+        for key in ("icon",):
+            add_reference("images", project_values.get(key))
+        intro = project_values.get("intro", {})
+        if isinstance(intro, dict):
+            for key in ("credit_image", "warning_image", "headphones_image"):
+                add_reference("images", intro.get(key))
+        theme = project_values.get("theme", {})
+        if isinstance(theme, dict):
+            textbox = theme.get("textbox", {})
+            if isinstance(textbox, dict):
+                add_reference("images", textbox.get("background"))
+            menu = theme.get("menu", {})
+            if isinstance(menu, dict):
+                add_reference("images", menu.get("background"))
+                for screen in menu.get("screens", {}).values() if isinstance(menu.get("screens", {}), dict) else []:
+                    if isinstance(screen, dict):
+                        add_reference("images", screen.get("background"))
+            for font_group in ("fonts", "game_fonts"):
+                values = theme.get(font_group, {})
+                if isinstance(values, dict):
+                    for font_name in values.values():
+                        add_reference("fonts", font_name)
+            for sound in theme.get("sounds", {}).values() if isinstance(theme.get("sounds", {}), dict) else []:
+                add_reference("sounds", sound)
+            choice_buttons = theme.get("choice_buttons", {})
+            if isinstance(choice_buttons, dict):
+                for key in ("normal", "hovered"):
+                    add_reference("images", choice_buttons.get(key))
+            pause_button = theme.get("pause_button", {})
+            if isinstance(pause_button, dict):
+                add_reference("images", pause_button.get("image"))
+
+        files_by_category = {category: [] for category in references}
+        for category in files_by_category:
+            root = catalog.assets_dir / category
+            if root.is_dir():
+                try:
+                    files_by_category[category] = sorted(
+                        (path for path in root.rglob("*") if path.is_file() and not path.is_symlink()),
+                        key=lambda path: path.as_posix().casefold(),
+                    )
+                except OSError as error:
+                    notes.append(f"Could not scan {root}: {error}")
+        duplicates = []
+        unused = []
+        for category, paths in files_by_category.items():
+            names = {}
+            for path in paths:
+                relative = path.relative_to(catalog.assets_dir / category).as_posix()
+                normalized = relative.casefold()
+                stem_key = Path(relative).stem.casefold()
+                names.setdefault(stem_key, []).append(path)
+                try:
+                    file_size = path.stat().st_size
+                except OSError as error:
+                    notes.append(f"Could not inspect asset {category}/{relative}: {error}")
+                    continue
+                if file_size > 10 * 1024 * 1024:
+                    notes.append(f"Large asset ({file_size / (1024 * 1024):.1f} MB): {category}/{relative}")
+                if category == "images":
+                    dimensions = self._read_image_dimensions(path)
+                    if dimensions and max(dimensions) > 4096:
+                        notes.append(f"Large image dimensions ({dimensions[0]}×{dimensions[1]}): images/{relative}")
+                candidates = {normalized, stem_key, Path(relative).name.casefold(), Path(relative).stem.casefold()}
+                if category == "characters":
+                    is_used = Path(relative).parts[0].casefold() in references[category]
+                else:
+                    is_used = any(
+                        ref in candidates
+                        or ref.endswith("/" + normalized)
+                        or ref.endswith("/" + Path(relative).name.casefold())
+                        for ref in references[category]
+                    )
+                if not is_used:
+                    unused.append(f"{category}/{relative}")
+            for stem, matching in names.items():
+                if len(matching) > 1:
+                    duplicates.append(f"{category}/{stem}: " + ", ".join(path.name for path in matching))
+
+        mod_members = {}
+        mod_asset_details = []
+        mods_dir = catalog.assets_dir / "mods"
+        if mods_dir.is_dir():
+            for package_path in sorted(mods_dir.glob("*.vnmod"), key=lambda path: path.name.casefold()):
+                try:
+                    with ZipFile(package_path) as archive:
+                        manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
+                        if not isinstance(manifest, dict) or manifest.get("format_version") != 1:
+                            notes.append(f"Invalid add-on manifest: {package_path.name}")
+                            continue
+                        for info in archive.infolist():
+                            if info.is_dir():
+                                continue
+                            member = PurePosixPath(info.filename.replace("\\", "/"))
+                            if member.is_absolute() or ".." in member.parts:
+                                notes.append(f"Unsafe package member ignored: {package_path.name}:{info.filename}")
+                                continue
+                            if len(member.parts) >= 3 and member.parts[0] == "assets" and member.parts[1] in files_by_category:
+                                category = member.parts[1]
+                                relative_name = "/".join(member.parts[2:])
+                                asset_name = f"{category}/{relative_name}".casefold()
+                                mod_members.setdefault(asset_name, []).append(package_path.name)
+                                mod_asset_details.append({
+                                    "category": category,
+                                    "relative": relative_name,
+                                    "package": package_path.name,
+                                    "size": info.file_size,
+                                })
+                                if info.file_size > 10 * 1024 * 1024:
+                                    notes.append(f"Large packaged asset ({info.file_size / (1024 * 1024):.1f} MB): {package_path.name}:{asset_name}")
+                                if category == "images":
+                                    try:
+                                        with archive.open(info) as stream:
+                                            header = stream.read(30)
+                                        dimensions = self._read_image_dimensions_from_header(header)
+                                        if dimensions is None and header[:2] == b"\xff\xd8":
+                                            with archive.open(info) as stream:
+                                                stream.seek(2)
+                                                dimensions = self._read_jpeg_dimensions(stream)
+                                        if dimensions and max(dimensions) > 4096:
+                                            notes.append(f"Large packaged image ({dimensions[0]}×{dimensions[1]}): {package_path.name}:{asset_name}")
+                                    except (OSError, struct.error):
+                                        pass
+                except (OSError, ValueError, KeyError, UnicodeDecodeError, BadZipFile) as error:
+                    notes.append(f"Could not load add-on {package_path.name}: {error}")
+        conflicts = [f"{asset}: {', '.join(packages)}" for asset, packages in mod_members.items() if len(packages) > 1]
+        for asset, packages in mod_members.items():
+            if (catalog.assets_dir / asset).is_file():
+                conflicts.append(f"{asset}: project asset wins over {', '.join(packages)}")
+        unused_addon_assets = []
+        for item in mod_asset_details:
+            relative = item["relative"]
+            category = item["category"]
+            normalized = relative.casefold()
+            stem_key = PurePosixPath(relative).with_suffix("").as_posix().casefold()
+            candidates = {normalized, stem_key, PurePosixPath(relative).name.casefold(), PurePosixPath(relative).stem.casefold()}
+            if category == "characters":
+                used = PurePosixPath(relative).parts[0].casefold() in references[category]
+            else:
+                used = any(ref in candidates or ref.endswith("/" + normalized) for ref in references[category])
+            if not used:
+                unused_addon_assets.append(f"{item['package']}:{category}/{relative}")
+        counts = sum(len(items) for items in files_by_category.values())
+        report = [f"Scanned {counts} project asset files.", ""]
+        all_unused = unused + unused_addon_assets
+        report.append("UNUSED ASSETS" if all_unused else "UNUSED ASSETS: none detected")
+        report.extend(f"  {item}" for item in all_unused)
+        report.extend(["", "DUPLICATE ASSET NAMES" if duplicates else "DUPLICATE ASSET NAMES: none detected"])
+        report.extend(f"  {item}" for item in duplicates)
+        report.extend(["", "MOD / ASSET CONFLICTS" if conflicts else "MOD / ASSET CONFLICTS: none detected"])
+        report.extend(f"  {item}" for item in conflicts)
+        report.extend(["", "SIZE AND LOAD DIAGNOSTICS" if notes else "SIZE AND LOAD DIAGNOSTICS: none detected"])
+        report.extend(f"  {item}" for item in notes)
+        report.append("\nUnused checks use story dialogue, choice actions, and character IDs; dynamic asset names may need manual review.")
+        return report
+
+    def _read_image_dimensions(self, path):
+        try:
+            with Path(path).open("rb") as stream:
+                header = stream.read(30)
+                if header[:2] == b"\xff\xd8":
+                    stream.seek(2)
+                    return self._read_jpeg_dimensions(stream)
+                return self._read_image_dimensions_from_header(header)
+        except (OSError, struct.error, OverflowError, ValueError):
+            return None
+
+    @staticmethod
+    def _read_jpeg_dimensions(stream):
+        while True:
+            prefix = stream.read(1)
+            if not prefix:
+                return None
+            if prefix != b"\xff":
+                continue
+            marker = stream.read(1)
+            while marker == b"\xff":
+                marker = stream.read(1)
+            if not marker:
+                return None
+            value = marker[0]
+            if value in {0xD8, 0xD9, 0x01} or 0xD0 <= value <= 0xD7:
+                continue
+            length_data = stream.read(2)
+            if len(length_data) != 2:
+                return None
+            length = int.from_bytes(length_data, "big")
+            if length < 2:
+                return None
+            if value in {0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF}:
+                frame = stream.read(5)
+                if len(frame) != 5:
+                    return None
+                height, width = struct.unpack(">HH", frame[1:5])
+                return width, height
+            stream.seek(length - 2, os.SEEK_CUR)
+
+    @staticmethod
+    def _read_image_dimensions_from_header(header):
+        if header.startswith(b"\x89PNG\r\n\x1a\n") and len(header) >= 24:
+            return struct.unpack(">II", header[16:24])
+        if header[:6] in {b"GIF87a", b"GIF89a"} and len(header) >= 10:
+            return struct.unpack("<HH", header[6:10])
+        if header.startswith(b"BM") and len(header) >= 26:
+            width, height = struct.unpack("<ii", header[18:26])
+            return abs(width), abs(height)
+        if header[:4] == b"RIFF" and header[8:12] == b"WEBP" and header[12:16] == b"VP8X" and len(header) >= 30:
+            width = 1 + int.from_bytes(header[24:27], "little")
+            height = 1 + int.from_bytes(header[27:30], "little")
+            return width, height
+        return None
+
     def _populate_builtin_tree(self, parent):
         static = {
             "fonts": sorted(BUILTIN_ASSETS["font"]),
@@ -2735,6 +3542,341 @@ while ($true) {{
         editor.text.focus_set()
         self.set_status(f"Inserted asset reference: {reference}")
 
+    def show_add_menu(self):
+        menu = tk.Menu(self.root, tearoff=0)
+        menu.add_command(label="Dialogue", command=self._add_dialogue_block)
+        menu.add_command(label="Dialogue Text", command=self._add_dialogue_text)
+        menu.add_command(label="Choice Option", command=self._add_choice_option)
+        menu.add_separator()
+        menu.add_command(label="Story Variable", command=self._add_story_variable)
+        menu.add_command(label="Input Action (with variable)", command=self._add_input_action)
+        try:
+            menu.tk_popup(self.add_button.winfo_rootx(), self.add_button.winfo_rooty() + self.add_button.winfo_height())
+        finally:
+            menu.grab_release()
+
+    def _active_story_editor(self):
+        editor = self.active_editor()
+        if editor is None or editor.document_kind != "story":
+            self.set_status("Select a story YAML tab before using Add.")
+            return None
+        return editor
+
+    @staticmethod
+    def _insert_yaml_lines(editor, line_index, lines):
+        text_widget = editor.text
+        current = editor.get_text()
+        existing_lines = current.splitlines()
+        insertion = "\n".join(lines) + "\n"
+        if line_index < len(existing_lines):
+            start_index = f"{line_index + 1}.0"
+        else:
+            prefix = "\n" if current and not current.endswith("\n") else ""
+            start_index = "end-1c"
+            insertion = prefix + "\n" + insertion
+        text_widget.mark_set("insert", start_index)
+        text_widget.insert("insert", insertion)
+        text_widget.focus_set()
+        text_widget.see("insert")
+
+    def _dialogue_context_at_cursor(self, editor):
+        lines = editor.get_text().splitlines()
+        cursor_line = int(editor.text.index("insert").split(".")[0]) - 1
+        section_start = None
+        section_indent = 0
+        for index in range(min(cursor_line, len(lines) - 1), -1, -1):
+            match = re.match(r"^(\s*)dialogues\s*:\s*(?:#.*)?$", lines[index])
+            if match:
+                section_start = index
+                section_indent = len(match.group(1))
+                break
+        if section_start is None:
+            return None
+        dialogue_indent = section_indent + 2
+        header_pattern = re.compile(rf"^ {{{dialogue_indent}}}([\w-]+)\s*:\s*(?:#.*)?$")
+        dialogue_start = None
+        dialogue_id = None
+        for index in range(section_start + 1, min(cursor_line, len(lines) - 1) + 1):
+            match = header_pattern.match(lines[index])
+            if match:
+                dialogue_start = index
+                dialogue_id = match.group(1)
+        if dialogue_start is None:
+            return None
+        dialogue_end = len(lines)
+        for index in range(dialogue_start + 1, len(lines)):
+            line = lines[index]
+            if header_pattern.match(line):
+                dialogue_end = index
+                break
+            if line.strip() and len(line) - len(line.lstrip()) <= section_indent:
+                dialogue_end = index
+                break
+        return {
+            "id": dialogue_id,
+            "start": dialogue_start,
+            "end": dialogue_end,
+            "indent": dialogue_indent,
+            "section_start": section_start,
+            "section_indent": section_indent,
+            "lines": lines,
+        }
+
+    def _story_section_end(self, editor, section_name):
+        lines = editor.get_text().splitlines()
+        section_start = next(
+            (
+                index for index, line in enumerate(lines)
+                if re.match(rf"^{re.escape(section_name)}\s*:", line)
+            ),
+            None,
+        )
+        if section_start is None:
+            return None, None, lines
+        section_end = len(lines)
+        for index in range(section_start + 1, len(lines)):
+            if lines[index].strip() and not lines[index][0].isspace() and re.match(r"^[\w-]+\s*:", lines[index]):
+                section_end = index
+                break
+        return section_start, section_end, lines
+
+    @staticmethod
+    def _unique_story_name(base, names):
+        if base not in names:
+            return base
+        suffix = 2
+        while f"{base}_{suffix}" in names:
+            suffix += 1
+        return f"{base}_{suffix}"
+
+    def _add_dialogue_block(self):
+        editor = self._active_story_editor()
+        if editor is None:
+            return
+        section_start, section_end, lines = self._story_section_end(editor, "dialogues")
+        if section_start is None:
+            self.set_status("Add a top-level 'dialogues:' section first.")
+            return
+        _variables, dialogue_ids = self._story_context()
+        dialogue_id = self._unique_story_name("new_dialogue", dialogue_ids)
+        indent_match = re.match(r"^(\s*)dialogues\s*:", lines[section_start])
+        node_indent = len(indent_match.group(1)) + 2
+        field_indent = node_indent + 2
+        self._insert_yaml_lines(
+            editor,
+            section_end,
+            [
+                " " * node_indent + f"{dialogue_id}:",
+                " " * field_indent + "speaker: Narrator",
+                " " * field_indent + 'text: "Write dialogue here."',
+            ],
+        )
+        self.set_status(f"Added dialogue '{dialogue_id}'. Add a link or choice to make it reachable.")
+
+    def _add_dialogue_text(self):
+        editor = self._active_story_editor()
+        if editor is None:
+            return
+        context = self._dialogue_context_at_cursor(editor)
+        if context is None:
+            self.set_status("Place the cursor inside a dialogue before adding its text field.")
+            return
+        field_indent = context["indent"] + 2
+        text_field = re.compile(rf"^ {{{field_indent}}}text\s*:")
+        text_line = next(
+            (index for index in range(context["start"] + 1, context["end"])
+             if text_field.match(context["lines"][index])),
+            None,
+        )
+        replacement = "Write dialogue here."
+        if text_line is None:
+            self._insert_yaml_lines(
+                editor,
+                context["end"],
+                [" " * field_indent + f"text: {json.dumps(replacement)}"],
+            )
+        else:
+            line = context["lines"][text_line]
+            colon = line.find(":")
+            text_end = context["end"]
+            for index in range(text_line + 1, context["end"]):
+                child_line = context["lines"][index]
+                if child_line.strip() and len(child_line) - len(child_line.lstrip()) <= field_indent:
+                    text_end = index
+                    break
+            if text_end > text_line + 1:
+                end_index = (
+                    f"{text_end + 1}.0"
+                    if text_end < len(context["lines"])
+                    else "end-1c"
+                )
+                editor.text.delete(f"{text_line + 2}.0", end_index)
+            editor.text.delete(f"{text_line + 1}.{colon + 1}", f"{text_line + 1}.end")
+            editor.text.insert(f"{text_line + 1}.{colon + 1}", " " + json.dumps(replacement))
+            editor.text.mark_set("insert", f"{text_line + 1}.{colon + 2}")
+            editor.text.focus_set()
+        self.set_status(f"Added dialogue text for '{context['id']}'.")
+
+    def _add_choice_option(self):
+        editor = self._active_story_editor()
+        if editor is None:
+            return
+        context = self._dialogue_context_at_cursor(editor)
+        if context is None:
+            self.set_status("Place the cursor inside a dialogue before adding a choice.")
+            return
+        _variables, dialogue_ids = self._story_context()
+        target = next((item for item in sorted(dialogue_ids) if item != context["id"]), context["id"])
+        field_indent = context["indent"] + 2
+        options_field = re.compile(rf"^ {{{field_indent}}}options\s*:")
+        options_line = next(
+            (index for index in range(context["start"] + 1, context["end"])
+             if options_field.match(context["lines"][index])),
+            None,
+        )
+        if options_line is None:
+            lines = [
+                " " * field_indent + "options:",
+                " " * (field_indent + 2) + '- label: "New choice"',
+                " " * (field_indent + 4) + f"target: {target}",
+            ]
+            self._insert_yaml_lines(editor, context["end"], lines)
+        else:
+            options_value = context["lines"][options_line].partition(":")[2].strip()
+            if options_value not in {"", "[]"} and not options_value.startswith("#"):
+                self.set_status("Use block-style options before adding an option.")
+                return
+            if options_value == "[]":
+                editor.text.delete(f"{options_line + 1}.0", f"{options_line + 1}.end")
+                editor.text.insert(f"{options_line + 1}.0", " " * field_indent + "options:")
+            option_indent = field_indent + 2
+            insert_line = context["end"]
+            for index in range(options_line + 1, context["end"]):
+                line = context["lines"][index]
+                if line.strip() and len(line) - len(line.lstrip()) <= field_indent:
+                    insert_line = index
+                    break
+            self._insert_yaml_lines(
+                editor,
+                insert_line,
+                [
+                    " " * option_indent + '- label: "New choice"',
+                    " " * (option_indent + 2) + f"target: {target}",
+                ],
+            )
+        self.set_status(f"Added a choice to '{context['id']}' targeting '{target}'.")
+
+    def _ensure_story_variable(self, name):
+        editor = self.story_editor
+        source = editor.get_text()
+        try:
+            document = yaml.safe_load(source) if yaml is not None else None
+        except Exception:
+            document = None
+        if not isinstance(document, dict):
+            self.set_status("Could not add a variable while story YAML has syntax errors.")
+            return False
+        variables = document.get("variables", {})
+        if isinstance(variables, dict) and name in variables:
+            return True
+        lines = source.splitlines()
+        section_start, section_end, _lines = self._story_section_end(editor, "variables")
+        if section_start is not None:
+            header = lines[section_start]
+            if header.partition(":")[2].strip().startswith("{"):
+                variables[name] = None
+                new_header = "variables: " + json.dumps(variables, ensure_ascii=False)
+                editor.text.delete(f"{section_start + 1}.0", f"{section_start + 1}.end")
+                editor.text.insert(f"{section_start + 1}.0", new_header)
+                return True
+            self._insert_yaml_lines(editor, section_end, [f"  {name}: null"])
+            return True
+
+        dialogues_start, _dialogues_end, _lines = self._story_section_end(editor, "dialogues")
+        insert_at = dialogues_start if dialogues_start is not None else len(lines)
+        self._insert_yaml_lines(
+            editor,
+            insert_at,
+            ["variables:", f"  {name}: null", ""],
+        )
+        return True
+
+    def _add_story_variable(self):
+        editor = self._active_story_editor()
+        if editor is None:
+            return
+        variables, _dialogues = self._story_context()
+        name = self._unique_story_name("new_variable", set(variables))
+        if self._ensure_story_variable(name):
+            self.set_status(f"Added story variable '{name}' with a null starting value.")
+
+    def _add_input_action(self):
+        editor = self._active_story_editor()
+        if editor is None:
+            return
+        context = self._dialogue_context_at_cursor(editor)
+        if context is None:
+            self.set_status("Place the cursor inside a dialogue before adding an input action.")
+            return
+        variables, _dialogues = self._story_context()
+        variable_name = self._unique_story_name("player_input", set(variables))
+        field_indent = context["indent"] + 2
+        actions_field = re.compile(rf"^ {{{field_indent}}}actions\s*:")
+        actions_line = next(
+            (index for index in range(context["start"] + 1, context["end"])
+             if actions_field.match(context["lines"][index])),
+            None,
+        )
+        actions_value = ""
+        if actions_line is not None:
+            actions_value = context["lines"][actions_line].partition(":")[2].strip()
+            if actions_value not in {"", "[]"} and not actions_value.startswith("#"):
+                self.set_status("Use block-style actions before adding an input action.")
+                return
+            if any(
+                re.match(r"^\s*-\s*type\s*:\s*input\b", context["lines"][index])
+                for index in range(actions_line + 1, context["end"])
+            ):
+                self.set_status("This dialogue already has an input action; the story format allows one per dialogue.")
+                return
+        if not self._ensure_story_variable(variable_name):
+            return
+        if actions_line is None:
+            action_indent = field_indent + 2
+            self._insert_yaml_lines(
+                editor,
+                context["end"],
+                [
+                    " " * field_indent + "actions:",
+                    " " * action_indent + "- type: input",
+                    " " * (action_indent + 2) + f"var: {variable_name}",
+                    " " * (action_indent + 2) + 'prompt: "Your answer"',
+                    " " * (action_indent + 2) + "input_type: text",
+                ],
+            )
+        else:
+            if actions_value == "[]":
+                editor.text.delete(f"{actions_line + 1}.0", f"{actions_line + 1}.end")
+                editor.text.insert(f"{actions_line + 1}.0", " " * field_indent + "actions:")
+            action_indent = field_indent + 2
+            insert_line = context["end"]
+            for index in range(actions_line + 1, context["end"]):
+                line = context["lines"][index]
+                if line.strip() and len(line) - len(line.lstrip()) <= field_indent:
+                    insert_line = index
+                    break
+            self._insert_yaml_lines(
+                editor,
+                insert_line,
+                [
+                    " " * action_indent + "- type: input",
+                    " " * (action_indent + 2) + f"var: {variable_name}",
+                    " " * (action_indent + 2) + 'prompt: "Your answer"',
+                    " " * (action_indent + 2) + "input_type: text",
+                ],
+            )
+        self.set_status(f"Added input action to '{context['id']}' and declared '{variable_name}'.")
+
     def _on_tab_changed(self, _event=None):
         self.engine_diagnostics = []
         kind = self.active_kind()
@@ -2774,6 +3916,20 @@ while ($true) {{
             return None
         return self.markdown_texts.get(frame)
 
+    def _edit_active(self, operation):
+        editor = self.active_editor()
+        if editor is None:
+            return "break"
+        try:
+            if operation == "undo":
+                editor.text.edit_undo()
+            else:
+                editor.text.edit_redo()
+            editor.text.focus_set()
+        except tk.TclError:
+            self.set_status(f"Nothing to {operation}.")
+        return "break"
+
     def show_find(self):
         if self.active_text() is None:
             return "break"
@@ -2809,6 +3965,7 @@ while ($true) {{
         ).pack(side="left")
         ttk.Button(controls, text="Previous", command=lambda: self._find_next(backwards=True)).pack(side="right")
         ttk.Button(controls, text="Next", command=self._find_next).pack(side="right", padx=(0, 5))
+        ttk.Button(controls, text="Replace...", command=self._show_replace_dialog).pack(side="right", padx=(0, 5))
         ttk.Button(controls, text="Close", command=self.close_find).pack(side="right", padx=(0, 5))
         window.protocol("WM_DELETE_WINDOW", self.close_find)
         self.find_entry.focus_set()
@@ -2876,6 +4033,124 @@ while ($true) {{
         text.see(target[0])
         self.set_status(f"Found {query!r}.")
 
+    def _show_replace_dialog(self):
+        if self.find_entry is None or not self.find_entry.get():
+            messagebox.showinfo("Replace", "Enter text to find first.", parent=self.root)
+            return
+
+        window = tk.Toplevel(self.root)
+        window.title("Replace in Story Tabs")
+        window.transient(self.root)
+        window.geometry("850x470")
+        window.minsize(620, 320)
+        window.grab_set()
+        body = ttk.Frame(window, padding=10)
+        body.pack(fill="both", expand=True)
+        ttk.Label(
+            body,
+            text="Preview replacements across the open story and include tabs. Project settings and assets are excluded.",
+            wraplength=800,
+        ).pack(anchor="w", pady=(0, 8))
+
+        query_var = tk.StringVar(window, value=self.find_entry.get())
+        replacement_var = tk.StringVar(window)
+        fields = ttk.Frame(body)
+        fields.pack(fill="x", pady=(0, 8))
+        ttk.Label(fields, text="Find:").grid(row=0, column=0, sticky="w", padx=(0, 6))
+        query_entry = ttk.Entry(fields, textvariable=query_var, width=32)
+        query_entry.grid(row=0, column=1, sticky="ew", padx=(0, 14))
+        ttk.Label(fields, text="Replace with:").grid(row=0, column=2, sticky="w", padx=(0, 6))
+        replacement_entry = ttk.Entry(fields, textvariable=replacement_var, width=32)
+        replacement_entry.grid(row=0, column=3, sticky="ew")
+        fields.columnconfigure(1, weight=1)
+        fields.columnconfigure(3, weight=1)
+
+        tree = ttk.Treeview(body, columns=("file", "line", "change"), show="headings")
+        tree.heading("file", text="Story File")
+        tree.heading("line", text="Line")
+        tree.heading("change", text="Preview")
+        tree.column("file", width=190, stretch=False)
+        tree.column("line", width=65, anchor="e", stretch=False)
+        tree.column("change", width=520, stretch=True)
+        scrollbar = ttk.Scrollbar(body, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=scrollbar.set)
+        tree.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        footer = ttk.Frame(window, padding=(10, 0, 10, 10))
+        footer.pack(fill="x")
+        status = ttk.Label(footer, text="Choose Preview to review changes before replacing.")
+        status.pack(side="left", fill="x", expand=True)
+        matches = []
+        replace_button = ttk.Button(footer, text="Replace All", state="disabled")
+        replace_button.pack(side="right", padx=(6, 0))
+        ttk.Button(footer, text="Close", command=window.destroy).pack(side="right")
+
+        def build_preview():
+            matches.clear()
+            tree.delete(*tree.get_children())
+            needle = query_var.get()
+            if not needle:
+                status.configure(text="Find text cannot be empty.")
+                replace_button.configure(state="disabled")
+                return
+            nocase = not bool(self.find_case_sensitive.get())
+            for path, editor in self.story_editors.items():
+                widget = editor.text
+                start = "1.0"
+                while True:
+                    count = tk.IntVar(window)
+                    found = widget.search(needle, start, stopindex="end", nocase=nocase, count=count)
+                    if not found:
+                        break
+                    end = f"{found}+{count.get()}c"
+                    old_text = widget.get(found, end)
+                    line_number, column = (int(part) for part in widget.index(found).split("."))
+                    line_text = widget.get(f"{line_number}.0", f"{line_number}.end")
+                    before = line_text[max(0, column - 24):column]
+                    after_start = column + len(old_text)
+                    after = line_text[after_start:after_start + 24]
+                    change = f"{before}[[{old_text}]]{after}  ->  {replacement_var.get()}"
+                    if len(change) > 150:
+                        change = change[:147] + "..."
+                    matches.append((widget, path, found, end))
+                    tree.insert("", "end", values=(path.name, line_number, change))
+                    start = end
+            file_count = len({item[1] for item in matches})
+            status.configure(text=f"{len(matches)} occurrence(s) in {file_count} story file(s).")
+            replace_button.configure(state="normal" if matches else "disabled")
+
+        def replace_all():
+            if not matches:
+                return
+            replacement = replacement_var.get()
+            by_widget = {}
+            for widget, path, start, end in matches:
+                by_widget.setdefault(widget, []).append((start, end))
+            for widget, ranges in by_widget.items():
+                ranges.sort(
+                    key=lambda pair: tuple(int(part) for part in widget.index(pair[0]).split(".")),
+                    reverse=True,
+                )
+                widget.edit_separator()
+                for start, end in ranges:
+                    widget.delete(start, end)
+                    widget.insert(start, replacement)
+                widget.edit_separator()
+            count = len(matches)
+            window.destroy()
+            self._refresh_search_highlights()
+            self.set_status(f"Replaced {count} occurrence(s) across {len(by_widget)} story file(s).")
+
+        replace_button.configure(command=replace_all)
+        ttk.Button(footer, text="Preview", command=build_preview).pack(side="right")
+        query_entry.bind("<Return>", lambda _event: build_preview())
+        replacement_entry.bind("<Return>", lambda _event: build_preview())
+        query_entry.bind("<KeyRelease>", lambda _event: build_preview())
+        replacement_entry.bind("<KeyRelease>", lambda _event: build_preview())
+        query_entry.focus_set()
+        build_preview()
+
     def close_find(self):
         for widget in self._all_text_widgets():
             widget.tag_remove("search_match", "1.0", "end")
@@ -2942,6 +4217,27 @@ while ($true) {{
             )
             for diagnostic in self.live_diagnostics[kind]:
                 diagnostic.source = Path(getattr(editor, "story_path", self.story_file)).name
+            if editor is self.story_editor:
+                graph = self._load_story_graph()
+                if graph is not None:
+                    for dialogue_id in graph["unreachable"]:
+                        source_path = graph["sources"].get(dialogue_id, self.story_file)
+                        source_editor = next(
+                            (candidate for path, candidate in self.story_editors.items()
+                             if path.resolve() == source_path.resolve()),
+                            None,
+                        )
+                        source_text = source_editor.get_text() if source_editor is not None else ""
+                        line = _line_of_key(source_text, dialogue_id, _line_of_key(source_text, "dialogues"))
+                        source_name = self._story_source_label(source_path)
+                        self.live_diagnostics[kind].append(
+                            Diagnostic(
+                                "warning",
+                                f"Dialogue '{dialogue_id}' is unreachable from story start '{graph['start']}'.",
+                                line,
+                                source_name,
+                            )
+                        )
         else:
             self.live_diagnostics[kind] = analyze_project(self.project_editor.get_text(), catalog)
             editor = self.project_editor
@@ -2991,6 +4287,216 @@ while ($true) {{
                     pending.append(candidate)
         return variables, dialogue_ids
 
+    def _load_story_graph(self):
+        if yaml is None:
+            return None
+        data_dir = self._story_data_dir().resolve()
+        pending = [self.story_file.resolve()]
+        visited = set()
+        dialogues = {}
+        sources = {}
+        start_id = None
+        default_locale = "en"
+        while pending:
+            path = pending.pop()
+            if path in visited:
+                continue
+            visited.add(path)
+            editor = next(
+                (candidate for candidate in self.story_editors.values()
+                 if getattr(candidate, "story_path", self.story_file).resolve() == path),
+                None,
+            )
+            try:
+                source = editor.get_text() if editor is not None else path.read_text(encoding="utf-8")
+                document = yaml.safe_load(source)
+            except Exception:
+                continue
+            if not isinstance(document, dict):
+                continue
+            if path == self.story_file.resolve():
+                start_id = document.get("start")
+                localization = document.get("localization", {})
+                if isinstance(localization, dict) and isinstance(localization.get("default_locale"), str):
+                    default_locale = localization["default_locale"]
+            local_dialogues = document.get("dialogues", {})
+            if isinstance(local_dialogues, dict):
+                for dialogue_id, dialogue in local_dialogues.items():
+                    if isinstance(dialogue_id, str) and isinstance(dialogue, dict):
+                        dialogues[dialogue_id] = dialogue
+                        sources[dialogue_id] = path
+            includes = document.get("includes", [])
+            if isinstance(includes, list):
+                for include in includes:
+                    if not isinstance(include, str) or not include.strip():
+                        continue
+                    child_path = (path.parent / include.replace("\\", "/")).resolve()
+                    try:
+                        child_path.relative_to(data_dir)
+                    except ValueError:
+                        continue
+                    pending.append(child_path)
+
+        if not dialogues:
+            return None
+        edges = {dialogue_id: [] for dialogue_id in dialogues}
+        for dialogue_id, dialogue in dialogues.items():
+            next_id = dialogue.get("next")
+            if isinstance(next_id, str) and next_id in dialogues:
+                edges[dialogue_id].append((next_id, "next"))
+            call_id = dialogue.get("call")
+            if isinstance(call_id, str) and call_id in dialogues:
+                edges[dialogue_id].append((call_id, "call"))
+            options = dialogue.get("options", [])
+            if isinstance(options, list):
+                for option in options:
+                    if isinstance(option, dict):
+                        target = option.get("target")
+                        if isinstance(target, str) and target in dialogues:
+                            label = option.get("label", "choice")
+                            if isinstance(label, dict):
+                                label = label.get(default_locale, next(iter(label.values()), "choice"))
+                            if option.get("condition") is not None:
+                                label = f"{label} [conditional]"
+                            edges[dialogue_id].append((target, str(label)))
+
+        depth = {}
+        if isinstance(start_id, str) and start_id in dialogues:
+            depth[start_id] = 0
+            pending_ids = [start_id]
+            while pending_ids:
+                current = pending_ids.pop(0)
+                for target, _label in edges[current]:
+                    if target not in depth:
+                        depth[target] = depth[current] + 1
+                        pending_ids.append(target)
+        unreachable = sorted(set(dialogues) - set(depth))
+        final_depth = max(depth.values(), default=0) + 1
+        for dialogue_id in unreachable:
+            depth[dialogue_id] = final_depth
+        return {
+            "start": start_id if isinstance(start_id, str) else "(missing)",
+            "default_locale": default_locale,
+            "dialogues": dialogues,
+            "sources": sources,
+            "edges": edges,
+            "depth": depth,
+            "unreachable": unreachable,
+        }
+
+    def open_story_graph(self):
+        if not self.save_all():
+            return
+        graph = self._load_story_graph()
+        if graph is None:
+            messagebox.showerror("Story Graph", "The story files could not be read as YAML.", parent=self.root)
+            return
+
+        window = tk.Toplevel(self.root)
+        window.title("Story Graph — Reachability and branches")
+        window.geometry("1050x720")
+        window.minsize(700, 480)
+        toolbar = ttk.Frame(window, padding=(10, 8, 10, 5))
+        toolbar.pack(fill="x")
+        unreachable_count = len(graph["unreachable"])
+        summary = f"Start: {graph['start']}  |  {len(graph['dialogues'])} dialogues  |  {unreachable_count} unreachable"
+        ttk.Label(toolbar, text=summary).pack(side="left")
+        ttk.Label(toolbar, text="Double-click a node to open its dialogue.", foreground="#687386").pack(side="right")
+
+        body = ttk.Frame(window)
+        body.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        canvas = tk.Canvas(body, background="#f5f7fb", highlightthickness=0)
+        xbar = ttk.Scrollbar(body, orient="horizontal", command=canvas.xview)
+        ybar = ttk.Scrollbar(body, orient="vertical", command=canvas.yview)
+        canvas.configure(xscrollcommand=xbar.set, yscrollcommand=ybar.set)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        ybar.grid(row=0, column=1, sticky="ns")
+        xbar.grid(row=1, column=0, sticky="ew")
+        body.rowconfigure(0, weight=1)
+        body.columnconfigure(0, weight=1)
+
+        columns = {}
+        for dialogue_id, depth in graph["depth"].items():
+            columns.setdefault(depth, []).append(dialogue_id)
+        for values in columns.values():
+            values.sort()
+        box_width, box_height = 205, 76
+        x_gap, y_gap = 85, 36
+        positions = {}
+        for depth, ids in columns.items():
+            x = 60 + depth * (box_width + x_gap)
+            for index, dialogue_id in enumerate(ids):
+                y = 58 + index * (box_height + y_gap)
+                positions[dialogue_id] = (x, y)
+        for source_id, targets in graph["edges"].items():
+            if source_id not in positions:
+                continue
+            sx, sy = positions[source_id]
+            for target_id, label in targets:
+                if target_id not in positions:
+                    continue
+                tx, ty = positions[target_id]
+                canvas.create_line(
+                    sx + box_width, sy + box_height / 2, tx, ty + box_height / 2,
+                    fill="#718096", width=2, arrow="last", smooth=True,
+                )
+                if label != "next":
+                    canvas.create_text(
+                        (sx + box_width + tx) / 2,
+                        (sy + ty + box_height) / 2 - 8,
+                        text=label[:36], fill="#44546a",
+                        font=("Segoe UI", 8),
+                    )
+        for dialogue_id, dialogue in graph["dialogues"].items():
+            x, y = positions[dialogue_id]
+            unreachable = dialogue_id in graph["unreachable"]
+            ending = not graph["edges"].get(dialogue_id)
+            fill = "#ffe4e6" if unreachable else "#fff1c7" if ending else "#e5efff"
+            outline = "#d04a5a" if unreachable else "#bd8b22" if ending else "#5b82b8"
+            tag = f"dialogue:{dialogue_id}"
+            canvas.create_rectangle(
+                x, y, x + box_width, y + box_height,
+                fill=fill, outline=outline, width=2, tags=(tag,),
+            )
+            speaker = dialogue.get("speaker", "")
+            canvas.create_text(
+                x + 10, y + 9, anchor="nw", width=box_width - 20,
+                text=f"{dialogue_id}\n{speaker}", fill="#1d2939",
+                font=("Segoe UI", 10, "bold"), tags=(tag,),
+            )
+            canvas.tag_bind(
+                tag,
+                "<Double-1>",
+                lambda _event, selected=dialogue_id: self._open_graph_dialogue(graph, selected),
+            )
+        width = max((x + box_width + 60 for x, _y in positions.values()), default=800)
+        height = max((y + box_height + 60 for _x, y in positions.values()), default=600)
+        canvas.configure(scrollregion=(0, 0, max(800, width), max(600, height)))
+
+    def _open_graph_dialogue(self, graph, dialogue_id):
+        path = graph["sources"].get(dialogue_id, self.story_file)
+        editor = next(
+            (candidate for editor_path, candidate in self.story_editors.items()
+             if editor_path.resolve() == path.resolve()),
+            None,
+        )
+        if editor is None:
+            self._sync_included_story_tabs()
+            editor = next(
+                (candidate for editor_path, candidate in self.story_editors.items()
+                 if editor_path.resolve() == path.resolve()),
+                None,
+            )
+        if editor is None:
+            return
+        self.notebook.select(editor)
+        source = editor.get_text()
+        line = _line_of_key(source, dialogue_id, _line_of_key(source, "dialogues"))
+        editor.text.mark_set("insert", f"{line}.0")
+        editor.text.see(f"{line}.0")
+        editor.text.focus_set()
+        editor.redraw_gutter()
+
     def apply_diagnostic_marks(self, editor):
         editor.text.tag_remove("diagnostic_error", "1.0", "end")
         editor.text.tag_remove("diagnostic_warning", "1.0", "end")
@@ -2999,7 +4505,17 @@ while ($true) {{
         diagnostics = list(self.live_diagnostics.get(kind, []))
         if kind == "story":
             diagnostics.extend(self.engine_diagnostics)
+            source_path = Path(getattr(editor, "story_path", self.story_file))
+            try:
+                active_source = source_path.resolve().relative_to(self._story_data_dir().resolve()).as_posix()
+            except ValueError:
+                active_source = source_path.name
         for diagnostic in diagnostics:
+            if (
+                kind == "story"
+                and diagnostic.source not in {"Editor", "Engine", active_source, source_path.name}
+            ):
+                continue
             line = max(1, diagnostic.line)
             tag = {"error": "diagnostic_error", "warning": "diagnostic_warning", "hint": "diagnostic_hint"}.get(diagnostic.severity)
             if tag:
@@ -3030,7 +4546,20 @@ while ($true) {{
             self.notebook.select(self.story_editor)
             editor = self.story_editor
         else:
-            editor = self.active_editor()
+            editor = next(
+                (
+                    candidate for path, candidate in self.story_editors.items()
+                    if self._story_source_label(path) == source
+                ),
+                None,
+            )
+            if editor is None:
+                editor = next(
+                    (candidate for path, candidate in self.story_editors.items() if path.name == source),
+                    self.active_editor(),
+                )
+            if editor is not None:
+                self.notebook.select(editor)
         editor.text.mark_set("insert", f"{line}.0")
         editor.text.see(f"{line}.0")
         editor.text.focus_set()
@@ -3386,6 +4915,8 @@ while ($true) {{
             "dialogue_buttons.history": ["visible", "label"],
             "dialogue_buttons.quick_save": ["visible", "label"],
             "dialogue_buttons.quick_load": ["visible", "label"],
+            "dialogue_buttons.auto": ["visible", "label"],
+            "dialogue_buttons.mute": ["visible", "label"],
             "menus": ["main", "pause", "settings", "slots"],
             "menus.main": ["title", "items"],
             "menus.pause": ["title", "items"],
@@ -3572,26 +5103,49 @@ while ($true) {{
             self.root.update_idletasks()
         if not self.save_all():
             return
-        runtime = self.project_root / "VN_Engine" / "engine.exe"
-        if not runtime.is_file():
-            runtime = self.project_root / "engine.exe"
         temporary = None
-        if runtime.is_file():
-            command = [str(runtime), "--validate"]
+        try:
+            values = json.loads(self.project_editor.get_text())
+        except json.JSONDecodeError:
+            values = {}
+        if self._uses_workspace_source_test_play(values):
+            try:
+                temporary, _platform, _game_name, runtime = self._create_temporary_game()
+            except (OSError, ValueError, RuntimeError, json.JSONDecodeError) as error:
+                self.engine_diagnostics = [Diagnostic(
+                    "error", f"Could not prepare workspace source validation: {error}", 1, "Engine"
+                )]
+                self.render_diagnostics()
+                return
+            command = [sys.executable, str(runtime), "--validate"]
         else:
-            source_main = self.project_root / "main.py"
-            if source_main.is_file():
-                command = [sys.executable, str(source_main), "--validate"]
+            runtime = self.project_root / "VN_Engine" / "engine.exe"
+            if not runtime.is_file():
+                runtime = self.project_root / "engine.exe"
+            if runtime.is_file():
+                command = (
+                    [sys.executable, str(runtime), "--validate"]
+                    if runtime.suffix.casefold() == ".py"
+                    else [str(runtime), "--validate"]
+                )
             else:
-                try:
-                    temporary, _platform, _game_name, runtime = self._create_temporary_game()
-                except (OSError, ValueError, json.JSONDecodeError) as error:
-                    self.engine_diagnostics = [Diagnostic(
-                        "error", f"Could not prepare the engine template for validation: {error}", 1, "Engine"
-                    )]
-                    self.render_diagnostics()
-                    return
-                command = [str(runtime), "--validate"]
+                source_main = self.project_root / "main.py"
+                if source_main.is_file():
+                    command = [sys.executable, str(source_main), "--validate"]
+                else:
+                    try:
+                        temporary, _platform, _game_name, runtime = self._create_temporary_game()
+                    except (OSError, ValueError, json.JSONDecodeError) as error:
+                        self.engine_diagnostics = [Diagnostic(
+                            "error", f"Could not prepare the engine template for validation: {error}", 1, "Engine"
+                        )]
+                        self.render_diagnostics()
+                        return
+                    command = (
+                        [sys.executable, str(runtime), "--validate"]
+                        if runtime.suffix.casefold() == ".py"
+                        else [str(runtime), "--validate"]
+                    )
         self.set_status("Running the engine story validator...")
         self.root.update_idletasks()
         try:
@@ -3705,6 +5259,39 @@ while ($true) {{
             return runtime_root / game_name / game_name
         return runtime_root / f"{game_name}.app" / "Contents" / "MacOS" / "Runner"
 
+    def _uses_workspace_source_test_play(self, values=None):
+        if values is None:
+            try:
+                values = json.loads(self.project_editor.get_text())
+            except (json.JSONDecodeError, AttributeError):
+                values = {}
+        return isinstance(values, dict) and values.get("USER") == "admin"
+
+    def _create_source_test_play(self, temporary_root: Path, game_name: str):
+        workspace_root = Path(__file__).resolve().parent
+        source_main = workspace_root / "main.py"
+        source_engine = workspace_root / "engine"
+        if not source_main.is_file() or not source_engine.is_dir():
+            raise RuntimeError(
+                "USER is set to 'admin', but the workspace source (main.py and engine/) "
+                "is not available."
+            )
+
+        runtime_root = temporary_root / "source-runtime"
+        runtime_root.mkdir()
+        shutil.copy2(source_main, runtime_root / "main.py")
+        shutil.copytree(source_engine, runtime_root / "engine", dirs_exist_ok=True)
+
+        for folder_name in ("assets", "data"):
+            source_folder = self.project_root / folder_name
+            if source_folder.is_dir():
+                shutil.copytree(source_folder, runtime_root / folder_name, dirs_exist_ok=True)
+
+        main_source = runtime_root / "main.py"
+        if not main_source.is_file():
+            raise RuntimeError("Could not stage the workspace source for Test Play.")
+        return runtime_root, main_source
+
     def _create_temporary_game(self):
         values = json.loads(self.project_editor.get_text())
         platform = self._current_platform()
@@ -3714,17 +5301,20 @@ while ($true) {{
         runtime_root = temporary_root / "runtime"
         archive_path = temporary_root / f"{game_name}-{platform}.zip"
         try:
-            export_project(
-                self.project_root,
-                self.project_file,
-                self._template_directory(),
-                platform,
-                archive_path,
-            )
-            self._extract_test_play_archive(archive_path, runtime_root)
-            executable = self._test_play_executable(runtime_root, platform, game_name)
-            if not executable.is_file():
-                raise FileNotFoundError(f"Test-play executable was not found: {executable}")
+            if self._uses_workspace_source_test_play(values):
+                _source_root, executable = self._create_source_test_play(temporary_root, game_name)
+            else:
+                export_project(
+                    self.project_root,
+                    self.project_file,
+                    self._template_directory(),
+                    platform,
+                    archive_path,
+                )
+                self._extract_test_play_archive(archive_path, runtime_root)
+                executable = self._test_play_executable(runtime_root, platform, game_name)
+                if not executable.is_file():
+                    raise FileNotFoundError(f"Test-play executable was not found: {executable}")
             return temporary, platform, game_name, executable
         except Exception:
             temporary.cleanup()
@@ -3781,8 +5371,18 @@ while ($true) {{
             self.test_play_poll_job = self.root.after(750, self._poll_test_play)
             return
         self.test_play_process = None
+        coverage = None
+        coverage_path = self.test_play_coverage_path
+        self.test_play_coverage_path = None
+        if coverage_path is not None:
+            try:
+                coverage = json.loads(coverage_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                coverage = None
         self._cleanup_test_play()
         self.set_status("Test Play closed; temporary game files removed.")
+        if isinstance(coverage, dict):
+            self._show_coverage_report(coverage)
 
     def _stop_test_play(self):
         if self.test_play_poll_job is not None:
@@ -3803,9 +5403,104 @@ while ($true) {{
                     process.wait(timeout=2)
                 except (OSError, subprocess.TimeoutExpired):
                     pass
+        self.test_play_coverage_path = None
         self._cleanup_test_play()
 
-    def test_play(self):
+    def test_from_dialogue(self):
+        if not self.save_all():
+            return
+        errors = self._collect_export_errors()
+        if self._show_export_errors("Cannot Start Test Play", errors):
+            return
+        variables, dialogue_ids = self._story_context()
+        if not dialogue_ids:
+            messagebox.showerror("Test from Dialogue", "No dialogue IDs were found in the story files.", parent=self.root)
+            return
+        try:
+            root_document = yaml.safe_load(self.story_editor.get_text()) if yaml is not None else {}
+        except Exception:
+            root_document = {}
+        preferred_start = root_document.get("start") if isinstance(root_document, dict) else None
+        if not isinstance(preferred_start, str) or preferred_start not in dialogue_ids:
+            preferred_start = sorted(dialogue_ids)[0]
+
+        window = tk.Toplevel(self.root)
+        window.title("Test from Dialogue")
+        window.transient(self.root)
+        window.resizable(True, True)
+        window.geometry("520x510")
+        body = ttk.Frame(window, padding=14)
+        body.pack(fill="both", expand=True)
+        ttk.Label(body, text="Starting dialogue").pack(anchor="w")
+        dialogue_var = tk.StringVar(value=preferred_start)
+        dialogue_box = ttk.Combobox(
+            body,
+            textvariable=dialogue_var,
+            values=sorted(dialogue_ids),
+            state="readonly",
+        )
+        dialogue_box.pack(fill="x", pady=(4, 12))
+        ttk.Label(
+            body,
+            text="Starting variable values (JSON object). Leave values at their story defaults or change them for this test.",
+            wraplength=480,
+        ).pack(anchor="w")
+        variables_text = tk.Text(body, height=16, wrap="none", undo=True)
+        variables_text.pack(fill="both", expand=True, pady=(5, 12))
+        variables_text.insert("1.0", json.dumps(variables, ensure_ascii=False, indent=2))
+        buttons = ttk.Frame(body)
+        buttons.pack(fill="x")
+
+        def launch_test():
+            dialogue_id = dialogue_var.get().strip()
+            if dialogue_id not in dialogue_ids:
+                messagebox.showerror("Test from Dialogue", "Choose an existing dialogue ID.", parent=window)
+                return
+            try:
+                initial_variables = json.loads(variables_text.get("1.0", "end-1c"))
+            except json.JSONDecodeError as error:
+                messagebox.showerror("Test from Dialogue", f"Variables must be valid JSON: {error}", parent=window)
+                return
+            if not isinstance(initial_variables, dict):
+                messagebox.showerror("Test from Dialogue", "Variables must be a JSON object.", parent=window)
+                return
+            unknown = set(initial_variables) - set(variables)
+            if unknown:
+                messagebox.showerror(
+                    "Test from Dialogue",
+                    "Unknown story variable(s): " + ", ".join(sorted(unknown)),
+                    parent=window,
+                )
+                return
+            for name, value in initial_variables.items():
+                default = variables[name]
+                numeric_pair = (
+                    isinstance(default, (int, float)) and not isinstance(default, bool)
+                    and isinstance(value, (int, float)) and not isinstance(value, bool)
+                )
+                if (
+                    value is not None
+                    and not isinstance(value, (str, int, float, bool))
+                ) or (
+                    default is not None
+                    and value is not None
+                    and type(default) is not type(value)
+                    and not numeric_pair
+                ):
+                    messagebox.showerror(
+                        "Test from Dialogue",
+                        f"Value for '{name}' must be a scalar matching its declared type.",
+                        parent=window,
+                    )
+                    return
+            window.destroy()
+            self.test_play(dialogue_id, initial_variables)
+
+        ttk.Button(buttons, text="Cancel", command=window.destroy).pack(side="right")
+        ttk.Button(buttons, text="Start Test", command=launch_test).pack(side="right", padx=(0, 7))
+        dialogue_box.focus_set()
+
+    def test_play(self, start_dialogue=None, initial_variables=None):
         if self.test_play_process is not None and self.test_play_process.poll() is None:
             messagebox.showinfo("Test Play", "A test game is already running.", parent=self.root)
             return
@@ -3817,18 +5512,140 @@ while ($true) {{
         try:
             temporary, platform, _game_name, executable = self._create_temporary_game()
             self.test_play_tempdir = temporary
+            self.test_play_coverage_path = Path(temporary.name) / "editor_coverage.json"
             environment = os.environ.copy()
             environment["VN_ENGINE_USER_DATA_DIR"] = str(Path(temporary.name) / "user_data")
-            self.test_play_process = subprocess.Popen(
-                [str(executable)], cwd=executable.parent, env=environment
+            environment["VN_EDITOR_TEST_MODE"] = "1"
+            environment["VN_EDITOR_COVERAGE_FILE"] = str(self.test_play_coverage_path)
+            environment.pop("VN_EDITOR_TEST_START_DIALOGUE", None)
+            environment.pop("VN_EDITOR_TEST_VARIABLES", None)
+            if start_dialogue is not None:
+                environment["VN_EDITOR_TEST_START_DIALOGUE"] = start_dialogue
+                environment["VN_EDITOR_TEST_VARIABLES"] = json.dumps(
+                    initial_variables or {}, ensure_ascii=False
+                )
+            command = (
+                [sys.executable, str(executable)]
+                if executable.suffix.casefold() == ".py"
+                else [str(executable)]
             )
+            self.test_play_process = subprocess.Popen(command, cwd=executable.parent, env=environment)
         except (OSError, ValueError, RuntimeError, json.JSONDecodeError, subprocess.SubprocessError) as error:
+            self.test_play_coverage_path = None
             self._cleanup_test_play()
             messagebox.showerror("Cannot Start Test Play", f"Could not prepare or start the game: {error}", parent=self.root)
             return
 
-        self.set_status(f"Test Play running from a temporary {platform} game build.")
+        self.set_status(f"Test Play running in a temporary {platform} build. Press F3 in-game to inspect variables.")
         self.test_play_poll_job = self.root.after(750, self._poll_test_play)
+
+    def _show_coverage_report(self, coverage):
+        graph = self._load_story_graph()
+        if graph is None:
+            return
+        visited = set(coverage.get("visited_dialogues", []))
+        selected = {
+            (item.get("dialogue"), item.get("target"))
+            for item in coverage.get("choices", [])
+            if isinstance(item, dict)
+        }
+        dialogues = graph["dialogues"]
+        unreachable = set(graph["unreachable"])
+        visited_count = len(visited & set(dialogues))
+        choice_count = sum(
+            len({
+                option.get("target")
+                for option in dialogue.get("options", [])
+                if isinstance(option, dict)
+            })
+            for dialogue in dialogues.values()
+            if isinstance(dialogue.get("options", []), list)
+        )
+        selected_count = len({
+            (dialogue_id, option.get("target"))
+            for dialogue_id, dialogue in dialogues.items()
+            for option in dialogue.get("options", [])
+            if isinstance(option, dict)
+            and (dialogue_id, option.get("target")) in selected
+        })
+
+        window = tk.Toplevel(self.root)
+        window.title("Test Play Coverage")
+        window.geometry("820x600")
+        window.minsize(620, 380)
+        summary = ttk.Frame(window, padding=(10, 9))
+        summary.pack(fill="x")
+        ended = "story finished" if coverage.get("finished") else "session ended early"
+        ttk.Label(
+            summary,
+            text=(
+                f"Visited dialogues: {visited_count}/{len(dialogues)}    "
+                f"Selected branches: {selected_count}/{choice_count}    "
+                f"Unreachable: {len(unreachable)}    ({ended})"
+            ),
+        ).pack(anchor="w")
+
+        body = ttk.Frame(window, padding=(10, 0, 10, 10))
+        body.pack(fill="both", expand=True)
+        tree = ttk.Treeview(body, columns=("kind", "item", "result"), show="headings")
+        tree.heading("kind", text="Coverage")
+        tree.heading("item", text="Dialogue / Branch")
+        tree.heading("result", text="Result")
+        tree.column("kind", width=115, stretch=False)
+        tree.column("item", width=530, stretch=True)
+        tree.column("result", width=135, stretch=False)
+        scrollbar = ttk.Scrollbar(body, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=scrollbar.set)
+        tree.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        for dialogue_id, dialogue in dialogues.items():
+            tree.insert(
+                "", "end", values=(
+                    "Dialogue", dialogue_id,
+                    (
+                        "Unreachable" if dialogue_id in unreachable
+                        else "Visited" if dialogue_id in visited else "Not visited"
+                    ),
+                ),
+            )
+            options = dialogue.get("options", [])
+            if (
+                not dialogue.get("next")
+                and not options
+                and not dialogue.get("call")
+                and not dialogue.get("return")
+            ):
+                tree.insert(
+                    "", "end", values=(
+                        "Ending / Return", dialogue_id,
+                        "Reached" if dialogue_id in visited else "Not reached",
+                    ),
+                )
+            if isinstance(options, list):
+                for option in options:
+                    if not isinstance(option, dict):
+                        continue
+                    label = option.get("label", "(unnamed choice)")
+                    if isinstance(label, dict):
+                        label = label.get(
+                            graph["default_locale"],
+                            next(iter(label.values()), "(unnamed choice)"),
+                        )
+                    target = option.get("target", "?")
+                    was_selected = (dialogue_id, target) in selected
+                    branch = f"{dialogue_id}: {label} -> {target}"
+                    if option.get("condition") is not None:
+                        branch += " [conditional]"
+                    tree.insert(
+                        "", "end", values=(
+                            "Branch", branch,
+                            "Selected" if was_selected else "Not selected",
+                        ),
+                    )
+        ttk.Button(window, text="Close", command=window.destroy).pack(
+            anchor="e", padx=10, pady=(0, 10)
+        )
 
     def export_game(self):
         if not self.save_all():
@@ -3895,6 +5712,19 @@ while ($true) {{
         android_options.columnconfigure(1, weight=1)
         android_options.grid_remove()
         release_tags = None
+        sign_release_var = tk.BooleanVar(value=False)
+        sign_release_check = ttk.Checkbutton(
+            body,
+            text="Sign release package (uses signing credentials from the environment)",
+            variable=sign_release_var,
+        )
+        sign_release_check.grid(row=5, column=0, columnspan=3, sticky="w", pady=(0, 8))
+
+        def update_signing_option(*_args):
+            supported = platform_var.get() in {"windows", "macos", "android"}
+            sign_release_check.configure(state="normal" if supported else "disabled")
+            if not supported:
+                sign_release_var.set(False)
 
         def update_android_runtime_choices(*_args):
             nonlocal release_tags
@@ -3931,7 +5761,7 @@ while ($true) {{
                 android_release_var.set(recommended)
 
         button_row = ttk.Frame(body)
-        button_row.grid(row=5, column=0, columnspan=3, sticky="e")
+        button_row.grid(row=6, column=0, columnspan=3, sticky="e")
         ttk.Button(button_row, text="Cancel", command=dialog.destroy).pack(side="right")
 
         def run_export():
@@ -3967,6 +5797,7 @@ while ($true) {{
                     platform,
                     target,
                     android_release_tag,
+                    sign_release=sign_release_var.get(),
                 )
             except (OSError, ValueError, RuntimeError, json.JSONDecodeError, subprocess.SubprocessError) as error:
                 messagebox.showerror("Export Game", str(error), parent=dialog)
@@ -3985,6 +5816,7 @@ while ($true) {{
 
         platform_var.trace_add("write", update_output_name)
         platform_var.trace_add("write", update_android_runtime_choices)
+        platform_var.trace_add("write", update_signing_option)
         platform_box.bind("<<ComboboxSelected>>", update_output_name)
         dialog.bind("<Return>", lambda _event: run_export())
         dialog.bind("<Escape>", lambda _event: dialog.destroy())
@@ -3994,6 +5826,7 @@ while ($true) {{
         dialog.wait_visibility()
         dialog.focus_set()
         update_android_runtime_choices()
+        update_signing_option()
 
     def _browse_export_folder(self, parent, variable):
         selected = filedialog.askdirectory(

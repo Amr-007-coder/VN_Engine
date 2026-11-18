@@ -1,5 +1,6 @@
 from copy import deepcopy
 import math
+import json
 import os
 import re
 from pathlib import Path, PurePosixPath
@@ -9,6 +10,7 @@ from engine.theme import MENU_SCREEN_NAMES, resolve_theme, validate_menu_grid
 
 
 DEFAULT_PROJECT = {
+    "USER": "user",
     "name": "Visual Novel",
     "story": "story.yaml",
     "icon": None,
@@ -18,6 +20,9 @@ DEFAULT_PROJECT = {
         "orientation": "landscape",
     },
     "save_slots": 5,
+    "autosave_slots": 3,
+    "autosave_interval_seconds": 300,
+    "save_migrations": {"dialogues": {}, "variables": {}},
     "credits": [],
     "intro": {
         "creator": "Marpp",
@@ -39,6 +44,8 @@ DEFAULT_PROJECT = {
         "delete_success": "Deleted the save in slot {slot}.",
         "delete_empty": "Slot {slot} is already empty.",
         "delete_error": "Failed to delete: {error}",
+        "copy_success": "Copied the save from slot {source} to slot {slot}.",
+        "copy_error": "Failed to copy save: {error}",
     },
     "paths": {"data": "data", "assets": "assets", "user_data": "user_data"},
     "window": {"width": 1920, "height": 1200, "caption": "VN Engine"},
@@ -167,6 +174,8 @@ DEFAULT_PROJECT = {
         "history": {"visible": True, "label": "History"},
         "quick_save": {"visible": True, "label": "Q. Save"},
         "quick_load": {"visible": True, "label": "Q. Load"},
+        "auto": {"visible": True, "label": "Auto"},
+        "mute": {"visible": True, "label": "Mute"},
     },
     "characters": {},
     "menus": {
@@ -178,6 +187,7 @@ DEFAULT_PROJECT = {
                 {"label": "Load Game", "action": "open_load_slots"},
                 {"label": "Settings", "action": "open_settings"},
                 {"label": "Credits", "action": "open_credits"},
+                {"label": "Extras", "action": "open_extras"},
                 {"label": "Quit", "action": "quit"},
             ],
         },
@@ -188,6 +198,7 @@ DEFAULT_PROJECT = {
                 {"label": "Save Game", "action": "open_save_slots"},
                 {"label": "Load Game", "action": "open_load_slots"},
                 {"label": "Settings", "action": "open_settings"},
+                {"label": "Extras", "action": "open_extras"},
                 {"label": "Main Menu", "action": "return_to_main_menu"},
             ],
         },
@@ -195,8 +206,17 @@ DEFAULT_PROJECT = {
             "title": "Settings",
             "items": [
                 {"label": "Text Speed", "action": "adjust_setting", "setting": "type_speed"},
+                {"label": "Auto Wait", "action": "adjust_setting", "setting": "auto_wait"},
                 {"label": "Music Volume", "action": "adjust_setting", "setting": "music_volume"},
                 {"label": "Sound Effects Volume", "action": "adjust_setting", "setting": "sfx_volume"},
+                {"label": "Dialogue Text Size", "action": "adjust_setting", "setting": "dialogue_font_scale"},
+                {"label": "Speaker Name Size", "action": "adjust_setting", "setting": "speaker_font_scale"},
+                {"label": "High Contrast Text", "action": "toggle_setting", "setting": "high_contrast"},
+                {"label": "Reduced Motion", "action": "toggle_setting", "setting": "reduced_motion"},
+                {"label": "Voice Playback", "action": "toggle_setting", "setting": "voice_enabled"},
+                {"label": "Dialogue Subtitles", "action": "toggle_setting", "setting": "subtitles_enabled"},
+                {"label": "Animated Text Reveal", "action": "toggle_setting", "setting": "animated_text"},
+                {"label": "Touch Advance Area", "action": "adjust_setting", "setting": "touch_advance_mode"},
                 {"label": "UI Size", "action": "adjust_setting", "setting": "ui_scale"},
                 {"label": "Display Mode", "action": "toggle_setting", "setting": "fullscreen"},
                 {"label": "Back", "action": "back"},
@@ -205,6 +225,7 @@ DEFAULT_PROJECT = {
         "slots": {
             "title_save": "Save Game",
             "title_load": "Load Game",
+            "title_copy": "Copy Save",
             "labels": {
                 "slot": "Slot {slot}",
                 "saved": "Slot {slot}: {chapter}",
@@ -266,8 +287,35 @@ class ProjectConfig:
         filename = story_file or self.story_file
         return loader.load_project_yaml(filename, self.data_dir)
 
+    def load_translation_tables(self, story_data: dict):
+        """Load optional locale catalogs from data/locales/<locale>.json."""
+        from engine.localization import normalize_translation_catalog
+
+        localization = story_data.get("localization", {}) if isinstance(story_data, dict) else {}
+        locales = localization.get("locales", {}) if isinstance(localization, dict) else {}
+        if not isinstance(locales, dict):
+            return {}
+        tables = {}
+        locale_dir = (self.data_dir / "locales").resolve()
+        for locale in locales:
+            path = (locale_dir / f"{locale}.json").resolve()
+            try:
+                path.relative_to(locale_dir)
+            except ValueError as error:
+                raise ValueError(f"Locale catalog path escapes the data/locales folder: {locale!r}.") from error
+            if not path.is_file():
+                continue
+            try:
+                value = json.loads(path.read_text(encoding="utf-8"))
+                tables[locale] = normalize_translation_catalog(value, locale)
+            except (OSError, json.JSONDecodeError, ValueError) as error:
+                raise ValueError(f"Could not load locale catalog {path}: {error}") from error
+        return tables
+
     def _validate(self):
         values = self.values
+        if not isinstance(values.get("USER", "user"), str):
+            raise ValueError("Project config 'USER' must be a string.")
         if not isinstance(values.get("name"), str) or not isinstance(values.get("story"), str):
             raise ValueError("Project config needs string values for 'name' and 'story'.")
         icon = values.get("icon")
@@ -309,6 +357,40 @@ class ProjectConfig:
             or values["save_slots"] < 1
         ):
             raise ValueError("Project config 'save_slots' must be a positive integer.")
+        for key in ("autosave_slots",):
+            if (
+                not isinstance(values.get(key), int)
+                or isinstance(values[key], bool)
+                or values[key] < 1
+            ):
+                raise ValueError(f"Project config {key!r} must be a positive integer.")
+        interval = values.get("autosave_interval_seconds")
+        try:
+            valid_autosave_interval = (
+                isinstance(interval, (int, float))
+                and not isinstance(interval, bool)
+                and math.isfinite(interval)
+                and interval >= 0
+            )
+        except OverflowError:
+            valid_autosave_interval = False
+        if not valid_autosave_interval:
+            raise ValueError("Project config 'autosave_interval_seconds' must be a non-negative number.")
+        migrations = values.get("save_migrations")
+        if not isinstance(migrations, dict):
+            raise ValueError("Project config 'save_migrations' must be an object.")
+        for group in ("dialogues", "variables"):
+            mapping = migrations.get(group, {})
+            if not isinstance(mapping, dict) or any(
+                not isinstance(old, str)
+                or not old
+                or (
+                    (group == "dialogues" and (not isinstance(new, str) or not new))
+                    or (group == "variables" and new is not None and (not isinstance(new, str) or not new))
+                )
+                for old, new in mapping.items()
+            ):
+                raise ValueError(f"Project config 'save_migrations.{group}' must map old names to new names or null.")
         paths = values.get("paths")
         if not isinstance(paths, dict) or any(
             not isinstance(paths.get(key), str) for key in ("data", "assets", "user_data")
@@ -358,6 +440,7 @@ class ProjectConfig:
         allowed_actions = {
             "new_game", "continue_game", "open_load_slots", "open_save_slots",
             "open_settings", "open_credits", "quit", "resume", "return_to_main_menu", "back",
+            "open_extras",
             "adjust_setting", "toggle_setting", "save_slot", "load_slot",
             "delete_selected_slot",
         }
@@ -376,13 +459,18 @@ class ProjectConfig:
                     raise ValueError(f"Project menu {menu_name!r} item {index} has an unknown action ID.")
                 if action in {"adjust_setting", "toggle_setting"}:
                     setting = item.get("setting")
-                    if not isinstance(setting, str) or setting not in {"type_speed", "music_volume", "sfx_volume", "fullscreen", "ui_scale"}:
+                    if not isinstance(setting, str) or setting not in {
+                        "type_speed", "music_volume", "sfx_volume", "fullscreen", "ui_scale",
+                        "auto_advance", "auto_wait", "dialogue_font_scale", "speaker_font_scale",
+                        "high_contrast", "muted", "reduced_motion", "voice_enabled", "animated_text",
+                                "touch_advance_mode", "subtitles_enabled", "locale", "speech_enabled",
+                    }:
                         raise ValueError(f"Project menu {menu_name!r} item {index} has an unknown setting ID.")
 
         slot_menu = menus.get("slots")
         if not isinstance(slot_menu, dict):
             raise ValueError("Project config 'menus.slots' must be an object.")
-        for key in ("title_save", "title_load"):
+        for key in ("title_save", "title_load", "title_copy"):
             if not isinstance(slot_menu.get(key), str):
                 raise ValueError(f"Project config menus.slots.{key} must be a string.")
         labels = slot_menu.get("labels")
@@ -411,7 +499,7 @@ class ProjectConfig:
         dialogue_buttons = values.get("dialogue_buttons")
         if not isinstance(dialogue_buttons, dict):
             raise ValueError("Project config 'dialogue_buttons' must be an object.")
-        for button_name in ("back", "history", "quick_save", "quick_load"):
+        for button_name in ("back", "history", "quick_save", "quick_load", "auto", "mute"):
             button = dialogue_buttons.get(button_name)
             if not isinstance(button, dict):
                 raise ValueError(

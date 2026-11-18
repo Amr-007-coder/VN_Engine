@@ -11,7 +11,7 @@ class CharacterAssetError(ValueError):
 class CharacterAssetCatalog:
     """Discovers character looks and expression PNGs from the asset folders."""
 
-    def __init__(self, project_assets=None, fallback_assets=None):
+    def __init__(self, project_assets=None, fallback_assets=None, mod_character_assets=None):
         self._characters = {}
         roots = []
         for root in (project_assets, fallback_assets):
@@ -58,7 +58,7 @@ class CharacterAssetCatalog:
                 )
                 expressions = look["expressions"].setdefault(expression_key, [])
 
-                # Project assets take precedence over matching engine assets.
+                # Earlier roots have priority over later roots.
                 if any(record["root_priority"] < root_priority for record in expressions):
                     continue
                 if any(
@@ -74,6 +74,36 @@ class CharacterAssetCatalog:
                         "root_priority": root_priority,
                     }
                 )
+
+        # Packaged character sprites sit between project and engine assets in
+        # lookup priority. A package can add characters or replace engine art,
+        # while project files remain authoritative.
+        for asset_name in mod_character_assets or ():
+            relative = PurePosixPath(asset_name)
+            if len(relative.parts) < 2 or relative.suffix.casefold() != ".png":
+                continue
+            character_name = relative.parts[0]
+            look_name = "/".join(relative.parts[1:-1])
+            expression_name = relative.stem
+            character_key = character_name.casefold()
+            look_key = look_name.casefold()
+            expression_key = expression_name.casefold()
+            character = self._characters.setdefault(character_key, {"name": character_name, "looks": {}})
+            look = character["looks"].setdefault(look_key, {"name": look_name, "expressions": {}})
+            expressions = look["expressions"].setdefault(expression_key, [])
+            if any(record["root_priority"] < 0.5 for record in expressions):
+                continue
+            expressions[:] = [record for record in expressions if record["root_priority"] < 0.5]
+            if any(
+                record["root_priority"] == 0.5 and record["expression"] == expression_name
+                for record in expressions
+            ):
+                continue
+            expressions.append({
+                "expression": expression_name,
+                "asset": f"characters/{relative.as_posix()}",
+                "root_priority": 0.5,
+            })
 
     @property
     def character_names(self) -> list[str]:
