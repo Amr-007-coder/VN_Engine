@@ -13,7 +13,7 @@ from pathlib import Path
 
 from engine.assets import AssetManager
 from engine.character_layer import CharacterLayer
-from engine.config import COLORS, FONTS, load_assets
+from engine.config import COLORS, FONTS, load_assets, load_ui_fonts
 from engine.embedded import bytes_for_path
 from engine.loader import PATHS, loader
 from engine.menu import Menu
@@ -38,9 +38,16 @@ from engine.settings import SettingsStore
 from engine.speech import SpeechAnnouncer
 from engine.story import StoryFlow
 from engine.theme import resolve_theme
+from engine.style import apply_style_variant, resolve_style, style_component
+from engine.layout import component_layout, layout_children, resolve_rect, safe_area_rect
+from engine.skin import control_state, draw_skin, fit_surface
+from engine.renderer_api import render_component as render_plugin_component
 from engine.ui_text import translate_label, translate_ui
-from engine.ui import Button, Textbox
-from engine.ui_scale import set_ui_scale, ui_size
+from engine.ui import (
+    Button, Textbox, dialogue_textbox_rect, draw_dialogue_control,
+    draw_style_panel, layout_dialogue_controls, render_history_panel,
+)
+from engine.ui_scale import get_ui_scale, set_ui_scale, ui_size
 from engine.validator import StoryValidator
 
 
@@ -78,6 +85,7 @@ class Engine:
         project_config: ProjectConfig | None = None,
         menu_renderer: MenuRenderer | None = None,
         menu_renderer_factory=None,
+        renderer_plugin=None,
     ):
         self.project = project_config or ProjectConfig.load()
         self.story_file = story_file or self.project.story_file
@@ -105,10 +113,13 @@ class Engine:
         self.clock = None
         self.story_data = None
         self.assets = None
-        self.theme = resolve_theme(self.project.theme)
+        self.base_style = resolve_style(self.project.style_values)
+        self.style = apply_style_variant(self.base_style, "default")
+        self.theme = resolve_theme(self.style.get("theme", self.project.theme))
         self.has_project_theme = any(key != "textbox" for key in self.project.theme)
         self.renderer_override = menu_renderer
         self.renderer_factory = menu_renderer_factory
+        self.renderer_plugin = renderer_plugin
         self.menu_renderer = None
 
         self.settings = SettingsStore(self.project.user_data_dir)
@@ -290,6 +301,7 @@ class Engine:
                 raise ValueError(f"Editor test start refers to missing dialogue {start_id!r}.")
             self.editor_test_context = (start_id, initial_variables)
         self.settings.load()
+        self._apply_style_variant(self.settings.values.get("theme_variant", "default"), rebuild=False)
         if self.settings.values.get("locale") not in self.available_locales:
             self.settings.set("locale", self.default_locale)
             self.settings.save()
@@ -358,11 +370,50 @@ class Engine:
             raise
 
     def _create_menu_renderer(self):
+        player_preferences = {
+            "high_contrast": bool(self.settings.values.get("high_contrast", False)),
+            "reduced_motion": bool(self.settings.values.get("reduced_motion", False)),
+            "dialogue_font_scale": float(self.settings.values.get("dialogue_font_scale", 1.0)),
+            "speaker_font_scale": float(self.settings.values.get("speaker_font_scale", 1.0)),
+        }
         if self.renderer_factory is not None:
-            return self.renderer_factory(self.assets, self.theme)
-        if not self.has_project_theme:
-            return FallbackMenuRenderer(self.assets, self.theme)
-        return DeclarativeMenuRenderer(self.assets, self.theme)
+            renderer = self.renderer_factory(self.assets, self.theme)
+            renderer.style = self.style
+        elif not self.has_project_theme:
+            renderer = FallbackMenuRenderer(self.assets, self.theme, style=self.style, player_preferences=player_preferences)
+        else:
+            renderer = DeclarativeMenuRenderer(self.assets, self.theme, style=self.style, player_preferences=player_preferences)
+        renderer.player_preferences = player_preferences
+        return renderer
+
+    def _apply_style_variant(self, variant_name, rebuild=True):
+        variants = self.base_style.get("variants", {})
+        available = {"default", *(name for name in variants if isinstance(name, str))} if isinstance(variants, dict) else {"default"}
+        if variant_name not in available:
+            variant_name = "default"
+        self.style = apply_style_variant(self.base_style, variant_name)
+        self.theme = resolve_theme(self.style.get("theme", {}))
+        if rebuild and self.assets is not None:
+            load_assets(self.assets, self.theme)
+            self._apply_comfort_font_sizes()
+            if self.renderer_override is None:
+                self.menu_renderer = self._create_menu_renderer()
+            if self.textbox is not None:
+                self.textbox = self._create_textbox(self.textbox)
+            self.choice_buttons = []
+            self._sync_choice_buttons()
+            pause_image = style_component(self.style, "pause_control").get("image") or self.theme.get("pause_button", {}).get("image")
+            if pause_image:
+                try:
+                    self.pause_button_image = self.assets.load_image(pause_image).convert_alpha()
+                except (FileNotFoundError, pygame.error):
+                    self.pause_button_image = None
+            else:
+                try:
+                    self.pause_button_image = loader.load_image("pause.png").convert_alpha()
+                except (FileNotFoundError, pygame.error):
+                    self.pause_button_image = None
+            self._layout_pause_button()
 
     def _play_intro(self):
         for _ in self._intro_frames():
@@ -380,28 +431,25 @@ class Engine:
         except (FileNotFoundError, pygame.error):
             return
         screen_width, screen_height = self.screen.get_size()
-        max_side = int(min(screen_width, screen_height) * 0.45)
-        scale = min(1.0, max_side / max(logo.get_width(), logo.get_height()))
-        if scale < 1.0:
-            logo = pygame.transform.smoothscale(
-                logo,
-                (max(1, int(logo.get_width() * scale)), max(1, int(logo.get_height() * scale))),
-            )
-        logo_rect = logo.get_rect(center=(screen_width // 2, screen_height // 2 - 20))
+        appearance = style_component(self.style, "intro_cards")
+        max_side = max(1, int(min(screen_width, screen_height) * float(appearance.get("logo_max_screen_fraction", 0.45))))
+        if appearance.get("allow_logo_upscale", False) or max(logo.get_size()) > max_side:
+            logo = fit_surface(logo, (max_side, max_side), "contain")
+        logo_rect = logo.get_rect(center=(screen_width // 2, screen_height // 2 - ui_size(appearance.get("logo_y_offset", 20))))
         intro = self.project.values["intro"]
         engine_version = _read_engine_version()
         game_fonts = self.theme.get("game_fonts", {})
         font_sizes = self.theme.get("game_font_sizes", {})
-        intro_font = game_fonts.get("intro", "standard.ttf")
+        intro_font = appearance.get("font", game_fonts.get("intro", "standard.ttf"))
         font = self.assets.load_font(
-            intro_font, ui_size(font_sizes.get("intro", 40))
+            intro_font, ui_size(appearance.get("font_size", font_sizes.get("intro", 40)))
         )
         small_font = self.assets.load_font(
-            intro_font, ui_size(font_sizes.get("intro_small", 21))
+            intro_font, ui_size(appearance.get("small_font_size", font_sizes.get("intro_small", 21)))
         )
         cards = [
-            {"image": logo, "kind": "logo", "hold": 3.0},
-            {"image": self._intro_image(intro["credit_image"]), "kind": "credit", "hold": 2.5},
+            {"image": logo, "kind": "logo", "hold": float(appearance.get("logo_hold", 3.0))},
+            {"image": self._intro_image(intro["credit_image"]), "kind": "credit", "hold": float(appearance.get("credit_hold", 2.5))},
         ]
         warning_image = self._intro_image(intro["warning_image"])
         headphones_image = self._intro_image(intro["headphones_image"])
@@ -411,7 +459,7 @@ class Engine:
                     "image": warning_image,
                     "extra_image": headphones_image,
                     "kind": "warning",
-                    "hold": 2.5,
+                    "hold": float(appearance.get("warning_hold", 2.5)),
                 }
             )
         sound_channel = None
@@ -422,8 +470,10 @@ class Engine:
                 sound_channel = intro_sound.play()
         except (FileNotFoundError, pygame.error):
             pass
-        fade_seconds = 0.75
-        stars = [(random.randrange(screen_width), random.randrange(screen_height), random.uniform(0.2, 1.0), random.random() * math.tau) for _ in range(36)]
+        fade_seconds = max(0.001, float(appearance.get("fade_seconds", 0.75)))
+        star_min = float(appearance.get("star_min_brightness", 0.2))
+        star_max = max(star_min, float(appearance.get("star_max_brightness", 1.0)))
+        stars = [(random.randrange(screen_width), random.randrange(screen_height), random.uniform(star_min, star_max), random.random() * math.tau) for _ in range(max(0, int(appearance.get("star_count", 36))))]
         card_start = pygame.time.get_ticks()
         card_index = 0
         while self.running:
@@ -446,42 +496,58 @@ class Engine:
             alpha = self._smoothstep(min(1.0, elapsed / fade_seconds))
             if elapsed > card["hold"] + fade_seconds:
                 alpha *= 1.0 - self._smoothstep((elapsed - card["hold"] - fade_seconds) / fade_seconds)
-            self.screen.fill((0, 0, 0))
+            self.screen.fill(tuple(appearance.get("background_color", (0, 0, 0))))
             if card["kind"] == "logo":
-                self._draw_intro_stars(stars, now)
+                self._draw_intro_stars(stars, now, appearance)
                 card["image"].set_alpha(round(255 * alpha))
                 self.screen.blit(card["image"], logo_rect)
-                tm = small_font.render("TM", True, (238, 238, 245))
-                tm_rect = tm.get_rect(topright=(logo_rect.right - ui_size(5), logo_rect.top + ui_size(95)))
+                tm = small_font.render("TM", True, appearance.get("trademark_color", appearance.get("text_color", (238, 238, 245))))
+                tm_rect = tm.get_rect(topright=(logo_rect.right - ui_size(appearance.get("trademark_right_offset", 5)), logo_rect.top + ui_size(appearance.get("trademark_top_offset", 95))))
                 tm.set_alpha(round(255 * alpha))
                 self.screen.blit(tm, tm_rect)
                 lines = ["© 2026 Marpp. All rights reserved.", "Powered by Pygame-CE"]
                 if engine_version:
                     lines.append(f"v{engine_version}")
                 for index, line in enumerate(lines):
-                    rendered = small_font.render(line, True, (190, 198, 215))
+                    rendered = small_font.render(line, True, appearance.get("small_text_color", (190, 198, 215)))
                     rendered.set_alpha(round(255 * alpha))
-                    self.screen.blit(rendered, rendered.get_rect(center=(screen_width // 2, screen_height - ui_size(100) + index * ui_size(28))))
+                    self.screen.blit(rendered, rendered.get_rect(center=(screen_width // 2, screen_height - ui_size(appearance.get("copyright_bottom_offset", 100)) + index * ui_size(appearance.get("copyright_line_gap", 28)))))
             else:
                 image = card["image"]
                 image_rect = None
                 if image is not None:
-                    image = pygame.transform.smoothscale(image, (min(image.get_width(), screen_width // 2), min(image.get_height(), screen_height // 2)))
+                    if card.get("extra_image"):
+                        image_width = max(1, round(screen_width * float(appearance.get("warning_image_width_fraction", 0.5))))
+                        image_height = max(1, round(screen_height * float(appearance.get("warning_image_height_fraction", 0.5))))
+                        y_offset = appearance.get("warning_image_y_offset", 150)
+                    else:
+                        image_width = max(1, round(screen_width * float(appearance.get("credit_image_width_fraction", 0.5))))
+                        image_height = max(1, round(screen_height * float(appearance.get("credit_image_height_fraction", 0.5))))
+                        y_offset = appearance.get("credit_image_y_offset", 90)
+                    if appearance.get("allow_card_image_upscale", False) or image.get_width() > image_width or image.get_height() > image_height:
+                        image = fit_surface(image, (image_width, image_height), "contain")
+                    else:
+                        image = image.copy()
                     image.set_alpha(round(255 * alpha))
-                    image_y = screen_height // 2 - ui_size(150 if card.get("extra_image") else 90)
+                    image_y = screen_height // 2 - ui_size(y_offset)
                     image_rect = image.get_rect(center=(screen_width // 2, image_y))
                     self.screen.blit(image, image_rect)
                 extra_image = card.get("extra_image")
                 if extra_image is not None:
-                    extra = pygame.transform.smoothscale(extra_image, (min(extra_image.get_width(), screen_width // 3), min(extra_image.get_height(), screen_height // 3)))
+                    extra_width = max(1, round(screen_width * float(appearance.get("extra_image_width_fraction", 0.333))))
+                    extra_height = max(1, round(screen_height * float(appearance.get("extra_image_height_fraction", 0.333))))
+                    if appearance.get("allow_card_image_upscale", False) or extra_image.get_width() > extra_width or extra_image.get_height() > extra_height:
+                        extra = fit_surface(extra_image, (extra_width, extra_height), "contain")
+                    else:
+                        extra = extra_image.copy()
                     extra.set_alpha(round(255 * alpha))
-                    self.screen.blit(extra, extra.get_rect(center=(screen_width // 2, screen_height // 2 + ui_size(190))))
+                    self.screen.blit(extra, extra.get_rect(center=(screen_width // 2, screen_height // 2 + ui_size(appearance.get("extra_image_y_offset", 190)))))
                 message = f"A Game by {intro['creator']}" if card["kind"] == "credit" else intro["warning_message"]
                 if card["kind"] == "credit" and intro.get("game_version"):
                     message += f"\nVersion {intro['game_version']}"
-                text_top = image_rect.bottom + ui_size(24) if card["kind"] == "credit" and image_rect else screen_height // 2
+                text_top = image_rect.bottom + ui_size(appearance.get("credit_text_gap", 24)) if card["kind"] == "credit" and image_rect else screen_height // 2
                 for line_index, line in enumerate(message.splitlines()):
-                    text = font.render(line, True, (238, 238, 245))
+                    text = font.render(line, True, appearance.get("text_color", (238, 238, 245)))
                     text.set_alpha(round(255 * alpha))
                     y = text_top + line_index * font.get_linesize()
                     self.screen.blit(text, text.get_rect(center=(screen_width // 2, y)))
@@ -503,11 +569,17 @@ class Engine:
         except (FileNotFoundError, pygame.error):
             return None
 
-    def _draw_intro_stars(self, stars, now):
+    def _draw_intro_stars(self, stars, now, appearance=None):
+        appearance = appearance if isinstance(appearance, dict) else style_component(self.style, "intro_cards")
+        base_shade = int(appearance.get("star_base_shade", 75))
+        shade_range = int(appearance.get("star_shade_range", 100))
+        blue_offset = int(appearance.get("star_blue_offset", 12))
+        radius = max(0, int(appearance.get("star_radius", 1)))
+        period = max(1, int(appearance.get("star_twinkle_period_ms", 520)))
         for x, y, brightness, phase in stars:
-            twinkle = (math.sin(now / 520 + phase) + 1) / 2
-            shade = int(75 + 100 * twinkle * brightness)
-            pygame.draw.circle(self.screen, (shade, shade, min(255, shade + 12)), (x, y), 1)
+            twinkle = (math.sin(now / period + phase) + 1) / 2
+            shade = max(0, min(255, int(base_shade + shade_range * twinkle * brightness)))
+            pygame.draw.circle(self.screen, (shade, shade, min(255, shade + blue_offset)), (x, y), radius)
 
     def _handle_events(self):
         for event in pygame.event.get():
@@ -1098,6 +1170,15 @@ class Engine:
         self._choose_story_option(selected)
 
     def _render(self):
+        display_surface = pygame.display.get_surface()
+        if display_surface is None:
+            self.running = False
+            return
+        if self.screen is not display_surface:
+            # SDL may recreate the native window surface after a display-mode
+            # change or a driver reset. Always draw through its current handle.
+            self.screen = display_surface
+            self._sync_window_size()
         if self.mode == "game" or self._menu_over_game():
             self._render_game()
         else:
@@ -1118,21 +1199,25 @@ class Engine:
             elif self.mode in {"mods", "mod_details"}:
                 self._draw_mod_panel()
             elif self.mode == "cg_viewer" and self.gallery_image is not None:
-                available = pygame.Rect(
-                    ui_size(40), ui_size(40),
-                    self.screen.get_width() - ui_size(80),
-                    self.screen.get_height() - ui_size(80),
+                available = self._layout_screen_rect("cg_viewer", "image", self.screen.get_rect())
+                handled = self._render_plugin_component(
+                    "gallery", self.screen, available,
+                    data={"mode": "cg_viewer", "image": self.gallery_image},
                 )
-                source_width, source_height = self.gallery_image.get_size()
-                scale = min(available.width / max(1, source_width), available.height / max(1, source_height))
-                image_size = (max(1, round(source_width * scale)), max(1, round(source_height * scale)))
-                image = pygame.transform.smoothscale(self.gallery_image, image_size)
-                self.screen.blit(image, image.get_rect(center=available.center))
+                if not handled:
+                    gallery_style = style_component(self.style, "gallery")
+                    image = fit_surface(self.gallery_image, available.size, gallery_style.get("image_fit", "contain"))
+                    self.screen.blit(image, image.get_rect(center=available.center))
             if self.mode == "mod_details":
                 self._draw_mod_details()
             else:
                 renderer = self._renderer_for_active_menu()
-                renderer.render(self.screen, self.active_menu)
+                handled = self._render_plugin_component(
+                    "menu", self.screen, self.screen.get_rect(),
+                    data={"menu": self.active_menu, "mode": self.mode},
+                )
+                if not handled:
+                    renderer.render(self.screen, self.active_menu)
             if self.mode == "slots":
                 self._render_slot_buttons()
             elif self.mode == "credits":
@@ -1161,12 +1246,20 @@ class Engine:
             return self.renderer_override
         return self.menu_renderer
 
+    def _render_plugin_component(self, name, target, rect, state="normal", data=None):
+        return render_plugin_component(
+            self.renderer_plugin, self, name, target, rect, state, data
+        )
+
     def _render_game(self):
         scene = pygame.Surface(self.screen.get_size())
-        scene.fill(COLORS.background)
+        scene_style = style_component(self.style, "scene")
+        scene.fill(tuple(scene_style.get("background_color", COLORS.background)))
         if self.background_image is not None:
-            background = pygame.transform.smoothscale(
-                self.background_image, scene.get_size()
+            background = fit_surface(
+                self.background_image,
+                scene.get_size(),
+                scene_style.get("background_fit", "cover"),
             )
             scene.blit(background, (0, 0))
 
@@ -1176,38 +1269,70 @@ class Engine:
         if self.flow is None:
             self.screen.blit(scene, (0, 0))
             return
-        self.textbox.render()
-        scene.blit(self.textbox.surface, self.textbox.rect)
+        textbox_handled = self._render_plugin_component(
+            "textbox", scene, self.textbox.rect,
+            data={"textbox": self.textbox, "flow": self.flow},
+        )
+        if not textbox_handled:
+            self.textbox.render()
+            scene.blit(self.textbox.surface, self.textbox.rect)
         if self.flow.choices_visible:
             for index, (button, option) in enumerate(zip(self.choice_buttons, self.flow.options)):
                 hovered = button.rect.collidepoint(pygame.mouse.get_pos())
                 if hovered:
                     self.focused_choice_index = index
-                button.render(
-                    option["label"],
+                state = control_state(
                     hovered=hovered,
+                    focused=index == self.focused_choice_index and not hovered,
                 )
-                if index == self.focused_choice_index:
+                handled = self._render_plugin_component(
+                    "choice", scene, button.rect, state,
+                    data={"label": option["label"], "option": option, "index": index, "button": button},
+                )
+                if not handled:
+                    button.render(
+                        option["label"],
+                        hovered=hovered,
+                        focused=index == self.focused_choice_index and not hovered,
+                    )
+                if index == self.focused_choice_index and not handled:
+                    choice_style = style_component(self.style, "choices")
                     pygame.draw.rect(
                         button.surface,
-                        self.theme.get("colors", {}).get("accent", COLORS.text_highlight),
+                        choice_style.get("focus_border_color", self.theme.get("colors", {}).get("accent", COLORS.text_highlight)),
                         button.surface.get_rect(),
-                        width=max(1, ui_size(3)),
-                        border_radius=ui_size(6),
+                        width=max(1, ui_size(choice_style.get("focus_border_width", 3))),
+                        border_radius=ui_size(choice_style.get("radius", 6)),
                     )
-                scene.blit(button.surface, button.rect)
+                if not handled:
+                    scene.blit(button.surface, button.rect)
 
         if self._choice_timeout_deadline is not None and self.flow.choices_visible:
             remaining = max(0.0, (self._choice_timeout_deadline - pygame.time.get_ticks()) / 1000)
-            countdown = FONTS.dialogue_controls.render(
-                f"Auto-selecting in {remaining:.1f}s",
-                True,
-                COLORS.text,
+            countdown_style = style_component(self.style, "chrome").get("countdown", {})
+            countdown_font = self.assets.load_font(
+                countdown_style.get("font", "standard.ttf"),
+                ui_size(countdown_style.get("font_size", 16)),
             )
-            countdown_rect = countdown.get_rect(midtop=(self.screen.get_width() // 2, ui_size(12)))
-            countdown_back = countdown_rect.inflate(ui_size(20), ui_size(10))
+            countdown_text = self._ui_text(
+                "choices.auto_select_countdown", "Auto-selecting in {seconds}s"
+            )
+            try:
+                countdown_text = countdown_text.format(seconds=f"{remaining:.1f}")
+            except (IndexError, KeyError, ValueError):
+                countdown_text = f"Auto-selecting in {remaining:.1f}s"
+            text_color = (255, 255, 255) if self.settings.values.get("high_contrast", False) else countdown_style.get("text_color", COLORS.text)
+            countdown = countdown_font.render(countdown_text, True, text_color)
+            countdown_rect = countdown.get_rect(midtop=(scene.get_width() // 2, ui_size(countdown_style.get("top", 12))))
+            countdown_back = countdown_rect.inflate(
+                ui_size(countdown_style.get("padding_x", 20)),
+                ui_size(countdown_style.get("padding_y", 10)),
+            )
             badge = pygame.Surface(countdown_back.size, pygame.SRCALPHA)
-            pygame.draw.rect(badge, (0, 0, 0, 190), badge.get_rect(), border_radius=ui_size(6))
+            background = tuple(countdown_style.get("background_color", (0, 0, 0, 190)))
+            if self.settings.values.get("high_contrast", False):
+                background = (0, 0, 0, 255)
+            pygame.draw.rect(badge, background, badge.get_rect(), border_radius=ui_size(countdown_style.get("radius", 6)))
             scene.blit(badge, countdown_back)
             scene.blit(countdown, countdown_rect)
 
@@ -1225,22 +1350,28 @@ class Engine:
         if self.history_visible:
             self._render_history()
         if pygame.time.get_ticks() < self.autosave_notice_until:
-            notice = FONTS.button_text.render("Autosaved", True, COLORS.text)
-            box = notice.get_rect(midtop=(self.screen.get_width() // 2, ui_size(18))).inflate(ui_size(28), ui_size(16))
-            pygame.draw.rect(self.screen, (0, 0, 0, 190), box, border_radius=ui_size(8))
+            chrome = style_component(self.style, "chrome").get("autosave_notice", {})
+            font = self.assets.load_font("standard.ttf", ui_size(chrome.get("font_size", 18)))
+            notice = font.render("Autosaved", True, chrome.get("text_color", COLORS.text))
+            box = notice.get_rect(midtop=(self.screen.get_width() // 2, ui_size(chrome.get("top", 18)))).inflate(ui_size(chrome.get("padding_x", 28)), ui_size(chrome.get("padding_y", 16)))
+            pygame.draw.rect(self.screen, tuple(chrome.get("background_color", (0, 0, 0, 190))), box, border_radius=ui_size(chrome.get("radius", 8)))
             self.screen.blit(notice, notice.get_rect(center=box.center))
         if self.skip_mode is not None or self.auto_mode:
             mode = f"SKIP: {self.skip_mode.upper()}" if self.skip_mode else "AUTO"
-            status = FONTS.dialogue_controls.render(mode, True, COLORS.text_highlight)
-            box = status.get_rect(topright=(self.screen.get_width() - ui_size(20), ui_size(18))).inflate(ui_size(20), ui_size(12))
-            pygame.draw.rect(self.screen, (0, 0, 0, 190), box, border_radius=ui_size(6))
+            chrome = style_component(self.style, "chrome").get("mode_badge", {})
+            font = self.assets.load_font("standard.ttf", ui_size(chrome.get("font_size", 16)))
+            status = font.render(mode, True, chrome.get("text_color", COLORS.text_highlight))
+            box = status.get_rect(topright=(self.screen.get_width() - ui_size(chrome.get("right", 20)), ui_size(chrome.get("top", 18)))).inflate(ui_size(chrome.get("padding_x", 20)), ui_size(chrome.get("padding_y", 12)))
+            pygame.draw.rect(self.screen, tuple(chrome.get("background_color", (0, 0, 0, 190))), box, border_radius=ui_size(chrome.get("radius", 6)))
             self.screen.blit(status, status.get_rect(center=box.center))
         if self.variable_inspector_visible:
             self._render_variable_inspector()
         elif self.editor_test_context is not None:
-            hint = FONTS.dialogue_controls.render("F3 | Test Variables", True, COLORS.text)
-            hint_box = hint.get_rect(topleft=(ui_size(18), ui_size(18))).inflate(ui_size(18), ui_size(10))
-            pygame.draw.rect(self.screen, (0, 0, 0, 175), hint_box, border_radius=ui_size(5))
+            chrome = style_component(self.style, "chrome").get("test_hint", {})
+            font = self.assets.load_font("standard.ttf", ui_size(chrome.get("font_size", 14)))
+            hint = font.render("F3 | Test Variables", True, chrome.get("text_color", COLORS.text))
+            hint_box = hint.get_rect(topleft=(ui_size(chrome.get("left", 18)), ui_size(chrome.get("top", 18)))).inflate(ui_size(chrome.get("padding_x", 18)), ui_size(chrome.get("padding_y", 10)))
+            pygame.draw.rect(self.screen, tuple(chrome.get("background_color", (0, 0, 0, 175))), hint_box, border_radius=ui_size(chrome.get("radius", 5)))
             self.screen.blit(hint, hint.get_rect(center=hint_box.center))
 
     def _handle_variable_inspector_event(self, event):
@@ -1379,74 +1510,105 @@ class Engine:
     def _render_variable_inspector(self):
         if self.flow is None:
             return
+        panel_rect = self._layout_screen_rect("overlays", "variable_inspector")
+        if self._render_plugin_component(
+            "overlay", self.screen, panel_rect,
+            data={"kind": "variable_inspector", "variables": self.flow.variables,
+                  "selected_index": self.variable_inspector_index, "edit": self.variable_inspector_edit},
+        ):
+            return
+        overlay_style = style_component(self.style, "overlays")
         names = sorted(self.flow.variables)
-        panel_width = min(ui_size(540), self.screen.get_width() - ui_size(32))
-        panel_height = min(ui_size(520), self.screen.get_height() - ui_size(32))
-        panel = pygame.Surface((panel_width, panel_height), pygame.SRCALPHA)
-        pygame.draw.rect(panel, (12, 18, 30, 238), panel.get_rect(), border_radius=ui_size(12))
-        pygame.draw.rect(panel, (110, 160, 230, 255), panel.get_rect(), width=ui_size(2), border_radius=ui_size(12))
-        title = FONTS.char_name.render("Test Variables", True, (240, 245, 255))
-        panel.blit(title, (ui_size(18), ui_size(14)))
-        hint = FONTS.dialogue_controls.render("F3 close | Up/Down select | Enter edit", True, (195, 208, 226))
-        hint_more = FONTS.dialogue_controls.render("+/- adjust numbers | Space toggles bool", True, (195, 208, 226))
-        panel.blit(hint, (ui_size(18), ui_size(52)))
-        panel.blit(hint_more, (ui_size(18), ui_size(72)))
-        line_height = ui_size(30)
-        visible_rows = max(1, (panel_height - ui_size(125)) // line_height)
+        panel = pygame.Surface(panel_rect.size, pygame.SRCALPHA)
+        panel.fill(tuple(overlay_style.get("panel_color", (8, 8, 16, 210))))
+        pygame.draw.rect(panel, tuple(overlay_style.get("border_color", (95, 84, 112))), panel.get_rect(), width=ui_size(overlay_style.get("border_width", 1)), border_radius=ui_size(overlay_style.get("radius", 10)))
+        padding = ui_size(overlay_style.get("padding", 24))
+        title = FONTS.char_name.render("Test Variables", True, overlay_style.get("text_color", (240, 245, 255)))
+        panel.blit(title, (padding, ui_size(14)))
+        hint_color = overlay_style.get("hint_color", (195, 208, 226))
+        hint = FONTS.dialogue_controls.render("F3 close | Up/Down select | Enter edit", True, hint_color)
+        hint_more = FONTS.dialogue_controls.render("+/- adjust numbers | Space toggles bool", True, hint_color)
+        panel.blit(hint, (padding, ui_size(52)))
+        panel.blit(hint_more, (padding, ui_size(72)))
+        line_height = ui_size(overlay_style.get("line_height", 30))
+        visible_rows = max(1, (panel_rect.height - ui_size(125)) // line_height)
         start = max(0, min(self.variable_inspector_index - visible_rows + 1, max(0, len(names) - visible_rows)))
         for row, name in enumerate(names[start:start + visible_rows]):
             index = start + row
             y = ui_size(105) + row * line_height
             selected = index == self.variable_inspector_index
             if selected:
-                pygame.draw.rect(panel, (42, 62, 91, 235), (ui_size(10), y - ui_size(2), panel_width - ui_size(20), line_height), border_radius=ui_size(5))
+                pygame.draw.rect(panel, tuple(overlay_style.get("selection_color", (42, 62, 91, 235))), (ui_size(10), y - ui_size(2), panel.get_width() - ui_size(20), line_height), border_radius=ui_size(5))
             value = self.flow.variables[name]
             shown = self.variable_inspector_edit["text"] if selected and self.variable_inspector_edit is not None else repr(value)
             if len(shown) > 48:
                 shown = shown[:45] + "..."
-            rendered = FONTS.button_text.render(f"{name} = {shown}", True, (250, 250, 250) if selected else (205, 214, 228))
-            panel.blit(rendered, (ui_size(18), y + ui_size(2)))
+            rendered = FONTS.button_text.render(f"{name} = {shown}", True, overlay_style.get("selected_text_color", (250, 250, 250)) if selected else overlay_style.get("value_color", (205, 214, 228)))
+            panel.blit(rendered, (padding, y + ui_size(2)))
         if not names:
-            empty = FONTS.button_text.render("This story declares no variables.", True, (205, 214, 228))
+            empty = FONTS.button_text.render("This story declares no variables.", True, overlay_style.get("value_color", (205, 214, 228)))
             panel.blit(empty, (ui_size(18), ui_size(105)))
         if self.variable_inspector_edit is not None:
             footer_text = "Editing value - Enter applies, Esc cancels"
         else:
             footer_text = "Changes apply to the current test run only"
-        footer = FONTS.button_text.render(footer_text, True, (195, 208, 226))
-        panel.blit(footer, (ui_size(18), panel_height - ui_size(30)))
-        rect = panel.get_rect(center=self.screen.get_rect().center)
-        self.screen.blit(panel, rect)
+        footer = FONTS.button_text.render(footer_text, True, hint_color)
+        panel.blit(footer, (padding, panel.get_height() - ui_size(30)))
+        self.screen.blit(panel, panel_rect)
 
     def _render_status(self):
         if not self.status_message:
             return
-        status = FONTS.button_text.render(self.status_message, True, COLORS.text_highlight)
-        self.screen.blit(status, status.get_rect(center=(self.screen.get_width() // 2, self.screen.get_height() - ui_size(40))))
+        chrome = style_component(self.style, "chrome").get("status", {})
+        font = self.assets.load_font("standard.ttf", ui_size(chrome.get("font_size", 16)))
+        status = font.render(self.status_message, True, chrome.get("color", COLORS.text_highlight))
+        self.screen.blit(status, status.get_rect(center=(self.screen.get_width() // 2, self.screen.get_height() - ui_size(chrome.get("bottom", 40)))))
+
+    def _layout_screen_rect(self, screen_name, component_name, fallback=None):
+        viewport = self.screen.get_size() if self.screen is not None else self.window_size
+        layouts = self.style.get("layouts", {})
+        spec = component_layout(layouts, screen_name, component_name, viewport)
+        if not spec:
+            return pygame.Rect(fallback or (0, 0, viewport[0], viewport[1]))
+        bounds = safe_area_rect(layouts, viewport)
+        return pygame.Rect(resolve_rect(spec, bounds, scale=get_ui_scale()))
+
+    def _draw_style_panel(self, rect, component_name="menu"):
+        draw_style_panel(
+            self.screen, rect, self.style, component_name,
+            bool(self.settings.values.get("high_contrast", False)),
+        )
+
+    def _style_font(self, component_name, size_key="font_size", default_size=20, family_key="font", preference="dialogue_font_scale"):
+        component = style_component(self.style, component_name)
+        game_fonts = self.theme.get("game_fonts", {})
+        fallback_family = game_fonts.get("text", "standard.ttf")
+        family = component.get(family_key, fallback_family) or fallback_family
+        size = component.get(size_key, default_size)
+        scale = self.settings.values.get(preference, 1.0) if preference else 1.0
+        return self.assets.load_font(family, max(1, ui_size(float(size) * float(scale))))
 
     def _create_textbox(self, previous=None):
         textbox_theme = self.theme.get("textbox", {})
-        image_name = textbox_theme.get("background")
+        textbox_style = style_component(self.style, "textbox")
+        dialogue_text_style = style_component(self.style, "dialogue_text")
+        image_name = textbox_style.get("background_image") or textbox_theme.get("background")
         image = self.assets.load_image(image_name) if image_name else None
-        color = textbox_theme.get("color")
+        color = textbox_style.get("background_color") or textbox_theme.get("color")
         screen_width, screen_height = self.window_size
-        x = round(screen_width * textbox_theme.get("x", 0.02))
-        bottom = round(screen_height * textbox_theme.get("bottom", 0.0))
         dialogue_buttons = self.project.values.get("dialogue_buttons", {})
-        if any(isinstance(button, dict) and button.get("visible", False) for button in dialogue_buttons.values()):
-            bottom = max(bottom, ui_size(38))
-        width = max(1, round(screen_width * textbox_theme.get("width", 0.96)))
-        height = max(1, round(screen_height * textbox_theme.get("height", 0.21)))
+        controls_visible = any(isinstance(button, dict) and button.get("visible", False) for button in dialogue_buttons.values())
+        textbox_rect = dialogue_textbox_rect(
+            self.style.get("layouts", {}), (screen_width, screen_height), controls_visible
+        )
         textbox = Textbox(
-            x,
-            screen_height - bottom - height,
-            width,
-            height,
+            *textbox_rect,
             panel_color=tuple(color) if color is not None else COLORS.panel,
             panel_image=image,
-            panel_opacity=textbox_theme.get("opacity", 0.95),
+            panel_opacity=textbox_style.get("opacity", textbox_theme.get("opacity", 0.95)),
             high_contrast=self.settings.values.get("high_contrast", False),
             subtitles_enabled=self.settings.values.get("subtitles_enabled", True),
+            style={**textbox_style, **dialogue_text_style},
         )
         if previous is not None:
             textbox.current_speaker = previous.current_speaker
@@ -1458,114 +1620,105 @@ class Engine:
         return textbox
 
     def _apply_comfort_font_sizes(self):
-        sizes = self.theme.get("game_font_sizes", {})
-        for font, setting, theme_key in (
-            (FONTS.normal_text, "dialogue_font_scale", "text"),
-            (FONTS.char_name, "speaker_font_scale", "name"),
-        ):
-            set_point_size = getattr(font, "set_point_size", None)
-            if not callable(set_point_size):
-                continue
-            base_size = ui_size(sizes.get(theme_key, 24 if theme_key == "text" else 28))
-            scale = self.settings.values.get(setting, 1.0)
-            set_point_size(max(1, round(base_size * scale)))
+        load_ui_fonts(self.assets, self.theme, self.style, self.settings.values)
 
     def _apply_comfort_settings(self):
         self._apply_comfort_font_sizes()
         if self.textbox is not None:
             self.textbox = self._create_textbox(self.textbox)
+        if self.renderer_override is None and self.assets is not None:
+            self.menu_renderer = self._create_menu_renderer()
+        if self.flow is not None:
+            self.choice_buttons = []
+            self._sync_choice_buttons()
 
     def _layout_pause_button(self):
         if self.screen is None:
             self.pause_button_rect = pygame.Rect(0, 0, 0, 0)
             return
-        pause_theme = self.theme.get("pause_button", {})
-        side = max(1, ui_size(pause_theme.get("size", 78)))
-        margin = max(0, ui_size(pause_theme.get("margin", 16)))
-        self.pause_button_rect = pygame.Rect(margin, margin, side, side)
+        layouts = self.style.get("layouts", {})
+        spec = component_layout(layouts, "dialogue", "pause_control", self.screen.get_size())
+        bounds = safe_area_rect(layouts, self.screen.get_size())
+        self.pause_button_rect = pygame.Rect(resolve_rect(spec, bounds, scale=get_ui_scale()))
+        pause_style = style_component(self.style, "pause_control")
         if self.pause_button_image is not None:
-            icon_side = max(1, side - ui_size(10))
-            self.scaled_pause_button_image = pygame.transform.smoothscale(
-                self.pause_button_image, (icon_side, icon_side)
+            padding = ui_size(pause_style.get("padding", 8))
+            icon_size = (
+                max(1, self.pause_button_rect.width - 2 * padding),
+                max(1, self.pause_button_rect.height - 2 * padding),
+            )
+            self.scaled_pause_button_image = fit_surface(
+                self.pause_button_image, icon_size,
+                pause_style.get("fit", "contain"), pause_style.get("nine_slice"),
             )
         else:
             self.scaled_pause_button_image = None
 
     def _draw_pause_button(self):
-        if self.pause_button_image is None or self.mode != "game" or self.history_visible:
+        if self.mode != "game" or self.history_visible:
             return
         rect = self.pause_button_rect
-        disk_side = max(1, rect.width - ui_size(16))
-        pygame.draw.circle(self.screen, (242, 242, 247), rect.center, disk_side // 2)
-        self.screen.blit(self.scaled_pause_button_image, self.scaled_pause_button_image.get_rect(center=rect.center))
+        pause_style = style_component(self.style, "pause_control")
+        hovered = rect.collidepoint(pygame.mouse.get_pos())
+        state = control_state(hovered=hovered)
+        if self._render_plugin_component(
+            "pause_control", self.screen, rect, state, data={"rect": rect},
+        ):
+            return
+        skin_base = self.style.get("skins", {}).get("pause_control", {})
+        states = dict(skin_base.get("states", {})) if isinstance(skin_base, dict) else {}
+        if isinstance(pause_style.get("states"), dict):
+            states.update(pause_style["states"])
+        skin = {**skin_base, "states": states} if isinstance(skin_base, dict) else {"states": states}
+        fallback_color = pause_style.get("background_color", (242, 242, 247))
+        draw_skin(self.screen, rect, self.assets, skin, state, fallback_color)
+        if self.scaled_pause_button_image is not None:
+            self.screen.blit(
+                self.scaled_pause_button_image,
+                self.scaled_pause_button_image.get_rect(center=rect.center),
+            )
 
     def _layout_dialogue_buttons(self):
         self.dialogue_button_rects = {}
         if self.textbox is None:
             return []
-
         config = self.project.values.get("dialogue_buttons", {})
-        visible = [
-            (name, button)
-            for name in ("back", "auto", "history", "quick_save", "quick_load", "mute")
-            if isinstance((button := config.get(name)), dict) and button.get("visible", True)
-        ]
-        if not visible:
-            return []
         locale = self.settings.values.get("locale", "en")
         ui_table = self.translation_tables.get(locale, {}).get("ui", {})
-
-        gap = ui_size(8)
-        height = ui_size(22)
-        available_width = max(1, self.textbox.rect.width - ui_size(24))
-        max_button_width = max(
-            1, (available_width - gap * (len(visible) - 1)) // len(visible)
+        component = style_component(self.style, "dialogue_controls")
+        buttons = layout_dialogue_controls(
+            self.textbox.rect,
+            self.window_size,
+            component,
+            self.style.get("layouts", {}),
+            config,
+            label_resolver=lambda label: translate_label(locale, label, ui_table),
+            can_go_back=bool(self.dialogue_back_stack),
         )
-        widths = [
-            min(
-                max_button_width,
-                max(
-                    ui_size(58),
-                    FONTS.dialogue_controls.size(translate_label(locale, button["label"], ui_table))[0] + ui_size(14),
-                ),
-            )
-            for _, button in visible
-        ]
-        if sum(widths) + gap * (len(widths) - 1) > available_width:
-            widths = [max_button_width] * len(visible)
-        total_width = sum(widths) + gap * (len(widths) - 1)
-        left = self.textbox.rect.centerx - total_width // 2
-        top = self.textbox.rect.bottom + ui_size(8)
-
-        buttons = []
-        for (name, button), width in zip(visible, widths):
-            rect = pygame.Rect(left, top, width, height)
+        for name, _label, rect, _enabled in buttons:
             self.dialogue_button_rects[name] = rect
-            buttons.append(
-                (name, translate_label(locale, button["label"], ui_table), rect, name != "back" or bool(self.dialogue_back_stack))
-            )
-            left += width + gap
         return buttons
 
     def _draw_dialogue_buttons(self, surface):
-        colors = self.theme.get("colors", {})
+        config = self.project.values.get("dialogue_buttons", {})
+        component = style_component(self.style, "dialogue_controls")
+        skin_base = self.style.get("skins", {}).get("button", {})
         for name, label, rect, enabled in self._layout_dialogue_buttons():
             hovered = enabled and rect.collidepoint(pygame.mouse.get_pos())
-            if not enabled:
-                text_color = (130, 130, 138)
-            elif hovered:
-                text_color = colors.get("accent", COLORS.text_highlight)
-            elif name == "auto" and self.auto_mode:
-                text_color = colors.get("accent", COLORS.text_highlight)
-            elif name == "mute" and self.settings.values.get("muted", False):
-                text_color = colors.get("accent", COLORS.text_highlight)
-            else:
-                text_color = COLORS.text
-            text = FONTS.dialogue_controls.render(label, True, text_color)
-            previous_clip = surface.get_clip()
-            surface.set_clip(rect)
-            surface.blit(text, text.get_rect(center=rect.center))
-            surface.set_clip(previous_clip)
+            selected = (name == "auto" and self.auto_mode) or (
+                name == "mute" and self.settings.values.get("muted", False)
+            )
+            state = control_state(disabled=not enabled, hovered=hovered, selected=selected)
+            if self._render_plugin_component(
+                "dialogue_control", surface, rect, state,
+                data={"name": name, "label": label, "enabled": enabled, "selected": selected},
+            ):
+                continue
+            button_config = config.get(name, {}) if isinstance(config.get(name, {}), dict) else {}
+            draw_dialogue_control(
+                surface, rect, label, state, enabled, component, button_config,
+                skin_base, self.assets, self.theme.get("colors", {}), self.style,
+            )
 
     def _handle_dialogue_button_click(self, position):
         for name, _, rect, enabled in self._layout_dialogue_buttons():
@@ -1717,10 +1870,12 @@ class Engine:
         self._end_story_input()
 
     def _story_input_geometry(self):
-        screen_rect = self.screen.get_rect()
-        width = max(1, min(ui_size(720), screen_rect.width - ui_size(32)))
-        prompt_width = max(1, width - ui_size(48))
-        font = FONTS.normal_text
+        layout_bounds = safe_area_rect(self.style.get("layouts", {}), self.screen.get_size())
+        input_spec = component_layout(self.style.get("layouts", {}), "overlays", "story_input", self.screen.get_size())
+        layout_rect = pygame.Rect(resolve_rect(input_spec, layout_bounds, scale=get_ui_scale()))
+        width = max(1, layout_rect.width)
+        prompt_width = max(1, width - ui_size(style_component(self.style, "overlays").get("padding", 24) * 2))
+        font = self._style_font("overlays", "body_font_size", 20)
         prompt_lines = []
         for paragraph in self.story_input["prompt"].splitlines() or [""]:
             line = ""
@@ -1738,46 +1893,44 @@ class Engine:
             1,
             min(
                 max(ui_size(230), fixed_height + len(prompt_lines) * line_height),
-                screen_rect.height - ui_size(32),
+                layout_rect.height,
             ),
         )
         panel = pygame.Rect(0, 0, width, height)
-        panel.center = screen_rect.center
+        panel.center = layout_rect.center
         max_prompt_lines = max(1, (panel.height - fixed_height) // line_height)
         prompt_lines = prompt_lines[:max_prompt_lines]
-        field = pygame.Rect(
-            panel.left + ui_size(24),
-            panel.top + ui_size(76) + len(prompt_lines) * line_height,
-            max(1, panel.width - ui_size(48)),
-            ui_size(46),
-        )
+        field_spec = component_layout(self.style.get("layouts", {}), "overlays", "story_input_field", self.screen.get_size())
+        field = pygame.Rect(resolve_rect(field_spec, panel, scale=get_ui_scale()))
+        field.y += len(prompt_lines) * line_height
         return panel, field, prompt_lines
 
     def _render_story_input(self):
         panel, field, prompt_lines = self._story_input_geometry()
-        pygame.draw.rect(self.screen, (24, 25, 38), panel, border_radius=ui_size(10))
-        pygame.draw.rect(
-            self.screen,
-            self.theme.get("colors", {}).get("border", (112, 86, 101)),
-            panel,
-            width=max(1, ui_size(2)),
-            border_radius=ui_size(10),
+        if self._render_plugin_component(
+            "overlay", self.screen, panel,
+            data={"kind": "story_input", "input": self.story_input, "field_rect": field},
+        ):
+            return
+        overlay_style = style_component(self.style, "overlays")
+        self._draw_style_panel(panel, "overlays")
+        heading = self._style_font("overlays", "title_font_size", 28, preference="speaker_font_scale").render(
+            "Story Input", True, overlay_style.get("title_color", COLORS.text_highlight)
         )
-        heading = FONTS.char_name.render("Story Input", True, COLORS.text_highlight)
         self.screen.blit(heading, heading.get_rect(midtop=(panel.centerx, panel.top + ui_size(18))))
 
-        font = FONTS.normal_text
+        font = self._style_font("overlays", "body_font_size", 20)
         for index, line in enumerate(prompt_lines):
-            rendered = font.render(line, True, COLORS.text)
+            rendered = font.render(line, True, overlay_style.get("text_color", COLORS.text))
             self.screen.blit(
                 rendered,
                 rendered.get_rect(midtop=(panel.centerx, panel.top + ui_size(62) + index * font.get_linesize())),
             )
 
-        pygame.draw.rect(self.screen, (12, 13, 22), field, border_radius=ui_size(5))
+        pygame.draw.rect(self.screen, tuple(overlay_style.get("field_color", (8, 9, 16))), field, border_radius=ui_size(5))
         pygame.draw.rect(
             self.screen,
-            self.theme.get("colors", {}).get("border", (112, 86, 101)),
+            tuple(overlay_style.get("field_border_color", self.theme.get("colors", {}).get("border", (112, 86, 101)))),
             field,
             width=max(1, ui_size(1)),
             border_radius=ui_size(5),
@@ -1785,15 +1938,18 @@ class Engine:
         answer = self.story_input["text"]
         while answer and font.size(answer)[0] > field.width - ui_size(20):
             answer = answer[1:]
-        rendered_answer = font.render(answer, True, COLORS.text)
+        rendered_answer = font.render(answer, True, overlay_style.get("text_color", COLORS.text))
         self.screen.blit(
             rendered_answer,
             rendered_answer.get_rect(midleft=(field.left + ui_size(10), field.centery)),
         )
         if self.story_input["error"]:
-            error = FONTS.button_text.render(self.story_input["error"], True, COLORS.text_highlight)
+            action_font = self._style_font("overlays", "button_font_size", 18)
+            error = action_font.render(self.story_input["error"], True, overlay_style.get("title_color", COLORS.text_highlight))
             self.screen.blit(error, error.get_rect(midtop=(panel.centerx, field.bottom + ui_size(6))))
-        help_text = FONTS.button_text.render("Type your answer, then press Enter", True, COLORS.text)
+        else:
+            action_font = self._style_font("overlays", "button_font_size", 18)
+        help_text = action_font.render("Type your answer, then press Enter", True, overlay_style.get("text_color", COLORS.text))
         self.screen.blit(help_text, help_text.get_rect(midbottom=(panel.centerx, panel.bottom - ui_size(14))))
 
     def _handle_confirmation_event(self, event):
@@ -1815,44 +1971,50 @@ class Engine:
                     self._resume_choice_timeout()
 
     def _render_confirmation(self):
+        panel = self._layout_screen_rect("overlays", "confirmation")
+        if self._render_plugin_component(
+            "overlay", self.screen, panel,
+            data={"kind": "confirmation", "confirmation": self.confirmation},
+        ):
+            return
+        overlay_style = style_component(self.style, "overlays")
         shade = pygame.Surface(self.screen.get_size(), pygame.SRCALPHA)
-        shade.fill((0, 0, 0, 190))
+        shade.fill(tuple(overlay_style.get("scrim_color", (0, 0, 0, 190))))
         self.screen.blit(shade, (0, 0))
-        width = max(1, min(ui_size(560), self.screen.get_width() - ui_size(32)))
-        height = max(1, min(ui_size(190), self.screen.get_height() - ui_size(32)))
-        panel = pygame.Rect(0, 0, width, height)
-        panel.center = self.screen.get_rect().center
-        pygame.draw.rect(self.screen, (24, 25, 38), panel, border_radius=ui_size(10))
-        pygame.draw.rect(
-            self.screen,
-            self.theme.get("colors", {}).get("border", (112, 86, 101)),
-            panel,
-            width=max(1, ui_size(2)),
-            border_radius=ui_size(10),
-        )
+        panel = self._layout_screen_rect("overlays", "confirmation")
+        self._draw_style_panel(panel, "overlays")
+        padding = ui_size(overlay_style.get("padding", 24))
         locale = self.settings.values.get("locale", "en")
         ui_table = self.translation_tables.get(locale, {}).get("ui", {})
         heading_text = translate_label(locale, "Are you sure?", ui_table)
-        heading = FONTS.char_name.render(heading_text, True, COLORS.text_highlight)
-        self.screen.blit(heading, heading.get_rect(midtop=(panel.centerx, panel.top + ui_size(18))))
+        heading_font = self._style_font("overlays", "title_font_size", 28, preference="speaker_font_scale")
+        body_font = self._style_font("overlays", "body_font_size", 20)
+        button_font = self._style_font("overlays", "button_font_size", 18)
+        heading = heading_font.render(heading_text, True, overlay_style.get("title_color", COLORS.text_highlight))
+        self.screen.blit(
+            heading,
+            heading.get_rect(midtop=(panel.centerx, panel.top + ui_size(overlay_style.get("heading_top", 18)))),
+        )
 
-        message_width = max(1, panel.width - ui_size(32))
+        message_width = max(1, panel.width - padding * 2)
         message_lines = []
         current_line = ""
         for word in self.confirmation["message"].split():
             candidate = f"{current_line} {word}".strip()
-            if current_line and FONTS.button_text.size(candidate)[0] > message_width:
+            if current_line and body_font.size(candidate)[0] > message_width:
                 message_lines.append(current_line)
                 current_line = word
             else:
                 current_line = candidate
         if current_line:
             message_lines.append(current_line)
-        buttons_top = panel.bottom - ui_size(54)
-        line_height = FONTS.button_text.get_linesize()
+        line_height = body_font.get_linesize()
+        actions_spec = component_layout(self.style.get("layouts", {}), "overlays", "confirmation_actions", self.screen.get_size())
+        action_rects = layout_children(actions_spec, panel, 2, scale=get_ui_scale())
+        buttons_top = min((rect[1] for rect in action_rects), default=panel.bottom - ui_size(54))
         message_top = min(panel.top + ui_size(60), buttons_top - line_height)
         for index, line in enumerate(message_lines):
-            message = FONTS.button_text.render(line, True, COLORS.text)
+            message = body_font.render(line, True, overlay_style.get("text_color", COLORS.text))
             self.screen.blit(
                 message,
                 message.get_rect(
@@ -1860,34 +2022,32 @@ class Engine:
                 ),
             )
 
-        button_height = ui_size(38)
-        buttons_top = panel.bottom - button_height - ui_size(16)
-        gap = ui_size(16)
-        button_width = min(
-            ui_size(110), max(1, (panel.width - ui_size(32) - gap) // 2)
-        )
-        total_width = button_width * 2 + gap
-        left = panel.centerx - total_width // 2
         self.confirmation_button_rects = {
-            "confirm": pygame.Rect(left, buttons_top, button_width, button_height),
-            "cancel": pygame.Rect(left + button_width + gap, buttons_top, button_width, button_height),
+            "confirm": pygame.Rect(action_rects[0]),
+            "cancel": pygame.Rect(action_rects[1]),
         }
+        skin_base = self.style.get("skins", {}).get("button", {})
+        states = dict(skin_base.get("states", {})) if isinstance(skin_base, dict) else {}
+        states.update(overlay_style.get("states", {}))
+        action_skin = {**skin_base, "states": states} if isinstance(skin_base, dict) else {"states": states}
+        action_skin.update({"opacity": overlay_style.get("opacity", 1.0),
+                            "radius": overlay_style.get("radius", 10),
+                            "nine_slice": overlay_style.get("nine_slice")})
         for action, label in (("confirm", "Yes"), ("cancel", "Cancel")):
             rect = self.confirmation_button_rects[action]
             hovered = rect.collidepoint(pygame.mouse.get_pos())
-            color = self.theme.get("colors", {}).get(
-                "hover" if hovered else "normal", (18, 18, 29)
-            )
-            pygame.draw.rect(self.screen, color, rect, border_radius=ui_size(5))
-            pygame.draw.rect(
-                self.screen,
-                self.theme.get("colors", {}).get("border", (112, 86, 101)),
-                rect,
-                width=max(1, ui_size(1)),
-                border_radius=ui_size(5),
-            )
-            text = FONTS.button_text.render(translate_label(locale, label, ui_table), True, COLORS.text)
-            self.screen.blit(text, text.get_rect(center=rect.center))
+            state = control_state(hovered=hovered)
+            draw_skin(self.screen, rect, self.assets, action_skin, state,
+                      overlay_style.get("button_color", (73, 50, 65)))
+            text = button_font.render(translate_label(locale, label, ui_table), True, overlay_style.get("text_color", COLORS.text))
+            alignment = overlay_style.get("label_alignment", "center")
+            if alignment == "left":
+                text_rect = text.get_rect(midleft=(rect.left + ui_size(8), rect.centery))
+            elif alignment == "right":
+                text_rect = text.get_rect(midright=(rect.right - ui_size(8), rect.centery))
+            else:
+                text_rect = text.get_rect(center=rect.center)
+            self.screen.blit(text, text_rect)
 
     def _confirm_dialogue_action(self):
         confirmation = self.confirmation
@@ -1951,38 +2111,57 @@ class Engine:
                 pygame.key.stop_text_input()
 
     def _render_save_name_prompt(self):
+        panel = self._layout_screen_rect("overlays", "save_name")
+        if self._render_plugin_component(
+            "overlay", self.screen, panel,
+            data={"kind": "save_name", "prompt": self.save_name_prompt},
+        ):
+            return
+        overlay_style = style_component(self.style, "overlays")
         shade = pygame.Surface(self.screen.get_size(), pygame.SRCALPHA)
-        shade.fill((0, 0, 0, 190))
+        shade.fill(tuple(overlay_style.get("scrim_color", (0, 0, 0, 190))))
         self.screen.blit(shade, (0, 0))
-        width = max(1, min(ui_size(620), self.screen.get_width() - ui_size(32)))
-        height = max(1, min(ui_size(220), self.screen.get_height() - ui_size(32)))
-        panel = pygame.Rect(0, 0, width, height)
-        panel.center = self.screen.get_rect().center
-        pygame.draw.rect(self.screen, (24, 25, 38), panel, border_radius=ui_size(10))
-        pygame.draw.rect(self.screen, self.theme.get("colors", {}).get("border", (112, 86, 101)),
-                         panel, width=max(1, ui_size(2)), border_radius=ui_size(10))
-        heading = FONTS.char_name.render("Name this save", True, COLORS.text_highlight)
+        panel = self._layout_screen_rect("overlays", "save_name")
+        self._draw_style_panel(panel, "overlays")
+        heading_font = self._style_font("overlays", "title_font_size", 28, preference="speaker_font_scale")
+        body_font = self._style_font("overlays", "body_font_size", 20)
+        button_font = self._style_font("overlays", "button_font_size", 18)
+        heading = heading_font.render("Name this save", True, overlay_style.get("title_color", COLORS.text_highlight))
         self.screen.blit(heading, heading.get_rect(midtop=(panel.centerx, panel.top + ui_size(18))))
-        field = pygame.Rect(panel.left + ui_size(22), panel.top + ui_size(72), panel.width - ui_size(44), ui_size(48))
-        pygame.draw.rect(self.screen, (8, 9, 16), field, border_radius=ui_size(5))
+        field_spec = component_layout(self.style.get("layouts", {}), "overlays", "save_name_field", self.screen.get_size())
+        field = pygame.Rect(resolve_rect(field_spec, panel, scale=get_ui_scale()))
+        pygame.draw.rect(self.screen, tuple(overlay_style.get("field_color", (8, 9, 16))), field, border_radius=ui_size(overlay_style.get("field_radius", 5)))
+        pygame.draw.rect(self.screen, tuple(overlay_style.get("field_border_color", (112, 86, 101))), field,
+                         width=max(1, ui_size(overlay_style.get("field_border_width", 1))),
+                         border_radius=ui_size(overlay_style.get("field_radius", 5)))
         text_value = self.save_name_prompt["text"] or "Leave blank to use the chapter name"
-        color = COLORS.text if self.save_name_prompt["text"] else (145, 145, 155)
-        text = FONTS.button_text.render(text_value, True, color)
+        color = overlay_style.get("text_color", COLORS.text) if self.save_name_prompt["text"] else overlay_style.get("hint_color", (145, 145, 155))
+        text = body_font.render(text_value, True, color)
         self.screen.blit(text, text.get_rect(midleft=(field.left + ui_size(10), field.centery)))
-        button_width = ui_size(130)
-        button_height = ui_size(38)
-        gap = ui_size(16)
-        left = panel.centerx - button_width - gap // 2
-        top = panel.bottom - button_height - ui_size(18)
-        self.save_name_prompt["confirm_rect"] = pygame.Rect(left, top, button_width, button_height)
-        self.save_name_prompt["cancel_rect"] = pygame.Rect(left + button_width + gap, top, button_width, button_height)
+        actions_spec = component_layout(self.style.get("layouts", {}), "overlays", "save_name_actions", self.screen.get_size())
+        action_rects = layout_children(actions_spec, panel, 2, scale=get_ui_scale())
+        self.save_name_prompt["confirm_rect"] = pygame.Rect(action_rects[0])
+        self.save_name_prompt["cancel_rect"] = pygame.Rect(action_rects[1])
+        skin_base = self.style.get("skins", {}).get("button", {})
+        states = dict(skin_base.get("states", {})) if isinstance(skin_base, dict) else {}
+        states.update(overlay_style.get("states", {}))
+        action_skin = {**skin_base, "states": states} if isinstance(skin_base, dict) else {"states": states}
+        action_skin.update({"opacity": overlay_style.get("opacity", 1.0), "radius": overlay_style.get("radius", 10), "nine_slice": overlay_style.get("nine_slice")})
         for rect, label in (
             (self.save_name_prompt["confirm_rect"], "Save"),
             (self.save_name_prompt["cancel_rect"], "Cancel"),
         ):
-            pygame.draw.rect(self.screen, (73, 50, 65), rect, border_radius=ui_size(5))
-            label_surface = FONTS.button_text.render(label, True, COLORS.text)
-            self.screen.blit(label_surface, label_surface.get_rect(center=rect.center))
+            hovered = rect.collidepoint(pygame.mouse.get_pos())
+            draw_skin(self.screen, rect, self.assets, action_skin, control_state(hovered=hovered), overlay_style.get("button_color", (73, 50, 65)))
+            label_surface = button_font.render(label, True, overlay_style.get("text_color", COLORS.text))
+            alignment = overlay_style.get("label_alignment", "center")
+            if alignment == "left":
+                label_rect = label_surface.get_rect(midleft=(rect.left + ui_size(8), rect.centery))
+            elif alignment == "right":
+                label_rect = label_surface.get_rect(midright=(rect.right - ui_size(8), rect.centery))
+            else:
+                label_rect = label_surface.get_rect(center=rect.center)
+            self.screen.blit(label_surface, label_rect)
 
     def _quick_save(self):
         if self.flow is None:
@@ -2265,48 +2444,31 @@ class Engine:
         return random.randint(-strength, strength), random.randint(-strength, strength)
 
     def _render_history(self):
-        shade = pygame.Surface(self.screen.get_size(), pygame.SRCALPHA)
-        shade.fill((0, 0, 0, 190))
-        self.screen.blit(shade, (0, 0))
-        width = min(self.screen.get_width() - ui_size(100), ui_size(1100))
-        panel = pygame.Rect(0, 0, width, self.screen.get_height() - ui_size(120))
-        panel.center = (self.screen.get_width() // 2, self.screen.get_height() // 2)
-        pygame.draw.rect(self.screen, (24, 25, 38), panel, border_radius=ui_size(10))
-        pygame.draw.rect(self.screen, (112, 86, 101), panel, width=ui_size(2), border_radius=ui_size(10))
+        panel_spec = component_layout(self.style.get("layouts", {}), "history", "panel", self.screen.get_size())
+        panel = pygame.Rect(resolve_rect(
+            panel_spec,
+            safe_area_rect(self.style.get("layouts", {}), self.screen.get_size()),
+            scale=get_ui_scale(),
+        ))
+        if self._render_plugin_component(
+            "history", self.screen, panel,
+            data={"entries": self.dialogue_history, "scroll": self.history_scroll},
+        ):
+            return
+        history_style = style_component(self.style, "history")
+        high_contrast = bool(self.settings.values.get("high_contrast", False))
         locale = self.settings.values.get("locale", "en")
         ui_table = self.translation_tables.get(locale, {}).get("ui", {})
-        heading = FONTS.char_name.render(
-            translate_label(locale, "Dialogue History", ui_table), True, COLORS.text_highlight
+        heading_font = self.assets.load_font(
+            history_style.get("font", "standard.ttf"),
+            max(1, ui_size(history_style.get("heading_font_size", 28) * self.settings.values.get("speaker_font_scale", 1.0))),
         )
-        self.screen.blit(heading, (panel.left + ui_size(24), panel.top + ui_size(18)))
-        help_text = FONTS.button_text.render("H or Esc: close   Up/Down or mouse wheel: scroll", True, COLORS.text)
-        self.screen.blit(help_text, (panel.left + ui_size(24), panel.bottom - ui_size(34)))
-        font = FONTS.normal_text
-        content_width = panel.width - ui_size(48)
-        lines = []
-        for item in self.dialogue_history:
-            source = f"{item['speaker']}: {item['text']}"
-            words = source.split()
-            current = ""
-            for word in words:
-                candidate = f"{current} {word}".strip()
-                if current and font.size(candidate)[0] > content_width:
-                    lines.append(current)
-                    current = word
-                else:
-                    current = candidate
-            lines.append(current)
-            lines.append("")
-        line_height = font.get_linesize() + ui_size(3)
-        visible_count = max(1, (panel.height - ui_size(100)) // line_height)
-        max_scroll = max(0, len(lines) - visible_count)
-        self.history_scroll = max(0, min(self.history_scroll, max_scroll))
-        end = max(0, len(lines) - self.history_scroll)
-        start = max(0, end - visible_count)
-        for index, line in enumerate(lines[start:end]):
-            if line:
-                rendered = font.render(line, True, COLORS.text)
-                self.screen.blit(rendered, (panel.left + ui_size(24), panel.top + ui_size(62) + index * line_height))
+        self.history_scroll = render_history_panel(
+            self.screen, panel, self.dialogue_history, self.history_scroll, history_style,
+            heading_font, self._style_font("history", "font_size", 20), FONTS.button_text,
+            heading_text=translate_label(locale, "Dialogue History", ui_table),
+            high_contrast=high_contrast,
+        )
 
     def _set_background(self, image_id):
         self.background_id = image_id
@@ -2343,34 +2505,48 @@ class Engine:
             return
 
         count = len(options)
-        button_theme = self.theme.get("choice_buttons", {})
-        gap = max(0, ui_size(button_theme.get("gap", 12)))
-        button_width = min(
-            ui_size(button_theme.get("width", 900)),
-            max(1, self.window_size[0] - ui_size(96)),
-        )
-        top = ui_size(40)
-        bottom = self.textbox.rect.top - ui_size(20)
-        available_height = max(1, bottom - top)
-        max_button_height = max(1, (available_height - (count - 1) * gap) // count)
-        button_height = min(ui_size(button_theme.get("height", 56)), max_button_height)
-        total_height = count * button_height + (count - 1) * gap
-        start_y = top + max(0, (available_height - total_height) // 2)
-        start_x = (self.window_size[0] - button_width) // 2
-        normal_name = button_theme.get("normal")
-        hovered_name = button_theme.get("hovered")
-        normal_image = self.assets.load_image(normal_name).convert_alpha() if normal_name else None
-        hovered_image = self.assets.load_image(hovered_name).convert_alpha() if hovered_name else None
-        for index in range(count):
-            y = start_y + index * (button_height + gap)
+        scale = get_ui_scale()
+        layout_spec = component_layout(self.style.get("layouts", {}), "dialogue", "choices", self.window_size)
+        safe_bounds = safe_area_rect(self.style.get("layouts", {}), self.window_size)
+        region = pygame.Rect(resolve_rect(layout_spec, safe_bounds, scale=scale))
+        if self.textbox is not None:
+            region.bottom = min(region.bottom, self.textbox.rect.top - ui_size(20))
+        child_spec = {
+            key: value for key, value in layout_spec.items()
+            if key not in {"anchor", "x", "y", "left", "right", "top", "bottom", "width", "height", "constraints"}
+        }
+        rects = layout_children(child_spec, region, count, scale=scale)
+        choice_style = deepcopy(style_component(self.style, "choices"))
+        skin_base = self.style.get("skins", {}).get("button", {})
+        states = dict(skin_base.get("states", {})) if isinstance(skin_base, dict) else {}
+        states.update(choice_style.get("states", {}))
+        high_contrast = bool(self.settings.values.get("high_contrast", False))
+        if high_contrast:
+            choice_style["text_color"] = [255, 255, 255]
+            choice_style["focus_border_color"] = [255, 224, 120]
+            choice_style["focus_border_width"] = max(3, choice_style.get("focus_border_width", 3))
+            for name, color in (("normal", [0, 0, 0, 255]), ("hover", [30, 30, 30, 255]),
+                                ("focus", [50, 45, 20, 255]), ("selected", [50, 45, 20, 255]),
+                                ("pressed", [50, 45, 20, 255]), ("disabled", [45, 45, 45, 255])):
+                existing = states.get(name)
+                existing = dict(existing) if isinstance(existing, dict) else {}
+                existing.update({"color": color, "image": None, "border_color": [255, 255, 255]})
+                states[name] = existing
+        skin = {**skin_base, "states": states} if isinstance(skin_base, dict) else {"states": states}
+        skin["image"] = None if high_contrast else skin.get("image")
+        skin["radius"] = choice_style.get("radius", skin.get("radius", 6))
+        skin["border_width"] = choice_style.get("border_width", skin.get("border_width", 0))
+        skin["border_color"] = choice_style.get("border_color", skin.get("border_color"))
+        skin["fit"] = choice_style.get("fit", skin.get("fit", "stretch"))
+        skin["nine_slice"] = choice_style.get("nine_slice", skin.get("nine_slice"))
+        skin["opacity"] = choice_style.get("opacity", skin.get("opacity", 1.0))
+        for index, rect_values in enumerate(rects):
             self.choice_buttons.append(
                 Button(
-                    start_x,
-                    y,
-                    button_width,
-                    button_height,
-                    normal_image,
-                    hovered_image,
+                    *rect_values,
+                    style=choice_style,
+                    skin=skin,
+                    asset_manager=self.assets,
                 )
             )
 
@@ -2517,21 +2693,23 @@ class Engine:
         self._announce(f"{package['name']}. {package['source']} package")
 
     def _draw_mod_panel(self):
-        width, height = self.screen.get_size()
-        panel_width = min(ui_size(1080), width - ui_size(64))
-        self._mod_panel_rect = pygame.Rect((width - panel_width) // 2, ui_size(130), panel_width, height - ui_size(205))
-        panel = pygame.Surface(self._mod_panel_rect.size, pygame.SRCALPHA)
-        panel.fill((8, 8, 16, 210))
-        self.screen.blit(panel, self._mod_panel_rect)
-        pygame.draw.rect(self.screen, (95, 84, 112), self._mod_panel_rect, width=ui_size(1), border_radius=ui_size(10))
+        self._mod_panel_rect = self._layout_screen_rect("menu", "panel")
+        self._draw_style_panel(self._mod_panel_rect)
 
     def _draw_mod_details(self):
         package = self._selected_mod()
         if package is None:
             return
         panel = self._mod_panel_rect
-        title = FONTS.char_name.render(package["name"], True, COLORS.text_highlight)
-        self.screen.blit(title, title.get_rect(center=(panel.centerx, panel.top + ui_size(58))))
+        appearance = style_component(self.style, "mod_details")
+        high_contrast = bool(self.settings.values.get("high_contrast", False))
+        title_font = self.assets.load_font(
+            appearance.get("title_font", appearance.get("font", "standard.ttf")),
+            ui_size(appearance.get("title_font_size", 28)),
+        )
+        title_color = (255, 255, 255) if high_contrast else appearance.get("title_color", COLORS.text_highlight)
+        title = title_font.render(package["name"], True, title_color)
+        self.screen.blit(title, title.get_rect(center=(panel.centerx, panel.top + ui_size(appearance.get("title_top", 58)))))
         locale = self.settings.values.get("locale", "en")
         ui_table = self.translation_tables.get(locale, {}).get("ui", {})
         tr = lambda key, fallback: translate_label(locale, fallback, ui_table)
@@ -2551,7 +2729,12 @@ class Engine:
             detail_lines.append(f"... and {len(package['errors']) - 4} more load issues")
         if not package["conflicts"] and not package["errors"]:
             detail_lines.append(tr('mods.clean', 'No package errors or asset conflicts.'))
-        visible_lines = max(1, (self._mod_panel_rect.height - ui_size(210)) // max(1, FONTS.button_text.get_linesize()))
+        font = self.assets.load_font(appearance.get("font", "standard.ttf"), ui_size(appearance.get("font_size", 16)))
+        content_top = ui_size(appearance.get("content_top", 100))
+        content_bottom = ui_size(appearance.get("content_bottom", 210))
+        line_gap = ui_size(appearance.get("line_gap", 5))
+        line_step = max(1, font.get_linesize() + line_gap)
+        visible_lines = max(1, (panel.height - content_top - content_bottom) // line_step)
         detail_capacity = max(0, visible_lines - len(lines))
         lines.extend(detail_lines[:detail_capacity])
         if len(detail_lines) > detail_capacity and len(lines) < visible_lines:
@@ -2563,28 +2746,48 @@ class Engine:
         remaining_assets = len(package["assets"]) - len(asset_preview)
         if remaining_assets > 0 and len(lines) < visible_lines:
             lines.append(f"... and {remaining_assets} more assets")
-        font = FONTS.button_text
-        y = panel.top + ui_size(100)
-        max_lines = max(1, (panel.height - ui_size(210)) // max(1, font.get_linesize()))
-        for line in lines[:max_lines]:
-            rendered = font.render(line, True, COLORS.text)
+        y = panel.top + content_top
+        text_color = (255, 255, 255) if high_contrast else appearance.get("text_color", COLORS.text)
+        for line in lines[:visible_lines]:
+            rendered = font.render(line, True, text_color)
             self.screen.blit(rendered, rendered.get_rect(midtop=(panel.centerx, y)))
-            y += font.get_linesize() + ui_size(5)
+            y += line_step
         labels = [item["label"] for item in self.mod_details_menu.items]
-        gap = ui_size(14)
-        button_height = ui_size(44)
-        button_width = min(ui_size(190), max(ui_size(100), (panel.width - ui_size(40) - gap * max(0, len(labels) - 1)) // max(1, len(labels))))
+        gap = ui_size(appearance.get("button_gap", 14))
+        button_height = ui_size(appearance.get("button_height", 44))
+        margin = ui_size(appearance.get("button_horizontal_margin", 40))
+        requested_width = ui_size(appearance.get("button_width", 190))
+        minimum_width = ui_size(appearance.get("button_min_width", 100))
+        button_width = min(requested_width, max(minimum_width, (panel.width - margin - gap * max(0, len(labels) - 1)) // max(1, len(labels))))
         total_width = button_width * len(labels) + gap * max(0, len(labels) - 1)
         left = panel.centerx - total_width // 2
-        top = panel.bottom - button_height - ui_size(26)
+        top = panel.bottom - button_height - ui_size(appearance.get("button_bottom", 26))
         self._mod_detail_buttons = []
+        states = dict(self.style.get("skins", {}).get("button", {}).get("states", {}))
+        if isinstance(appearance.get("states"), dict):
+            states.update(appearance["states"])
+        skin = {**self.style.get("skins", {}).get("button", {}), "states": states}
+        skin.update({
+            "radius": appearance.get("radius", 5),
+            "border_width": appearance.get("border_width", 1),
+            "border_color": appearance.get("button_border_color", [112, 86, 101]),
+            "fit": appearance.get("fit", skin.get("fit", "stretch")),
+            "nine_slice": appearance.get("nine_slice", skin.get("nine_slice")),
+            "opacity": appearance.get("opacity", 1.0),
+        })
+        if high_contrast:
+            for state_name, color in (("normal", [0, 0, 0, 255]), ("focus", [50, 45, 20, 255])):
+                state = dict(states.get(state_name, {}))
+                state.update({"color": color, "image": None, "border_color": [255, 255, 255]})
+                states[state_name] = state
+            skin["states"] = states
         for index, label in enumerate(labels):
             rect = pygame.Rect(left + index * (button_width + gap), top, button_width, button_height)
             selected = index == self.mod_details_menu.selected
-            color = self.theme.get("colors", {}).get("selected" if selected else "normal", (18, 18, 29))
-            pygame.draw.rect(self.screen, color, rect, border_radius=ui_size(5))
-            pygame.draw.rect(self.screen, self.theme.get("colors", {}).get("border", (112, 86, 101)), rect, width=ui_size(1), border_radius=ui_size(5))
-            rendered = FONTS.button_text.render(translate_label(locale, label, ui_table), True, COLORS.text)
+            fallback_color = appearance.get("button_selected_color" if selected else "button_color", (18, 18, 29))
+            draw_skin(self.screen, rect, self.assets, skin, "focus" if selected else "normal", fallback_color)
+            button_text_color = (255, 255, 255) if high_contrast else appearance.get("button_text_color", COLORS.text)
+            rendered = font.render(translate_label(locale, label, ui_table), True, button_text_color)
             self.screen.blit(rendered, rendered.get_rect(center=rect.center))
             self._mod_detail_buttons.append(rect)
 
@@ -2710,28 +2913,16 @@ class Engine:
         self._refresh_progress_window()
 
     def _draw_progress_panel(self):
-        width, height = self.screen.get_size()
-        panel_width = min(ui_size(1080), width - ui_size(64))
-        self._progress_panel_rect = pygame.Rect((width - panel_width) // 2, ui_size(150), panel_width, height - ui_size(235))
-        panel = pygame.Surface(self._progress_panel_rect.size, pygame.SRCALPHA)
-        panel.fill((8, 8, 16, 210))
-        self.screen.blit(panel, self._progress_panel_rect)
-        pygame.draw.rect(self.screen, (95, 84, 112), self._progress_panel_rect, width=ui_size(1), border_radius=ui_size(10))
+        self._progress_panel_rect = self._layout_screen_rect("menu", "panel")
+        self._draw_style_panel(self._progress_panel_rect)
 
     def _draw_progress_scrollbar(self):
         if not self.progress_entries:
             return
-        panel = self._progress_panel_rect
-        track = pygame.Rect(panel.right - ui_size(25), panel.top + ui_size(18), ui_size(8), panel.height - ui_size(36))
-        self._progress_scroll_track = track
-        pygame.draw.rect(self.screen, (45, 43, 56), track, border_radius=4)
         visible = self._progress_visible_rows()
-        thumb_height = max(ui_size(28), int(track.height * min(1.0, visible / len(self.progress_entries))))
-        max_offset = max(0, len(self.progress_entries) - visible)
-        travel = track.height - thumb_height
-        thumb_y = track.top + (travel * self.progress_offset / max_offset if max_offset else 0)
-        self._progress_scroll_thumb = pygame.Rect(track.x, int(thumb_y), track.width, thumb_height)
-        pygame.draw.rect(self.screen, (170, 150, 192), self._progress_scroll_thumb, border_radius=ui_size(4))
+        self._progress_scroll_track, self._progress_scroll_thumb = self._draw_scrollbar(
+            self._progress_panel_rect, len(self.progress_entries), visible, self.progress_offset
+        )
 
     def _go_back(self):
         self.status_message = ""
@@ -3019,29 +3210,16 @@ class Engine:
         self._refresh_credits_window()
 
     def _draw_credits_panel(self):
-        width, height = self.screen.get_size()
-        panel_width = min(ui_size(1080), width - ui_size(64))
-        self._credits_panel_rect = pygame.Rect((width - panel_width) // 2, ui_size(150), panel_width, height - ui_size(235))
-        panel = pygame.Surface(self._credits_panel_rect.size, pygame.SRCALPHA)
-        panel.fill((8, 8, 16, 210))
-        self.screen.blit(panel, self._credits_panel_rect)
-        pygame.draw.rect(self.screen, (95, 84, 112), self._credits_panel_rect, width=ui_size(1), border_radius=ui_size(10))
+        self._credits_panel_rect = self._layout_screen_rect("menu", "panel")
+        self._draw_style_panel(self._credits_panel_rect)
 
     def _draw_credits_scrollbar(self):
         if not self.credits_entries:
             return
-        panel = self._credits_panel_rect
-        track = pygame.Rect(panel.right - ui_size(25), panel.top + ui_size(18), ui_size(8), panel.height - ui_size(36))
-        self._credits_scroll_track = track
-        pygame.draw.rect(self.screen, (45, 43, 56), track, border_radius=4)
         visible_rows = max(2, (self.screen.get_height() - ui_size(260)) // ui_size(65) - 1)
-        ratio = min(1.0, visible_rows / len(self.credits_entries))
-        thumb_height = max(ui_size(28), int(track.height * ratio))
-        max_offset = max(0, len(self.credits_entries) - visible_rows)
-        travel = track.height - thumb_height
-        thumb_y = track.top + (travel * self.credits_offset / max_offset if max_offset else 0)
-        self._credits_scroll_thumb = pygame.Rect(track.x, int(thumb_y), track.width, thumb_height)
-        pygame.draw.rect(self.screen, (170, 150, 192), self._credits_scroll_thumb, border_radius=ui_size(4))
+        self._credits_scroll_track, self._credits_scroll_thumb = self._draw_scrollbar(
+            self._credits_panel_rect, len(self.credits_entries), visible_rows, self.credits_offset
+        )
 
     def _render_slot_buttons(self):
         width, height = self.screen.get_size()
@@ -3057,16 +3235,18 @@ class Engine:
                 ("delete", "Delete"), ("start_copy", "Copy"), ("import", "Import"),
                 ("export", "Export"), ("load", "Load"), ("back", "Back"),
             )
-        gap = ui_size(12)
         button_count = len(buttons)
-        button_width = min(
-            ui_size(150),
-            max(ui_size(48), (width - ui_size(48) - gap * (button_count - 1)) // button_count),
+        slot_style = style_component(self.style, "save_slots")
+        layout_spec = component_layout(self.style.get("layouts", {}), "save_slots", "actions", self.screen.get_size())
+        safe_bounds = safe_area_rect(self.style.get("layouts", {}), self.screen.get_size())
+        design_width = slot_style.get("action_width", 150)
+        action_rects = layout_children(
+            layout_spec,
+            safe_bounds,
+            button_count,
+            item_sizes=[design_width] * button_count if layout_spec.get("type") == "flex" else None,
+            scale=get_ui_scale(),
         )
-        button_height = ui_size(46)
-        total_width = button_width * button_count + gap * (button_count - 1)
-        left = (width - total_width) // 2
-        top = height - ui_size(82)
         self._slot_button_rects = {}
         selected = self.selected_slot is not None
         exists = False
@@ -3092,16 +3272,49 @@ class Engine:
         self._slot_button_enabled = enabled
         locale = self.settings.values.get("locale", "en")
         ui_table = self.translation_tables.get(locale, {}).get("ui", {})
+        skin_base = self.style.get("skins", {}).get("button", {})
+        states = dict(skin_base.get("states", {})) if isinstance(skin_base, dict) else {}
+        states.update(slot_style.get("states", {}))
+        slot_skin = {**skin_base, "states": states} if isinstance(skin_base, dict) else {"states": states}
+        slot_skin["radius"] = slot_style.get("radius", slot_skin.get("radius", 5))
+        slot_skin["border_width"] = slot_style.get("border_width", slot_skin.get("border_width", 1))
+        slot_skin["fit"] = slot_style.get("button_fit", slot_skin.get("fit", "stretch"))
+        slot_skin["nine_slice"] = slot_style.get("nine_slice", slot_skin.get("nine_slice"))
+        slot_skin["opacity"] = slot_style.get("opacity", slot_skin.get("opacity", 1.0))
+        if self.settings.values.get("high_contrast", False):
+            slot_skin["image"] = None
+            for state_name, color in (("normal", [0, 0, 0, 255]), ("hover", [30, 30, 30, 255]),
+                                      ("focus", [50, 45, 20, 255]), ("selected", [50, 45, 20, 255]),
+                                      ("pressed", [50, 45, 20, 255]), ("disabled", [45, 45, 45, 255])):
+                current = states.get(state_name)
+                current = dict(current) if isinstance(current, dict) else {}
+                current.update({"color": color, "image": None, "border_color": [255, 255, 255]})
+                states[state_name] = current
         for index, (action, label) in enumerate(buttons):
-            rect = pygame.Rect(left + index * (button_width + gap), top, button_width, button_height)
+            rect = pygame.Rect(action_rects[index])
             self._slot_button_rects[action] = rect
-            color = (73, 50, 65) if enabled[action] else (42, 42, 48)
-            text_color = (238, 238, 242) if enabled[action] else (115, 115, 122)
-            pygame.draw.rect(self.screen, color, rect, border_radius=ui_size(7))
-            pygame.draw.rect(self.screen, (112, 86, 101), rect, width=ui_size(1), border_radius=ui_size(7))
-            font = FONTS.button_text
+            hovered = rect.collidepoint(pygame.mouse.get_pos())
+            state = control_state(disabled=not enabled[action], hovered=hovered)
+            fallback = slot_style.get("states", {}).get(state, {}).get("color")
+            if self.settings.values.get("high_contrast", False):
+                fallback = [0, 0, 0, 255] if state != "hover" else [30, 30, 30, 255]
+            draw_skin(self.screen, rect, self.assets, slot_skin, state, fallback)
+            text_color = slot_style.get("text_color", COLORS.text) if enabled[action] else slot_style.get("disabled_color", (115, 115, 122))
+            if self.settings.values.get("high_contrast", False):
+                text_color = (255, 255, 255)
+            font = self.assets.load_font(
+                slot_style.get("font", "standard.ttf"),
+                max(1, ui_size(slot_style.get("font_size", 18) * self.settings.values.get("dialogue_font_scale", 1.0))),
+            )
             text = font.render(translate_label(locale, label, ui_table), True, text_color)
-            self.screen.blit(text, text.get_rect(center=rect.center))
+            alignment = slot_style.get("label_alignment", "center")
+            if alignment == "left":
+                text_rect = text.get_rect(midleft=(rect.left + ui_size(8), rect.centery))
+            elif alignment == "right":
+                text_rect = text.get_rect(midright=(rect.right - ui_size(8), rect.centery))
+            else:
+                text_rect = text.get_rect(center=rect.center)
+            self.screen.blit(text, text_rect)
 
     def _handle_slot_button_click(self, position):
         for action, rect in self._slot_button_rects.items():
@@ -3618,6 +3831,16 @@ class Engine:
                 len(configured_items),
             )
             configured_items.insert(back_index, locale_item)
+        theme_variants = self.base_style.get("variants", {})
+        if isinstance(theme_variants, dict) and theme_variants and not any(
+            item.get("setting") == "theme_variant" for item in configured_items
+        ):
+            theme_item = {"label": "Theme", "action": "adjust_setting", "setting": "theme_variant"}
+            back_index = next(
+                (index for index, item in enumerate(configured_items) if item.get("action") == "back"),
+                len(configured_items),
+            )
+            configured_items.insert(back_index, theme_item)
         for configured_item in configured_items:
             item = dict(configured_item)
             setting = item.get("setting")
@@ -3639,6 +3862,9 @@ class Engine:
                     item["detail"] = f"< {round(value * 100)}% >"
                 elif setting == "locale":
                     item["detail"] = self.available_locales.get(value, value)
+                elif setting == "theme_variant":
+                    variant = theme_variants.get(value, {}) if isinstance(theme_variants, dict) else {}
+                    item["detail"] = variant.get("label", "Default") if isinstance(variant, dict) else "Default"
                 elif isinstance(value, bool):
                     item["detail"] = "On" if value else "Off"
             items.append(item)
@@ -3699,14 +3925,7 @@ class Engine:
         self._set_settings_offset(self.settings_offset + offset)
 
     def _draw_settings_panel(self):
-        width, height = self.screen.get_size()
-        panel_width = min(ui_size(1080), width - ui_size(64))
-        rect = pygame.Rect(
-            (width - panel_width) // 2,
-            ui_size(132),
-            panel_width,
-            max(ui_size(220), height - ui_size(220)),
-        )
+        rect = self._layout_screen_rect("menu", "panel")
         self._settings_panel_rect = rect
         self.settings_menu.panel_rect = rect
 
@@ -3716,29 +3935,30 @@ class Engine:
             self._settings_scroll_track = pygame.Rect(0, 0, 0, 0)
             self._settings_scroll_thumb = pygame.Rect(0, 0, 0, 0)
             return
-        panel = self._settings_panel_rect
+        self._settings_scroll_track, self._settings_scroll_thumb = self._draw_scrollbar(
+            self._settings_panel_rect, len(self._settings_all_items), visible_rows, self.settings_offset
+        )
+
+    def _draw_scrollbar(self, panel, entry_count, visible_rows, offset):
+        style = style_component(self.style, "chrome").get("scrollbar", {})
+        top = ui_size(style.get("inset_top", 18))
+        bottom = ui_size(style.get("inset_bottom", 18))
         track = pygame.Rect(
-            panel.right - ui_size(25),
-            panel.top + ui_size(18),
-            ui_size(8),
-            max(1, panel.height - ui_size(36)),
+            panel.right - ui_size(style.get("margin_right", 25)),
+            panel.top + top,
+            max(1, ui_size(style.get("width", 8))),
+            max(1, panel.height - top - bottom),
         )
-        self._settings_scroll_track = track
-        pygame.draw.rect(self.screen, (45, 43, 56), track, border_radius=ui_size(4))
-        ratio = min(1.0, visible_rows / len(self._settings_all_items))
-        thumb_height = max(ui_size(28), int(track.height * ratio))
-        max_offset = max(1, len(self._settings_all_items) - visible_rows)
+        radius = ui_size(style.get("radius", 4))
+        pygame.draw.rect(self.screen, tuple(style.get("track_color", (45, 43, 56))), track, border_radius=radius)
+        ratio = min(1.0, max(0.0, visible_rows / max(1, entry_count)))
+        thumb_height = min(track.height, max(ui_size(style.get("min_thumb", 28)), int(track.height * ratio)))
+        max_offset = max(0, entry_count - visible_rows)
         travel = max(0, track.height - thumb_height)
-        thumb_y = track.top + travel * self.settings_offset / max_offset
-        self._settings_scroll_thumb = pygame.Rect(
-            track.x, int(thumb_y), track.width, thumb_height
-        )
-        pygame.draw.rect(
-            self.screen,
-            (170, 150, 192),
-            self._settings_scroll_thumb,
-            border_radius=ui_size(4),
-        )
+        thumb_y = track.top + (travel * offset / max_offset if max_offset else 0)
+        thumb = pygame.Rect(track.x, int(thumb_y), track.width, thumb_height)
+        pygame.draw.rect(self.screen, tuple(style.get("thumb_color", (170, 150, 192))), thumb, border_radius=radius)
+        return track, thumb
 
     def _adjust_selected_setting(self, direction, setting=None):
         if setting is None:
@@ -3775,6 +3995,15 @@ class Engine:
                 self.flow.locale = selected_locale
                 if self.return_mode == "pause_menu":
                     self._enter_dialogue(apply_actions=False)
+        elif setting == "theme_variant":
+            variants = self.base_style.get("variants", {})
+            names = ["default", *(name for name in variants if isinstance(name, str) and name != "default")] if isinstance(variants, dict) else ["default"]
+            if not names:
+                return
+            current_variant = current if current in names else "default"
+            selected_variant = names[(names.index(current_variant) + direction) % len(names)]
+            self.settings.set(setting, selected_variant)
+            self._apply_style_variant(selected_variant)
         self.settings.save()
         self._apply_audio_settings()
         self._sync_text_speed()

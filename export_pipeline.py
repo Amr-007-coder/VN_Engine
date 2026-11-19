@@ -22,6 +22,7 @@ from uuid import UUID
 from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile, ZipInfo
 
 from engine.icon_utils import make_icns, make_ico, update_windows_executable_icon
+from engine.style import split_style_from_project
 from template_repository import ensure_template, fetch_android_sources, latest_template_release_tag
 
 
@@ -101,6 +102,14 @@ def _validate_zip_name(name: str) -> PurePosixPath:
     if relative.is_absolute() or ".." in relative.parts or not relative.parts:
         raise ValueError(f"Template contains an unsafe path: {name!r}.")
     return relative
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
 
 
 def _archive_name(relative: PurePosixPath, platform: str, game_name: str) -> str:
@@ -207,7 +216,7 @@ def _iter_project_files(root: Path, prefix: str):
         if path.is_symlink() or not path.is_file() or "__pycache__" in path.parts:
             continue
         relative = path.relative_to(root)
-        if prefix == "data" and relative.as_posix().casefold() == "project.json":
+        if prefix == "data" and relative.as_posix().casefold() in {"project.json", "style.json"}:
             continue
         yield PurePosixPath(prefix, relative.as_posix()).as_posix(), path
 
@@ -217,6 +226,7 @@ def _write_project_resource_bundle(
     data_root: Path,
     assets_root: Path,
     project_json: bytes,
+    style_json: bytes,
     story_name: str,
 ) -> None:
     """Store editable project files in the appended executable resource archive."""
@@ -243,10 +253,14 @@ def _write_project_resource_bundle(
         story_key = PurePosixPath("data", story_path.as_posix()).as_posix().casefold()
         if story_key not in seen:
             raise FileNotFoundError(f"Configured story file was not found in the project's data folder: {story_name}")
-        config_key = "data/project.json"
-        if config_key in seen:
-            raise ValueError("The project data folder has an ambiguous project.json path.")
-        bundle.writestr(config_key, project_json)
+        for config_key, contents in (
+            ("data/project.json", project_json),
+            ("data/style.json", style_json),
+        ):
+            if config_key in seen:
+                raise ValueError(f"The project data folder has an ambiguous {PurePosixPath(config_key).name} path.")
+            seen.add(config_key)
+            bundle.writestr(config_key, contents)
 
 
 def _windows_shortcut_bytes(relative_target: str, executable_size: int) -> bytes:
@@ -312,6 +326,16 @@ def _prepare_project_export(project_root: Path, project_file: Path):
         raise FileNotFoundError(f"Project configuration not found: {project_file}")
 
     project_values = deepcopy(project_values)
+    style_path = project_file.parent / "style.json"
+    raw_style = None
+    if style_path.is_file():
+        try:
+            raw_style = json.loads(style_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise ValueError(f"Could not read style configuration {style_path}: {error}") from error
+        if not isinstance(raw_style, dict):
+            raise ValueError(f"Style configuration {style_path} must contain a JSON object.")
+    project_values, style_values = split_style_from_project(project_values, raw_style)
     story_name = project_values.get("story", "story.yaml")
     if not isinstance(story_name, str):
         raise ValueError("Project configuration 'story' must be a YAML filename.")
@@ -330,8 +354,9 @@ def _prepare_project_export(project_root: Path, project_file: Path):
         raise ValueError("Project configuration 'paths' must be an object.")
     project_paths.update({"data": "data", "assets": "assets", "user_data": "user_data"})
     project_json = (json.dumps(project_values, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    style_json = (json.dumps(style_values, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
     icon_path = _project_icon_path(assets_root, project_values)
-    return name, data_root, assets_root, story_path, project_json, icon_path
+    return name, data_root, assets_root, story_path, project_json, style_json, icon_path
 
 
 def _replace_pygbag_project_files(apk_data: bytes, project_bundle: Path) -> bytes:
@@ -367,7 +392,7 @@ def export_web_project(
     if output_file == template_file:
         raise ValueError("The output ZIP cannot overwrite the web export template.")
 
-    name, data_root, assets_root, story_path, project_json, icon_path = _prepare_project_export(project_root, project_file)
+    name, data_root, assets_root, story_path, project_json, style_json, icon_path = _prepare_project_export(project_root, project_file)
     unsupported_audio = sorted(
         path.relative_to(assets_root).as_posix()
         for path in assets_root.rglob("*")
@@ -409,6 +434,7 @@ def export_web_project(
             data_root,
             assets_root,
             project_json,
+            style_json,
             story_path.as_posix(),
         )
         temporary_output = workspace / "web-export.zip"
@@ -1252,44 +1278,9 @@ def export_project(
     if output_file == template_file:
         raise ValueError("The output ZIP cannot overwrite the export template.")
 
-    try:
-        project_values = json.loads(project_file.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        raise ValueError(f"Could not read project configuration {project_file}: {error}") from error
-    if not isinstance(project_values, dict):
-        raise ValueError("Project configuration must be a JSON object.")
-
-    name = safe_project_name(project_values.get("name", "Visual Novel"))
-    paths = project_values.get("paths", {})
-    if not isinstance(paths, dict):
-        paths = {}
-    data_root = _resolve_config_path(project_root, paths.get("data"), "data")
-    assets_root = _resolve_config_path(project_root, paths.get("assets"), "assets")
-    if not data_root.is_dir():
-        raise FileNotFoundError(f"Project data folder not found: {data_root}")
-    if not assets_root.is_dir():
-        raise FileNotFoundError(f"Project assets folder not found: {assets_root}")
-    if not project_file.is_file():
-        raise FileNotFoundError(f"Project configuration not found: {project_file}")
-
-    project_values = deepcopy(project_values)
-    story_name = project_values.get("story", "story.yaml")
-    if not isinstance(story_name, str):
-        raise ValueError("Project configuration 'story' must be a YAML filename.")
-    story_path = PurePosixPath(story_name.replace("\\", "/"))
-    if (
-        story_path.is_absolute()
-        or (story_path.parts and story_path.parts[0].endswith(":"))
-        or ".." in story_path.parts
-    ):
-        raise ValueError("The configured story must stay inside the project's data folder.")
-    project_values["story"] = story_path.as_posix()
-    project_paths = project_values.setdefault("paths", {})
-    if not isinstance(project_paths, dict):
-        raise ValueError("Project configuration 'paths' must be an object.")
-    project_paths.update({"data": "data", "assets": "assets", "user_data": "user_data"})
-    project_json = (json.dumps(project_values, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
-    icon_path = _project_icon_path(assets_root, project_values)
+    name, data_root, assets_root, story_path, project_json, style_json, icon_path = _prepare_project_export(
+        project_root, project_file
+    )
 
     output_file.parent.mkdir(parents=True, exist_ok=True)
     for source_root in (data_root, assets_root):
@@ -1309,6 +1300,7 @@ def export_project(
             data_root,
             assets_root,
             project_json,
+            style_json,
             story_path.as_posix(),
         )
 

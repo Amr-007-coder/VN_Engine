@@ -6,10 +6,16 @@ import os
 from unittest.mock import patch
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
+from export_pipeline import _is_within
 from tools.smoke_export import smoke_android, smoke_desktop, smoke_web
 
 
 class ExportSmokeTests(unittest.TestCase):
+    def test_path_containment_helper(self):
+        root = Path("project").resolve()
+        self.assertTrue(_is_within(root / "assets" / "link", root))
+        self.assertFalse(_is_within(root.parent / "outside", root))
+
     def test_desktop_smoke_extracts_and_launches_the_exported_executable(self):
         with tempfile.TemporaryDirectory() as temporary:
             artifact = Path(temporary) / "Demo-linux.zip"

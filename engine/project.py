@@ -7,6 +7,7 @@ from pathlib import Path, PurePosixPath
 
 from engine.loader import PATHS, loader
 from engine.theme import MENU_SCREEN_NAMES, resolve_theme, validate_menu_grid
+from engine.style import clean_project_values, split_style_from_project
 
 
 DEFAULT_PROJECT = {
@@ -170,12 +171,12 @@ DEFAULT_PROJECT = {
         },
     },
     "dialogue_buttons": {
-        "back": {"visible": True, "label": "Back"},
-        "history": {"visible": True, "label": "History"},
-        "quick_save": {"visible": True, "label": "Q. Save"},
-        "quick_load": {"visible": True, "label": "Q. Load"},
-        "auto": {"visible": True, "label": "Auto"},
-        "mute": {"visible": True, "label": "Mute"},
+        "back": {"visible": True, "label": "Back", "label_alignment": "center"},
+        "history": {"visible": True, "label": "History", "label_alignment": "center"},
+        "quick_save": {"visible": True, "label": "Q. Save", "label_alignment": "center"},
+        "quick_load": {"visible": True, "label": "Q. Load", "label_alignment": "center"},
+        "auto": {"visible": True, "label": "Auto", "label_alignment": "center"},
+        "mute": {"visible": True, "label": "Mute", "label_alignment": "center"},
     },
     "characters": {},
     "menus": {
@@ -242,9 +243,17 @@ DEFAULT_PROJECT = {
 
 
 class ProjectConfig:
-    def __init__(self, values: dict | None = None):
+    def __init__(self, values: dict | None = None, style_values: dict | None = None):
         values = values or {}
-        self.values = _merge_dicts(DEFAULT_PROJECT, values)
+        project_values, resolved_style = split_style_from_project(values, style_values)
+        self.project_values = clean_project_values(_merge_dicts(DEFAULT_PROJECT, project_values))
+        self.style_values = resolved_style
+        self.values = _merge_dicts(DEFAULT_PROJECT, project_values)
+        self.values["theme"] = deepcopy(resolved_style["theme"])
+        self.values["dialogue_buttons"] = deepcopy(resolved_style["dialogue_buttons"])
+        self.values["characters"] = deepcopy(resolved_style["characters"])
+        if isinstance(self.values.get("intro"), dict):
+            self.values["intro"].update(deepcopy(resolved_style["intro"]))
         self._validate()
         self.name = self.values["name"]
         project_root = PATHS.project
@@ -271,17 +280,22 @@ class ProjectConfig:
         self.icon = PurePosixPath(icon.replace("\\", "/")).as_posix() if icon else None
         self.window = self.values["window"]
         self.menus = self.values["menus"]
-        self.theme = self.values.get("theme", {})
+        self.theme = self.style_values["theme"]
 
     @classmethod
     def load(cls, config_file: str = "project.json"):
         path = PATHS.project_data / config_file
-        if not loader.project_file_exists(config_file, PATHS.project_data):
-            return cls()
-        values = loader.load_project_json(config_file)
-        if not isinstance(values, dict):
-            raise ValueError(f"Project config {path} must contain a JSON object.")
-        return cls(values)
+        values = {}
+        if loader.project_file_exists(config_file, PATHS.project_data):
+            values = loader.load_project_json(config_file)
+            if not isinstance(values, dict):
+                raise ValueError(f"Project config {path} must contain a JSON object.")
+        style_values = None
+        if loader.project_file_exists("style.json", path.parent):
+            style_values = loader.load_project_json("style.json", path.parent)
+            if not isinstance(style_values, dict):
+                raise ValueError(f"Style config {path.parent / 'style.json'} must contain a JSON object.")
+        return cls(values, style_values)
 
     def load_story(self, story_file: str | None = None):
         filename = story_file or self.story_file
@@ -350,7 +364,7 @@ class ProjectConfig:
             or any(intro.get(key) is not None and not isinstance(intro[key], str)
                    for key in ("credit_image", "warning_image", "headphones_image"))
         ):
-            raise ValueError("Project config 'intro' needs creator, version, warning_message, and optional image paths.")
+            raise ValueError("Project intro text needs creator, version, and warning_message; intro images are configured in style.json.")
         if (
             not isinstance(values.get("save_slots"), int)
             or isinstance(values.get("save_slots"), bool)
@@ -411,13 +425,13 @@ class ProjectConfig:
 
         characters = values.get("characters")
         if not isinstance(characters, dict):
-            raise ValueError("Project config 'characters' must be an object.")
+            raise ValueError("Style config 'characters' must be an object.")
         for name, settings in characters.items():
             if not isinstance(name, str) or not name.strip():
-                raise ValueError("Project config character names must be non-empty strings.")
+                raise ValueError("Style config character names must be non-empty strings.")
             if not isinstance(settings, dict):
                 raise ValueError(
-                    f"Project config characters.{name} must be an object."
+                    f"Style config characters.{name} must be an object."
                 )
             scale = settings.get("scale", 100)
             try:
@@ -431,7 +445,7 @@ class ProjectConfig:
                 valid_scale = False
             if not valid_scale:
                 raise ValueError(
-                    f"Project config characters.{name}.scale must be a positive percentage."
+                    f"Style config characters.{name}.scale must be a positive percentage."
                 )
 
         menus = values.get("menus")
@@ -463,7 +477,7 @@ class ProjectConfig:
                         "type_speed", "music_volume", "sfx_volume", "fullscreen", "ui_scale",
                         "auto_advance", "auto_wait", "dialogue_font_scale", "speaker_font_scale",
                         "high_contrast", "muted", "reduced_motion", "voice_enabled", "animated_text",
-                                "touch_advance_mode", "subtitles_enabled", "locale", "speech_enabled",
+                                "touch_advance_mode", "subtitles_enabled", "locale", "speech_enabled", "theme_variant",
                     }:
                         raise ValueError(f"Project menu {menu_name!r} item {index} has an unknown setting ID.")
 
@@ -495,23 +509,28 @@ class ProjectConfig:
             if action != required_action:
                 raise ValueError(f"Project config menus.slots.{key} must use action {required_action!r}.")
         if not isinstance(values.get("theme"), dict):
-            raise ValueError("Project config 'theme' must be an object.")
+            raise ValueError("Style config 'theme' must be an object.")
         dialogue_buttons = values.get("dialogue_buttons")
         if not isinstance(dialogue_buttons, dict):
-            raise ValueError("Project config 'dialogue_buttons' must be an object.")
+            raise ValueError("Style config 'dialogue_buttons' must be an object.")
         for button_name in ("back", "history", "quick_save", "quick_load", "auto", "mute"):
             button = dialogue_buttons.get(button_name)
             if not isinstance(button, dict):
                 raise ValueError(
-                    f"Project config 'dialogue_buttons.{button_name}' must be an object."
+                    f"Style config 'dialogue_buttons.{button_name}' must be an object."
                 )
             if not isinstance(button.get("visible"), bool):
                 raise ValueError(
-                    f"Project config 'dialogue_buttons.{button_name}.visible' must be a boolean."
+                    f"Style config 'dialogue_buttons.{button_name}.visible' must be a boolean."
                 )
             if not isinstance(button.get("label"), str):
                 raise ValueError(
-                    f"Project config 'dialogue_buttons.{button_name}.label' must be a string."
+                    f"Style config 'dialogue_buttons.{button_name}.label' must be a string."
+                )
+            label_alignment = button.get("label_alignment", "center")
+            if not isinstance(label_alignment, str) or label_alignment not in {"left", "center", "right"}:
+                raise ValueError(
+                    f"Style config 'dialogue_buttons.{button_name}.label_alignment' must be left, center, or right."
                 )
         raw_theme = values["theme"]
         for group, font_names in (
@@ -579,6 +598,9 @@ class ProjectConfig:
         menu_theme = raw_theme.get("menu", {})
         if not isinstance(menu_theme, dict):
             raise ValueError("Project theme 'menu' must be an object.")
+        label_alignment = menu_theme.get("label_alignment", "left")
+        if not isinstance(label_alignment, str) or label_alignment not in {"left", "center", "right"}:
+            raise ValueError("Project theme 'menu.label_alignment' must be left, center, or right.")
         screens = menu_theme.get("screens", {})
         if not isinstance(screens, dict):
             raise ValueError("Project theme 'menu.screens' must be an object.")
@@ -601,6 +623,14 @@ class ProjectConfig:
             ):
                 raise ValueError(
                     f"Project theme 'menu.screens.{screen_name}.alignment' must be centered, left, or right."
+                )
+            label_alignment = screen_theme.get("label_alignment")
+            if label_alignment is not None and (
+                not isinstance(label_alignment, str)
+                or label_alignment not in {"left", "center", "right"}
+            ):
+                raise ValueError(
+                    f"Project theme 'menu.screens.{screen_name}.label_alignment' must be left, center, or right."
                 )
             for key in ("top", "row_gap", "button_width", "button_height"):
                 value = screen_theme.get(key)

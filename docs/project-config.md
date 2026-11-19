@@ -1,22 +1,27 @@
 # Project configuration reference
 
-`data/project.json` selects the story, names the game, sets the window and save-slot count, and configures menus, credits, intro cards, and theme. It must be valid JSON: use double quotes around keys and strings, and do not add comments or a trailing comma.
+`data/project.json` selects the story, names the game, sets the window and save-slot count, and configures menus, credits, and intro text. Visual appearance lives in the companion `data/style.json`. Both files must be valid JSON: use double quotes around keys and strings, and do not add comments or trailing commas.
 
 The project configuration is optional. If it is missing, the engine loads its built-in defaults and looks for `data/story.yaml`. When a config value is omitted, its built-in default is used. Nested objects merge with defaults; arrays such as menu `items` replace the default array completely.
 
-The starter-project template includes the full default theme, including the menu-screen, textbox, choice-button, pause-button, and font settings described below. VN_Editor shows this template for a missing or empty `data/project.json` and marks it unsaved; the file is written only when you save. A non-empty project file is loaded as written and is not replaced or filled with template keys. Its omitted settings still use engine defaults at runtime.
+The starter-project template includes `project.json`, `style.json`, and the story. VN_Editor opens both configuration files in separate tabs. Missing style values use engine defaults. Older projects with visual fields in `project.json` still load; the editor moves theme, dialogue-control, intro-image, and character-scaling values into `style.json` the next time you save.
 
 ## Project folder and path rules
 
-The project root is the folder containing `assets/` and `data/`. If `Documents/VN Engine Projects/My Visual Novel` does not exist when VN_Editor starts without another project selected, the editor creates the starter project locally from its bundled defaults. It leaves an existing folder and its `data/project.json` untouched. You can also open any other project folder from VN_Editor.
+The project root is the folder containing `assets/` and `data/`. When VN_Editor opens a project, it creates any missing standard asset folders (`assets/fonts/`, `assets/images/`, `assets/sounds/`, and `assets/characters/`) and missing starter files (`data/project.json`, `data/style.json`, and `data/story.yaml`). Existing files are left untouched. You can also open any other project folder from VN_Editor.
 
 Runtime templates are downloaded from the public GitHub Releases on demand and cached in the user's local cache. They are editor runtime files, not part of your project's `assets/` or `data/`.
 
 ```text
 My Visual Novel/
   assets/
+    characters/
+    fonts/
+    images/
+    sounds/
   data/
     project.json
+    style.json
     story.yaml
 ```
 
@@ -28,7 +33,9 @@ For temporary runs such as the editor's **Test Play**, the engine honors the `VN
 
 ## Workspace source Test Play
 
-Set the top-level `"USER"` value in `data/project.json` to control how VN_Editor prepares **Test Play**:
+When the editor is running from a source checkout, **Test Play** launches that workspace engine directly against the selected project. This skips building and unpacking a platform export. If the editor is installed without engine source files, it falls back to a compiled runtime template.
+
+The top-level `"USER"` value controls whether that fallback is allowed:
 
 ```json
 {
@@ -36,15 +43,15 @@ Set the top-level `"USER"` value in `data/project.json` to control how VN_Editor
 }
 ```
 
-- Exactly `"admin"` runs Test Play from the engine source code in the workspace (`main.py` and `engine/`) instead of downloading or using a GitHub compiled runtime template.
-- `"user"` and every other value use the normal compiled-template workflow.
+- Exactly `"admin"` requires the workspace source (`main.py` and `engine/`) and reports an error if it is unavailable.
+- `"user"` and every other string allow the compiled-template fallback when workspace source is unavailable.
 - The value must be a string. This setting does not change normal exports.
 
-Admin source mode stages the workspace source together with the project's `assets/` and `data/` in a temporary folder, which keeps test saves isolated and avoids modifying the project.
+Test Play points the workspace engine at the selected project and stores saves and coverage in a temporary folder, which is removed when the game closes.
 
 ## A practical `project.json`
 
-This example changes the project name, window, credits, menu labels, intro text, and colors. Unspecified pause-menu items, settings items, slot settings, and theme values keep their defaults.
+This example changes project identity, window, credits, menu labels, and intro text. Visual settings are kept in the separate `style.json` file below.
 
 ```json
 {
@@ -70,10 +77,7 @@ This example changes the project name, window, credits, menu labels, intro text,
   "intro": {
     "creator": "Your Name",
     "game_version": "1.0",
-    "warning_message": "This story contains flashing lights.\nTake breaks when you need them.",
-    "credit_image": null,
-    "warning_image": "content_warning.png",
-    "headphones_image": "headphones.png"
+    "warning_message": "This story contains flashing lights.\nTake breaks when you need them."
   },
   "credits": [
     "Story and art: Your Name",
@@ -93,60 +97,34 @@ This example changes the project name, window, credits, menu labels, intro text,
     },
     "pause": { "title": "Paused" },
     "settings": { "title": "Options" }
-  },
-  "theme": {
-    "colors": {
-      "background": [18, 22, 38],
-      "text": [242, 237, 222],
-      "accent": [235, 126, 151],
-      "panel": [8, 12, 25, 220],
-      "normal": [25, 31, 54],
-      "hover": [80, 47, 74],
-      "selected": [45, 78, 75],
-      "border": [120, 101, 126]
-    },
-    "game_fonts": {
-      "text": "standard.ttf",
-      "name": "standard.ttf",
-      "button": "standard.ttf",
-      "intro": "standard.ttf"
-    },
-    "game_font_sizes": {
-      "text": 24,
-      "name": 28,
-      "button": 20,
-      "dialogue_controls": 12,
-      "intro": 40,
-      "intro_small": 21
-    },
-    "fonts": {
-      "menu": "Joystix.ttf",
-      "title": "VCR_OSD_Mono.ttf",
-      "item_size": 20,
-      "detail_size": 16,
-      "title_size": 30
-    },
-    "menu": {
-      "layout": "centered",
-      "background": "images/menu-background.jpg",
-      "width": 860,
-      "row_height": 56,
-      "row_gap": 9,
-      "title_y": 112,
-      "top": 190,
-      "border_radius": 8
-    },
-    "sounds": {
-      "hover": "sounds/hover_button.wav",
-      "click": "sounds/click_button.wav",
-      "cancel": "sounds/click_button.wav",
-      "load": "sounds/click_button.wav"
-    }
   }
 }
 ```
 
-If you copy this example, add `assets/images/menu-background.jpg` or set `theme.menu.background` to `null`. A missing theme image is simply omitted. The built-in font names in the example are available even when those font files are not in the project.
+## A practical `style.json`
+
+Visual design uses the `theme` tree that was previously stored in `project.json`. Dialogue control labels and intro card images are also styles:
+
+```json
+{
+  "schema_version": 1,
+  "theme": {
+    "colors": { "background": [18, 22, 38], "text": [242, 237, 222] },
+    "menu": { "background": "images/menu-background.jpg" },
+    "textbox": { "background": "images/dialogue-frame.png", "height": 0.28 }
+  },
+  "dialogue_buttons": {
+    "back": { "visible": true, "label": "Back", "label_alignment": "center" }
+  },
+  "intro": {
+    "credit_image": null,
+    "warning_image": "content_warning.png",
+    "headphones_image": "headphones.png"
+  }
+}
+```
+
+Style image paths resolve from project `assets/` first and engine assets second. Built-in fonts remain available even when those font files are not in the project.
 
 ## Top-level fields
 
@@ -162,26 +140,10 @@ If you copy this example, add `assets/images/menu-background.jpg` or set `theme.
 | `save_migrations` | Empty mappings | Optional old-to-new dialogue and variable names used when loading saves after story edits. |
 | `paths` | See [paths](#paths) | Project data, asset, and user-data locations. |
 | `window` | `1920` × `1200`, caption `VN Engine` | Design window size and operating-system caption. Windowed desktop games scale down to fit the primary monitor and open centered; press Ctrl+Shift+Home to recover an off-screen window. Fullscreen can also be toggled in Settings. |
-| `intro` | See [intro cards](#intro-cards) | Creator/version text and optional credit/warning card images. |
+| `intro` | See [intro cards](#intro-cards) | Creator/version text and content notice message. |
 | `credits` | `[]` | Additional credits shown in the Credits menu. |
 | `messages` | Built-in messages | Text for save/load/status messages; see [messages](#messages). |
 | `menus` | Built-in menus | Main, pause, settings, and save-slot menu titles/items. |
-| `dialogue_buttons` | See [dialogue controls](#dialogue-controls) | Labels and visibility for the controls shown at the bottom of the dialogue textbox. |
-| `characters` | `{}` | Optional per-character sprite scaling; see [character scaling](#character-scaling). |
-| `theme` | Built-in theme | Colors, fonts, textbox, menus, button art, pause icon, and menu sounds. |
-
-## Character scaling
-
-Use the optional top-level `characters` object to scale all sprites for selected characters relative to their normal auto-fit size:
-
-```json
-"characters": {
-  "Aiko": { "scale": 100 },
-  "Mina": { "scale": 75 }
-}
-```
-
-`100` keeps the current size, `50` renders at half that size, and `150` renders at one-and-a-half times the size. The percentage applies to every expression, look, and animation frame for that character. Character names are matched case-insensitively. A scale must be a positive number; values above 100 can make a sprite extend beyond the window. Characters not listed use the default 100% scale.
 
 ## Paths
 
@@ -195,7 +157,7 @@ Use the optional top-level `characters` object to scale all sprites for selected
 
 | Key | Default | Use |
 | --- | --- | --- |
-| `data` | `data` | Folder containing `project.json` and the configured story file. Relative paths start at the project root. |
+| `data` | `data` | Folder containing the configured story file. `project.json` and `style.json` are always kept together in the project's `data/` folder. |
 | `assets` | `assets` | Folder containing project images, audio, fonts, and character art. Relative paths start at the project root. |
 | `user_data` | `user_data` | Writable folder for settings and saves, relative to the user-data root. Can be absolute. |
 
@@ -233,20 +195,17 @@ Android APKs run immersive full-screen and fit the game display to the device vi
 
 ## Intro cards
 
-The engine displays an opening sequence before the main menu: the built-in logo, a creator credit, then an optional content notice. Use `intro` to change its text and replace/omit the optional images:
+The engine displays an opening sequence before the main menu: the built-in logo, a creator credit, then an optional content notice. The project file holds its text:
 
 | Key | Default | Description |
 | --- | --- | --- |
 | `creator` | `Marpp` | Name shown on the credit card. Required as a string after defaults are merged. |
 | `game_version` | `null` | Optional version printed on the credit card. |
 | `warning_message` | Empty string | Text printed on the notice card. Use `\n` in JSON for a line break. |
-| `credit_image` | `null` | Optional image shown with the creator credit. |
-| `warning_image` | `content_warning.png` | Image on the notice card. Set to `null` to omit it. |
-| `headphones_image` | `headphones.png` | Additional image below the notice. Set to `null` to omit it. |
 
-The optional intro image values resolve from project `assets/` first and engine assets second. The `logo.png` and `intro.wav` splash assets are provided by the engine. The splash logo is fixed to the engine asset and cannot be hidden or replaced by a project image.
+Intro card images are visual assets and belong in `style.json` under `intro`. Those optional image values resolve from project `assets/` first and engine assets second. The `logo.png` and `intro.wav` splash assets are provided by the engine. The splash logo is fixed to the engine asset and cannot be hidden or replaced by a project image.
 
-The notice card is skipped when `warning_message` is empty and both `warning_image` and `headphones_image` are `null`.
+The notice card is skipped when `warning_message` is empty and both style image fields are `null`.
 
 ## Menus
 
@@ -313,9 +272,24 @@ Credits can be plain strings or objects with a `label` and optional `url`:
 
 Only `http://` and `https://` URLs are accepted. Selecting a linked entry opens it in the system browser. The engine automatically appends `Marpp: Creator of the VN Engine` to the list.
 
-## Theme
+## Style configuration (`data/style.json`)
 
-The `theme` object is merged over a full set of engine defaults. The starter `project.json` spells these defaults out so every available setting is visible and editable; existing project files are not rewritten to add them. You can still omit values in a hand-edited project. Theme asset paths resolve from project `assets/` first, then engine assets. Colors are arrays of channel values from `0` to `255`; use `[R, G, B]`, or `[R, G, B, A]` for color alpha. The textbox also has an overall opacity setting from `0.0` to `1.0`.
+`style.json` contains a versioned, data-only visual style: the `theme`, component typography and colors, responsive layouts, control skins, dialogue buttons, intro images, per-character scaling, and optional theme variants. It is separate from project identity, story settings, and menu actions. The `schema_version` is currently `1`. This file configures the engine's built-in renderer; custom Python rendering uses the advanced [renderer API](./renderer-api.md). Style asset paths resolve from project `assets/` first, then engine assets. Colors are arrays of channel values from `0` to `255`; use `[R, G, B]`, or `[R, G, B, A]` for color alpha. The textbox also has an overall opacity setting from `0.0` to `1.0`.
+
+The editor provides **Project > Visual Theme Editor** to preview common screens at desktop, tablet, and mobile sizes, select or drag components, edit their properties, and apply changes to `style.json`. Use **Project > Import Theme Preset** and **Export Theme Preset** to merge or save `.vnstyle` presets. Read the [styling and layout guide](./styling-and-layout.md) for responsive profile, layout, skin, variant, and preset examples. Legacy `theme` geometry remains supported for older projects; new layouts should use the `layouts` tree.
+
+### Character scaling
+
+Use the optional `characters` object to scale all sprites for selected characters relative to their normal auto-fit size:
+
+```json
+"characters": {
+  "Aiko": { "scale": 100 },
+  "Mina": { "scale": 75 }
+}
+```
+
+`100` keeps the current size, `50` renders at half that size, and `150` renders at one-and-a-half times the size. The percentage applies to every expression, look, and animation frame for that character. Character names are matched case-insensitively. A scale must be a positive number; values above 100 can make a sprite extend beyond the window. Characters not listed use the default 100% scale. Older projects that keep these values in `project.json` are migrated by the editor when both configuration files are next saved.
 
 ### Colors
 
@@ -364,16 +338,16 @@ All geometry values are window fractions; `x + width` and `bottom + height` must
 
 ### Dialogue controls
 
-The default controls appear along the bottom of the textbox. Each control has a `visible` boolean and a customizable `label`; omitted fields retain their defaults. Set `visible` to `false` to hide a control.
+The default controls appear along the bottom of the textbox. Each control has a `visible` boolean, a customizable `label`, and a `label_alignment` value of `left`, `center`, or `right`. Omitted fields retain their defaults. Set `visible` to `false` to hide a control.
 
 ```json
 "dialogue_buttons": {
-  "back": { "visible": true, "label": "Back" },
-  "history": { "visible": true, "label": "History" },
-  "quick_save": { "visible": true, "label": "Q. Save" },
-  "quick_load": { "visible": true, "label": "Q. Load" },
-  "auto": { "visible": true, "label": "Auto" },
-  "mute": { "visible": true, "label": "Mute" }
+  "back": { "visible": true, "label": "Back", "label_alignment": "center" },
+  "history": { "visible": true, "label": "History", "label_alignment": "center" },
+  "quick_save": { "visible": true, "label": "Q. Save", "label_alignment": "center" },
+  "quick_load": { "visible": true, "label": "Q. Load", "label_alignment": "center" },
+  "auto": { "visible": true, "label": "Auto", "label_alignment": "center" },
+  "mute": { "visible": true, "label": "Mute", "label_alignment": "center" }
 }
 ```
 
@@ -445,6 +419,7 @@ Font names can refer to files in `assets/fonts/` or the built-in font folder. Th
 | Key | Default | Description |
 | --- | --- | --- |
 | `layout` | `centered` | Horizontal alignment: `centered`, `left`, or `right`. |
+| `label_alignment` | `left` | Alignment of menu button labels: `left`, `center`, or `right`. |
 | `background` | `null` | Optional full-window image, scaled to fit the window. |
 | `width` | `860` | Menu row width, limited to fit the window. |
 | `x` | `null` | Optional left coordinate for `centered` or `left` layout. For `left`, the default is `48`. |
@@ -455,11 +430,11 @@ Font names can refer to files in `assets/fonts/` or the built-in font folder. Th
 | `top` | `190` | Minimum starting y-coordinate for the menu rows. |
 | `border_radius` | `8` | Corner radius for menu rows. |
 
-If no theme values are configured, the engine uses a simple built-in renderer with system fonts and the default colors. Setting a `theme` enables the configurable renderer while keeping defaults for omitted theme values.
+If no theme values are configured, the engine uses a simple built-in renderer with system fonts and default colors. Values in `style.json.theme` enable the configurable renderer while keeping defaults for omitted theme values.
 
 ### Per-screen menus, grids, and button images
 
-Menu screens can have independent backgrounds, row alignment and spacing, button sizes, button images, and grid layouts. The supported screen names are `main`, `pause`, `settings`, and `slots`; each applies only to that screen. Credits remains a scrolling list but supports its own button images and background. A screen-specific background overrides the shared `theme.menu.background`.
+Menu screens can have independent backgrounds, row alignment and spacing, button sizes, button images, label alignment, and grid layouts. Set `theme.menu.screens.<screen>.label_alignment` to override the shared label alignment for that screen. These visual options are configured in `style.json`. The supported screen names are `main`, `pause`, `settings`, and `slots`; each applies only to that screen. Credits remains a scrolling list but supports its own button images and background. A screen-specific background overrides the shared `theme.menu.background`.
 
 Normal and hovered button images are optional PNGs. If only one is provided, it is used for both states. The label and any detail text are drawn over the image. With no button images, the engine draws its normal colored rows.
 
@@ -524,7 +499,7 @@ Choice-button and pause-button dimensions are design pixels and scale with UI Si
 
 ### Menu sounds
 
-`theme.sounds` accepts these keys: `hover`, `click`, `cancel`, and `load`. Each value is a sound asset path. Defaults use the built-in `sounds/hover_button.wav` and `sounds/click_button.wav`; missing menu sounds are silently skipped. Project files can override these paths.
+`theme.sounds` accepts these keys: `hover`, `click`, `cancel`, and `load`. Each value is a sound asset path. Defaults use the built-in `sounds/hover_button.wav` and `sounds/click_button.wav`; missing menu sounds are silently skipped. Style files can override these paths.
 
 ## Messages
 

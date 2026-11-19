@@ -6,7 +6,7 @@ The downloadable VN_Editor package is available for Windows, Linux, and macOS. E
 
 1. Extract the ZIP for your computer to a folder you can write to.
 2. Launch the editor for that platform: `VN_Editor.exe` on Windows, `VN_Editor` on Linux, or `VN_Editor.app` on macOS. If the default project folder does not exist, the editor creates the starter project locally.
-3. Edit `data/story.yaml`, `data/project.json`, and files under `assets/` in the project folder. The starter project is ready to edit.
+3. Edit `data/story.yaml`, `data/project.json`, `data/style.json`, and files under `assets/` in the project folder. The starter project is ready to edit.
 4. Click **Test Play** to run the project with a temporary copy of the engine runtime for your current OS.
 5. Click **Export Game** to create a Windows, Linux, macOS, browser, or Android build.
 
@@ -20,7 +20,7 @@ VN_Editor/
   docs/                     # The included Markdown guides
 ```
 
-The starter project is stored separately at `Documents/VN Engine Projects/My Visual Novel`. The editor creates it from its built-in template only if that folder does not exist; later launches preserve its `data/project.json` and all other user files. Use **Open Project** to work on another project folder. Test Play and game export use temporary or output folders. Runtime templates are downloaded on demand from GitHub Releases and cached in the user's local cache.
+The starter project is stored separately at `Documents/VN Engine Projects/My Visual Novel`. The editor creates it from its built-in template only if that folder does not exist; later launches preserve its project files. Use **Open Project** to work on another project folder. Test Play and game export use temporary or output folders. Runtime templates are downloaded on demand from GitHub Releases and cached in the user's local cache.
 
 ## What the engine provides
 
@@ -38,11 +38,11 @@ The starter project is stored separately at `Documents/VN Engine Projects/My Vis
 - Optional text-to-speech announcements for dialogue, choices, and menu navigation.
 - Editor asset diagnostics for unused and duplicate names, large images, package errors, and mod conflicts.
 - A touch-friendly pause button during gameplay, alongside the Escape key on desktop.
-- Project-level menu labels, window size, intro cards, credits, textbox image/color, and a declarative menu theme.
+- Project-level menu labels, window size, intro text, and credits; a separate declarative visual style for colors, fonts, intro images, textbox, and menu/button layout.
 - Story validation and a character-asset inventory from the command line.
 - An editor export pipeline for Windows, Linux, macOS, and browser game archives using downloaded prebuilt templates, plus Android APKs built from a selected GitHub release.
 
-The [story format reference](./story-format.md) explains how to write each feature. The [project configuration reference](./project-config.md) explains `data/project.json`, application icons, and theme options.
+The [story format reference](./story-format.md) explains how to write each feature. The [project configuration reference](./project-config.md) explains `data/project.json` and `data/style.json`. The [styling and layout guide](./styling-and-layout.md) covers responsive layouts, skins, variants, and the Visual Theme Editor. Developers writing custom Python drawing code can use the [renderer API guide](./renderer-api.md).
 
 ## Built-in assets
 
@@ -50,7 +50,7 @@ The engine includes the following game assets. Desktop builds embed them into th
 
 | Folder in the engine | Included files | Use |
 | --- | --- | --- |
-| `engine/assets/fonts/` | `standard.ttf`, `Joystix.ttf`, `MS Gothic.ttf`, `PermanentMarker.ttf`, `rpg-maker-2k.ttf`, `Toriko.ttf`, `VCR_OSD_Mono.ttf` | Use in `theme.game_fonts`, `theme.fonts.menu`, or `theme.fonts.title`. `standard.ttf` is the default dialogue font. |
+| `engine/assets/fonts/` | `standard.ttf`, `Joystix.ttf`, `MS Gothic.ttf`, `PermanentMarker.ttf`, `rpg-maker-2k.ttf`, `Toriko.ttf`, `VCR_OSD_Mono.ttf` | Use in `style.json` under `theme.game_fonts`, `theme.fonts.menu`, or `theme.fonts.title`. `standard.ttf` is the default dialogue font. |
 | `engine/assets/images/` | `logo.png`, `pause.png`, `content_warning.png`, `headphones.png`, `test.png` | `logo.png` is fixed in the opening splash. `pause.png` is the in-game pause button. The warning and headphone images are the default notice-card images and can be replaced. `test.png` is available as a general image asset. |
 | `engine/assets/sounds/` | `intro.wav`/`.ogg`, `hover_button.wav`/`.ogg`, `click_button.wav`/`.ogg` | Opening splash sound and default menu hover/click sounds. Desktop uses WAV; Web and Android use OGG. |
 
@@ -60,17 +60,16 @@ Projects exported for Web or Android must use `.ogg` for project sound and music
 
 Project assets are searched before these built-ins for normal asset lookups. The opening splash always uses the engine's own `logo.png`; a project image cannot replace it. Backgrounds and menu art go in `assets/images/`, sound effects in `assets/sounds/`, music in `assets/music/`, fonts in `assets/fonts/`, and character art in `assets/characters/`. See the [user guide](./guide_vn-engine.md#5-assets-and-built-in-art) for path examples.
 
-The dialogue textbox can use a project image, a project color, or both. Configure `theme.textbox.background` and `theme.textbox.color` in `data/project.json`; see [project configuration](./project-config.md#dialogue-textbox-image-and-color). Story chapters can be split into YAML files with the top-level `includes` list; see [story format](./story-format.md#split-a-story-across-yaml-files).
+The dialogue textbox can use a project image, a project color, or both. Configure `theme.textbox.background` and `theme.textbox.color` in `data/style.json`; see [project configuration](./project-config.md#dialogue-textbox-image-and-color). Story chapters can be split into YAML files with the top-level `includes` list; see [story format](./story-format.md#split-a-story-across-yaml-files).
 
 ## Use the editor
 
-The editor opens the configured story, each YAML file named by `includes`, and `data/project.json` in separate tabs. It provides YAML/JSON highlighting, engine-specific key and asset suggestions (`Ctrl+Space`), live diagnostics, an expandable Asset hierarchy, and read-only tabs for Markdown guides. `Ctrl+F` searches the selected tab. `Ctrl+S` saves the current file; `Ctrl+Shift+S` saves the open story files and project configuration.
+The PySide6 editor opens the configured story, each YAML file named by `includes`, `data/project.json`, and `data/style.json` in separate tabs. **File > Open Story File...** adds more YAML tabs; close them with ×, and tabs wrap into a second row when needed. It provides YAML/JSON highlighting, engine-specific key and asset suggestions (`Ctrl+Space`), live diagnostics, and an expandable Asset hierarchy. Use **Project > Visual Theme Editor** to arrange and style screens with a desktop, tablet, or mobile preview; import and export reusable `.vnstyle` presets from the same menu. Find the Markdown guides under **Help**, including styling, layout, and custom renderer documentation. `Ctrl+F` searches the selected tab. `Ctrl+S` saves the current file; `Ctrl+Shift+S` saves the open story files and both configuration files.
 
 **Test Play** saves and checks the project, downloads the current platform's runtime template if needed, prepares a temporary game using the template and project files, then launches it. The temporary game folder is removed when the game closes or the editor exits. Test Play stores settings and saves in that temporary folder, so it does not change the project's normal save data.
 
 **Export Game** saves and checks the project. Desktop exports embed the project's `assets/` and `data/` files in the game executable and include a platform shortcut: a Windows `.lnk`, a relative Linux symbolic link, or a macOS app-bundle symbolic link. Web exports create a static website ZIP. Runtime templates download from GitHub Releases on demand and remain cached locally. Android exports let you choose a published runtime release, recommend the version matching the editor, fetch the matching engine source temporarily, and create a fresh project-specific Web archive before packaging it as a Capacitor APK; they do not reuse a previously exported `web.zip`. Android export requires Node.js/npm, a Java JDK, the Android SDK, and an internet connection. Web and Android project audio must use OGG files (`.ogg`).
 
-The command pane uses PowerShell on Windows and the available bash, zsh, or sh shell on Linux/macOS. It starts in the project folder and keeps its working directory as commands run. Use **Restart** to reopen the shell.
 
 ## Optional VS Code helper
 

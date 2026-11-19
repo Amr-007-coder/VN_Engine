@@ -1,4 +1,5 @@
-pygame
+pygame-ce>=2.5.8,<3
 PyYAML==6.0.3
 Nuitka
 pygbag==0.9.3
+PySide6>=6.12,<7

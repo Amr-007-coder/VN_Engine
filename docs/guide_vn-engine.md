@@ -16,7 +16,7 @@ VN_Editor/                     # Editor package root
   docs/                        # This guide and the other Markdown references
 ```
 
-The starter project is separate from the editor package. Its folder containing `assets/` and `data/` is the project root. The editor creates it from the defaults bundled with that editor version only when the default project folder does not already exist; if that folder is present, all of its files remain untouched. VN_Editor remembers the last project folder and reopens it on the next launch. A project folder you launch from or pass with `--project-dir` takes precedence. Use **Open Project** to select another project folder. Runtime templates are downloaded from GitHub Releases when needed; local or custom templates can still be selected in the export dialog.
+The starter project is separate from the editor package. Its folder containing `assets/` and `data/` is the project root. When VN_Editor opens a project, it creates missing standard asset folders and starter files from the defaults bundled with that editor version; existing files remain untouched. VN_Editor remembers the last project folder and reopens it on the next launch. A project folder you launch from or pass with `--project-dir` takes precedence. Use **Open Project** to select another project folder. Runtime templates are downloaded from GitHub Releases when needed; local or custom templates can still be selected in the export dialog.
 
 ## 2. Write a story and add assets
 
@@ -44,11 +44,13 @@ assets/
 
 Project assets take priority over built-in engine assets for normal asset lookups. The opening splash always uses the engine's own logo and cannot be replaced by `assets/images/logo.png`. For backgrounds, sound effects, music, and fonts, use the path relative to `assets/` (for example, `images/station.png` or `sounds/door.wav`). For character art, the folders and filenames define the names used by story actions. The [asset section](#5-assets-and-built-in-art) below lists built-in files.
 
-Set the project title, window size, menus, credits, intro message, and visual theme in `data/project.json`. See [project configuration](./project-config.md).
+Set the project title, window size, menus, credits, and intro message in `data/project.json`. Configure colors, fonts, buttons, textbox, menu artwork, and intro images in `data/style.json`. See [project configuration](./project-config.md).
 
 ## 3. Validate and test the project
 
-The editor opens `data/project.json`, the selected story, and every YAML file listed by `includes`. Its live diagnostics check YAML syntax, story structure, supported keys and actions, project values, and asset references while you edit. Press `Ctrl+Space` for context-aware YAML keys, action names, character looks, expressions, asset paths, or JSON values. Use `Ctrl+F` to search the active tab; press `Enter` for the next match and `Shift+Enter` for the previous match. **Replace...** previews and replaces across open story and include tabs while leaving project settings out of scope. The **Edit** menu and `Ctrl+Z`/`Ctrl+Y` provide Undo and Redo. The expandable **Asset hierarchy** panel on the left shows project images, sounds, music, fonts, and character/look/expression folders; double-click a file to insert its reference at the cursor. The Markdown guide tabs are read-only.
+The PySide6 editor opens `data/project.json`, `data/style.json`, the selected story, and every YAML file listed by `includes`. Open more story files with **File > Open Story File...**; tabs can be closed with their × buttons, and the tab strip wraps into a second row when it fills. The editor's live diagnostics check YAML syntax, story structure, supported keys and actions, project/style values, and asset references while you edit. Press `Ctrl+Space` for context-aware YAML keys, action names, character looks, expressions, asset paths, or JSON values. Use `Ctrl+F` to search the active tab; press `Enter` for the next match and `Shift+Enter` for the previous match. **Replace...** previews and replaces across open story and include tabs while leaving configuration out of scope. The **Edit** menu and `Ctrl+Z`/`Ctrl+Y` provide Undo and Redo. The expandable **Asset hierarchy** panel on the left shows project images, sounds, music, fonts, and character/look/expression folders; double-click a file to insert its reference at the cursor. Open the guides from the **Help** menu.
+
+Use **Project > Visual Theme Editor** to inspect and arrange dialogue, menus, save slots, history, and overlays at desktop, tablet, and mobile sizes. Click or drag components in the preview, then edit their layout, colors, type, images, and control states in the inspector. **Import Theme Preset** and **Export Theme Preset** apply or save reusable `.vnstyle` files. See the [styling and layout guide](./styling-and-layout.md); custom Python renderers are documented in the [renderer API guide](./renderer-api.md).
 
 `Ctrl+S` saves the active file; `Ctrl+Shift+S` saves the project configuration and all open story files. Included YAML files open in their own tabs after they are listed in `includes` and saved.
 
@@ -58,7 +60,6 @@ Click **Test Play** to save and check the project, prepare a temporary game usin
 
 Use **Test from Dialogue...** to start at any dialogue ID and optionally change the starting story variables for that run. In a test game, press `F3` to inspect live variable values. Move with `Up`/`Down`, press `Enter` to edit, use `+`/`-` for numbers, or `Space` to toggle booleans. Changes apply only to the current test run. When Test Play closes, its coverage report lists visited and unreachable dialogues, terminal endings or return points, and selected or unselected branches. Open **Story Graph** (or press `Ctrl+G`) to view branches, endings, and unreachable dialogues; double-click a node to open its YAML definition.
 
-The editor command pane starts in the project folder. It uses PowerShell on Windows and the available bash, zsh, or sh shell on Linux/macOS. Commands can change the working folder; use **Restart** to start a fresh shell in the project root.
 
 The **Add** menu above the Asset hierarchy inserts a dialogue block, dialogue text, a choice option, a story variable, or an input action. Place the cursor in the target dialogue before adding text, a choice, or an input action. **Input Action (with variable)** also declares a new null-valued story variable, so its generated action passes story validation.
 
@@ -138,11 +139,11 @@ defines character `Aiko`, look `Summer/Uniform`, and expression `Smile`. The exp
 
 ## 6. Configure the menus and presentation
 
-`data/project.json` controls the displayed project name, selected story, save-slot count, menu labels and order, credits, window dimensions, intro-card text/images, and theme. If a setting is omitted, its built-in default is used. See [project configuration](./project-config.md) for all keys and copyable examples.
+`data/project.json` controls the displayed project name, selected story, save-slot count, menu labels and order, credits, window dimensions, and intro-card text. `data/style.json` controls theme colors, fonts, intro images, dialogue controls, textbox, menu layout and artwork, and per-character sprite scaling. Both files use engine defaults for omitted settings. See [project configuration](./project-config.md) for keys and copyable examples.
 
-The first launch screen uses the engine logo, followed by a creator credit and a content notice. Set `intro.creator`, `intro.game_version`, and `intro.warning_message` to customize the text. You can replace the credit, warning, or headphone images with project images, or set an optional image field to `null` to omit that image. Menu colors, fonts, background, layout, slot artwork, and sounds are part of the theme configuration.
+The first launch screen uses the engine logo, followed by a creator credit and a content notice. Set `intro.creator`, `intro.game_version`, and `intro.warning_message` in `project.json` to customize the text. Set the credit, warning, or headphone image in `style.json` to change or omit it. Menu colors, fonts, backgrounds, layout, slot artwork, and sounds are also part of `style.json`.
 
-The dialogue textbox can use a color, an image, or both. Set `theme.textbox.color` and `theme.textbox.background` in `data/project.json`; the image is scaled to the panel and transparent parts show the configured color. See [the textbox theme reference](./project-config.md#dialogue-textbox-image-and-color).
+The dialogue textbox can use a color, an image, or both. Set `theme.textbox.color` and `theme.textbox.background` in `data/style.json`; the image is scaled to the panel and transparent parts show the configured color. See [the textbox style reference](./project-config.md#dialogue-textbox-image-and-color).
 
 The credits menu lists the project’s configured `credits` and also includes the engine creator’s credit. A credit may be plain text or an object with a label and an optional `http://` or `https://` URL.
 
@@ -250,7 +251,7 @@ For YAML field syntax, start with the [story format](./story-format.md). For men
 
 Open **Extras → Mods** in the game to install `.vnmod` files, inspect their manifest and load issues, enable or disable them, and remove packages installed in the user's mods folder. Packages already inside the project can be disabled there and removed from the editor's project assets. Conflicting asset names show which package wins; direct project assets have priority. Changes take effect after the next launch.
 
-The editor's **Project** menu includes **Asset Diagnostics**, which lists likely unused files, duplicate asset names, images over 10 MB or 4096 pixels in either dimension, invalid packages, and asset conflicts. The unused check reads story actions, inline asset markers, character IDs, and project theme references. Dynamically constructed asset names may need manual review.
+The editor's **Project** menu includes **Asset Diagnostics**, which lists likely unused files, duplicate asset names, images over 10 MB or 4096 pixels in either dimension, invalid packages, and asset conflicts. The unused check reads story actions, inline asset markers, character IDs, and style references. Dynamically constructed asset names may need manual review.
 
 Use **Export Translation Template**, **Import Translation Catalog**, and **Translation Preview and Missing Strings** in the editor's **Project** menu to work with JSON catalogs under `data/locales/`. Declared locale catalogs can translate dialogue, choices, story action labels/prompts, and engine UI text. The preview includes string-length expansion and right-aligned RTL samples.
 

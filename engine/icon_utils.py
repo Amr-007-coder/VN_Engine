@@ -4,9 +4,6 @@ from io import BytesIO
 from pathlib import Path
 import struct
 
-import pygame
-
-
 _ICON_SIZES = (16, 32, 48, 64, 128, 256)
 _ICNS_SIZES = (
     (16, b"icp4"),
@@ -27,6 +24,8 @@ _ANDROID_ICON_SIZES = (
 
 
 def _png_images(image_path: Path, sizes: tuple[int, ...]) -> list[tuple[int, bytes]]:
+    import pygame
+
     try:
         image = pygame.image.load(str(image_path))
     except pygame.error as error:
@@ -80,6 +79,8 @@ def make_icns(image_path: Path) -> bytes:
 
 
 def install_android_launcher_icons(image_path: Path, resources_directory: Path) -> None:
+    import pygame
+
     try:
         image = pygame.image.load(str(image_path))
     except pygame.error as error:

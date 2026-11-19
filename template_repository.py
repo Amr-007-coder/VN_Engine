@@ -19,6 +19,8 @@ from urllib.parse import quote
 from urllib.request import Request, urlopen
 from zipfile import BadZipFile, ZipFile
 
+from engine.style import split_style_from_project
+
 
 REPOSITORY = "Amr-007-coder/VN_Engine"
 API_ROOT = f"https://api.github.com/repos/{REPOSITORY}"
@@ -452,7 +454,7 @@ def _write_starter_project(root: Path, project_template: dict) -> None:
         encoding="utf-8",
         newline="\n",
     )
-    project = deepcopy(project_template)
+    project, style = split_style_from_project(deepcopy(project_template))
     if not isinstance(project.get("menus"), dict) or not isinstance(
         project["menus"].get("main"), dict
     ):
@@ -461,6 +463,11 @@ def _write_starter_project(root: Path, project_template: dict) -> None:
     project["menus"]["main"]["title"] = "My Visual Novel"
     (data / "project.json").write_text(
         json.dumps(project, ensure_ascii=True, indent=2) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    (data / "style.json").write_text(
+        json.dumps(style, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
         newline="\n",
     )

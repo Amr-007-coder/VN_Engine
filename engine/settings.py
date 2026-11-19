@@ -25,6 +25,7 @@ DEFAULT_SETTINGS = {
     "animated_text": True,
     "touch_advance_mode": "screen",
     "locale": "en",
+    "theme_variant": "default",
     "key_bindings": {
         "advance": "space",
         "pause": "escape",
@@ -157,6 +158,8 @@ class SettingsStore:
         )
         locale = self.values.get("locale", DEFAULT_SETTINGS["locale"])
         self.values["locale"] = locale.strip() if isinstance(locale, str) and locale.strip() else DEFAULT_SETTINGS["locale"]
+        variant = self.values.get("theme_variant", "default")
+        self.values["theme_variant"] = variant.strip() if isinstance(variant, str) and variant.strip() else "default"
 
         configured_bindings = self.values.get("key_bindings", {})
         if not isinstance(configured_bindings, dict):

@@ -4,7 +4,6 @@ import os
 from pathlib import Path
 import sys
 
-import pygame
 import yaml
 
 from engine.embedded import (
@@ -111,11 +110,16 @@ if not EMBEDDED_ENABLED:
         PROJECT_ROOTS.append(meipass_root)
         ENGINE_DIRS.append(meipass_root / "engine")
 
-PROJECT_ROOT = _select_root(
-    PROJECT_ROOTS,
-    ("data/project.json", "data/story.yaml"),
-)
-PROJECT_ASSETS_ROOT = _select_root(PROJECT_ROOTS, ("assets",))
+PROJECT_ROOT_OVERRIDE = os.environ.get("VN_ENGINE_PROJECT_DIR")
+if PROJECT_ROOT_OVERRIDE:
+    PROJECT_ROOT = Path(PROJECT_ROOT_OVERRIDE).expanduser().resolve()
+    PROJECT_ASSETS_ROOT = PROJECT_ROOT
+else:
+    PROJECT_ROOT = _select_root(
+        PROJECT_ROOTS,
+        ("data/project.json", "data/story.yaml"),
+    )
+    PROJECT_ASSETS_ROOT = _select_root(PROJECT_ROOTS, ("assets",))
 ENGINE_DIR = _select_root(
     ENGINE_DIRS,
     ("data/settings.json", "assets", "data"),
@@ -159,6 +163,8 @@ class PATHS:
 class loader:
     @staticmethod
     def load_image(name: Path | str):
+        import pygame
+
         path = PATHS.images / name
         data = bytes_for_path(path, ((PATHS.engine_assets, "engine/assets"),))
         if data is not None:
@@ -167,6 +173,8 @@ class loader:
 
     @staticmethod
     def load_sound(name: Path | str):
+        import pygame
+
         path = PATHS.sounds / name
         data = bytes_for_path(path, ((PATHS.engine_assets, "engine/assets"),))
         if data is not None:
@@ -183,6 +191,8 @@ class loader:
 
     @staticmethod
     def load_font(name: Path | str, size: int):
+        import pygame
+
         path = PATHS.fonts / name
         data = bytes_for_path(path, ((PATHS.engine_assets, "engine/assets"),))
         if data is not None:

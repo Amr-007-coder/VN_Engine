@@ -65,9 +65,11 @@ DEFAULT_THEME = {
     },
     "menu": {
         "layout": "centered",
+        "label_alignment": "left",
         "background": None,
         "width": 860,
         "x": None,
+        "right_margin": 48,
         "row_height": 56,
         "row_gap": 9,
         "title_y": 112,

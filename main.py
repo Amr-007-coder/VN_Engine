@@ -8,7 +8,6 @@ import subprocess
 
 from engine.assets import AssetManager
 from engine.character_assets import CharacterAssetCatalog, CharacterAssetError
-from engine.engine import Engine
 from engine.loader import PATHS
 from engine.project import ProjectConfig
 from engine.validator import StoryValidator
@@ -171,6 +170,8 @@ def main():
             return 1
         print(f"Story '{story_file}' is valid.")
         return 0
+
+    from engine.engine import Engine
 
     Engine(story_file=story_file, project_config=project).run()
     return 0

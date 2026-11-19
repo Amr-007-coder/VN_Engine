@@ -6,8 +6,6 @@ from pathlib import PurePosixPath
 import sys
 from zipfile import BadZipFile, ZipFile
 
-import pygame
-
 from engine.embedded import EMBEDDED_ENABLED, EmbeddedFile, find_asset, read_resource, resources_under
 from engine.loader import PATHS
 
@@ -41,6 +39,7 @@ class AssetManager:
         self._images = {}
         self._sounds = {}
         self._fonts = {}
+        self._filesystem_asset_indexes = {}
 
     def _load_mod_state(self):
         try:
@@ -106,7 +105,7 @@ class AssetManager:
     def find_path(self, kind: str, name: str):
         if kind not in self.FOLDERS:
             raise ValueError(f"Unknown asset category {kind!r}.")
-        project_path = self.find_asset_path(kind, name, project_assets=self.project_assets)
+        project_path = self._find_asset_path(kind, name, (self.project_assets,))
         if project_path is not None:
             return project_path
         path = Path(name)
@@ -131,7 +130,48 @@ class AssetManager:
                     matches.append(asset)
             if len(matches) == 1:
                 return matches[0]
-        return self.find_asset_path(kind, name, fallback_assets=self.fallback_assets)
+        return self._find_asset_path(kind, name, (self.fallback_assets,))
+
+    def _find_asset_path(self, kind: str, name: str, roots):
+        path = Path(name)
+        if path.is_absolute():
+            return path if path.is_file() else None
+        category = self.FOLDERS[kind]
+        names = [path]
+        if sys.platform == "emscripten" and path.suffix.casefold() in {".wav", ".mp3", ".aiff"}:
+            names.append(path.with_suffix(".ogg"))
+        for root_value in roots:
+            root = Path(root_value)
+            if EMBEDDED_ENABLED:
+                embedded = find_asset(root, category, name)
+                if embedded is not None:
+                    return embedded
+            for relative_name in names:
+                for candidate in (root / relative_name, root / category / relative_name):
+                    if candidate.is_file():
+                        return candidate
+            if not path.suffix:
+                category_dir = root / category
+                if not category_dir.is_dir():
+                    continue
+                key = (root.resolve(), category)
+                aliases = self._filesystem_asset_indexes.get(key)
+                if aliases is None:
+                    aliases = {}
+                    try:
+                        for candidate in category_dir.rglob("*"):
+                            if not candidate.is_file():
+                                continue
+                            relative = candidate.relative_to(category_dir)
+                            aliases.setdefault(candidate.stem.casefold(), candidate)
+                            aliases.setdefault(relative.with_suffix("").as_posix().casefold(), candidate)
+                    except OSError:
+                        pass
+                    self._filesystem_asset_indexes[key] = aliases
+                found = aliases.get(path.as_posix().casefold())
+                if found is not None:
+                    return found
+        return None
 
     def mod_asset_names(self, kind: str):
         category = self.FOLDERS.get(kind)
@@ -306,6 +346,8 @@ class AssetManager:
         return self.find_path(kind, name) is not None
 
     def load_image(self, name: str, cache: bool = True):
+        import pygame
+
         path = self.find_path("image", name)
         if path is None:
             raise FileNotFoundError(f"Image asset {name!r} was not found in the project or engine assets.")
@@ -326,6 +368,8 @@ class AssetManager:
         return self._images[path]
 
     def load_sound(self, name: str):
+        import pygame
+
         if not pygame.mixer.get_init():
             return None
         path = self.find_path("sound", name)
@@ -342,6 +386,8 @@ class AssetManager:
         return self._sounds[path]
 
     def load_font(self, name: str | None, size: int, system_fallback: bool = True):
+        import pygame
+
         key = (name, size)
         if key in self._fonts:
             return self._fonts[key]
@@ -373,6 +419,8 @@ class AssetManager:
         sound.play()
 
     def play_music(self, name: str, volume: float = 1.0):
+        import pygame
+
         if not pygame.mixer.get_init():
             return False
         path = self.find_path("music", name)

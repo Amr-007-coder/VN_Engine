@@ -5,7 +5,13 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from editor import DEFAULT_PROJECT, SETTING_NAMES, VNEditorApp
+from editor import (
+    DEFAULT_PROJECT,
+    DEFAULT_STYLE,
+    SETTING_NAMES,
+    VNEditorApp,
+    _ensure_project_structure,
+)
 from engine.project import ProjectConfig
 
 
@@ -20,6 +26,101 @@ class MemoryEditor:
 
 
 class EditorProjectLoadingTests(unittest.TestCase):
+    def test_project_scaffolding_creates_missing_folders_and_default_files(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            project_root = Path(temporary) / "New Project"
+
+            _ensure_project_structure(project_root)
+
+            for relative in (
+                "assets",
+                "assets/fonts",
+                "assets/images",
+                "assets/sounds",
+                "assets/characters",
+                "data",
+            ):
+                self.assertTrue((project_root / relative).is_dir())
+            self.assertEqual(
+                json.loads((project_root / "data" / "project.json").read_text(encoding="utf-8")),
+                DEFAULT_PROJECT,
+            )
+            self.assertEqual(
+                json.loads((project_root / "data" / "style.json").read_text(encoding="utf-8")),
+                DEFAULT_STYLE,
+            )
+            self.assertEqual(
+                (project_root / "data" / "story.yaml").read_text(encoding="utf-8"),
+                VNEditorApp._starter_story(),
+            )
+
+    def test_project_scaffolding_preserves_existing_files(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            project_root = Path(temporary)
+            data_dir = project_root / "data"
+            data_dir.mkdir()
+            existing_project = '{"name": "Custom"}\n'
+            existing_story = "title: Existing\n"
+            existing_style = '{"theme": {}}\n'
+            (data_dir / "project.json").write_text(existing_project, encoding="utf-8")
+            (data_dir / "story.yaml").write_text(existing_story, encoding="utf-8")
+            (data_dir / "style.json").write_text(existing_style, encoding="utf-8")
+
+            _ensure_project_structure(project_root)
+
+            self.assertEqual(
+                (data_dir / "project.json").read_text(encoding="utf-8"),
+                existing_project,
+            )
+            self.assertEqual(
+                (data_dir / "story.yaml").read_text(encoding="utf-8"),
+                existing_story,
+            )
+            self.assertEqual(
+                (data_dir / "style.json").read_text(encoding="utf-8"),
+                existing_style,
+            )
+            self.assertTrue((project_root / "assets" / "characters").is_dir())
+
+    def test_loading_new_project_writes_the_scaffold_to_disk(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            project_root = Path(temporary)
+            app = SimpleNamespace(
+                _analysis_revisions={"story": 0, "project": 0},
+                _document_analysis_cache={"story": {}, "project": {}},
+                project_root=project_root,
+                project_label=SimpleNamespace(configure=lambda **_kwargs: None),
+                story_editor=MemoryEditor(),
+                project_editor=MemoryEditor(),
+                style_editor=MemoryEditor(),
+                _clear_included_story_tabs=lambda: None,
+                _sync_included_story_tabs=lambda: None,
+                _update_tab_labels=lambda: None,
+                _refresh_markdown_tabs=lambda: None,
+                refresh_asset_tree=lambda: None,
+                analyze_document=lambda _kind: None,
+                _refresh_search_highlights=lambda: None,
+                set_status=lambda _status: None,
+            )
+            app._story_path_from = lambda values: VNEditorApp._story_path_from(app, values)
+
+            with patch("editor._save_last_project"):
+                VNEditorApp.load_project(app, project_root)
+
+            for relative in (
+                "assets/fonts",
+                "assets/images",
+                "assets/sounds",
+                "assets/characters",
+                "data/project.json",
+                "data/style.json",
+                "data/story.yaml",
+            ):
+                self.assertTrue((project_root / relative).exists(), relative)
+            self.assertFalse(app.story_editor.dirty)
+            self.assertFalse(app.project_editor.dirty)
+            self.assertFalse(app.style_editor.dirty)
+
     def test_editor_setting_names_match_all_runtime_settings(self):
         expected = {
             "type_speed", "music_volume", "sfx_volume", "fullscreen", "ui_scale",
@@ -52,6 +153,8 @@ class EditorProjectLoadingTests(unittest.TestCase):
             (project_root / "data" / "project.json").write_text("{}", encoding="utf-8")
 
             app = SimpleNamespace(
+                _analysis_revisions={"story": 0, "project": 0},
+                _document_analysis_cache={"story": {}, "project": {}},
                 project_root=project_root,
                 project_file=project_root / "data" / "project.json",
                 project_editor=SimpleNamespace(
@@ -100,10 +203,13 @@ class EditorProjectLoadingTests(unittest.TestCase):
                 project_file.write_text(empty_contents, encoding="utf-8")
 
                 app = SimpleNamespace(
+                    _analysis_revisions={"story": 0, "project": 0},
+                    _document_analysis_cache={"story": {}, "project": {}},
                     project_root=project_root,
                     project_label=SimpleNamespace(configure=lambda **_kwargs: None),
                     story_editor=MemoryEditor(),
                     project_editor=MemoryEditor(),
+                    style_editor=MemoryEditor(),
                     _clear_included_story_tabs=lambda: None,
                     _story_path_from=lambda _values: story_file,
                     _sync_included_story_tabs=lambda: None,
@@ -138,10 +244,13 @@ class EditorProjectLoadingTests(unittest.TestCase):
             project_file.write_text(project_contents, encoding="utf-8")
 
             app = SimpleNamespace(
+                _analysis_revisions={"story": 0, "project": 0},
+                _document_analysis_cache={"story": {}, "project": {}},
                 project_root=project_root,
                 project_label=SimpleNamespace(configure=lambda **_kwargs: None),
                 story_editor=MemoryEditor(),
                 project_editor=MemoryEditor(),
+                style_editor=MemoryEditor(),
                 _clear_included_story_tabs=lambda: None,
                 _story_path_from=lambda _values: story_file,
                 _sync_included_story_tabs=lambda: None,

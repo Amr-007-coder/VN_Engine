@@ -12,6 +12,7 @@ from engine.embedded import PROJECT_BUNDLE_COMMENT, project_bundle_present
 from engine.assets import AssetManager
 from engine.loader import PATHS
 from engine.project import ProjectConfig
+from engine.style import clean_project_values
 from engine.validator import StoryValidator
 if os.name == "nt":
     from engine.windows_shortcut import create_shortcut
@@ -78,11 +79,12 @@ def _write_resource_bundle(bundle_path: Path, project: ProjectConfig) -> int:
     if errors:
         raise ValueError("Story validation failed:\n" + "\n".join(f"- {error}" for error in errors))
 
-    project_values = deepcopy(project.values)
+    project_values = clean_project_values(deepcopy(project.project_values))
     project_values["story"] = story_relative.as_posix()
     project_values["paths"]["data"] = "data"
     project_values["paths"]["assets"] = "assets"
     project_json = (json.dumps(project_values, ensure_ascii=True, indent=2) + "\n").encode("utf-8")
+    style_json = (json.dumps(project.style_values, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
 
     count = 0
     with ZipFile(bundle_path, "w", compression=ZIP_DEFLATED, compresslevel=9) as archive:
@@ -92,12 +94,13 @@ def _write_resource_bundle(bundle_path: Path, project: ProjectConfig) -> int:
                 if path.is_symlink() or not path.is_file() or "__pycache__" in path.parts:
                     continue
                 relative = path.relative_to(root)
-                if namespace == "data" and relative.as_posix().casefold() == "project.json":
+                if namespace == "data" and relative.as_posix().casefold() in {"project.json", "style.json"}:
                     continue
                 archive.write(path, (Path(namespace) / relative).as_posix())
                 count += 1
         archive.writestr("data/project.json", project_json)
-    return count + 1
+        archive.writestr("data/style.json", style_json)
+    return count + 2
 
 
 def build_game(output_dir: Path | None = None) -> Path:

@@ -15,6 +15,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from engine.project import DEFAULT_PROJECT
+from engine.style import split_style_from_project
 
 
 STARTER_PROJECT_NAME = "VN_Engine-Starter-Project.zip"
@@ -36,11 +37,16 @@ def _write_starter_project(root: Path) -> None:
         encoding="utf-8",
         newline="\n",
     )
-    project = deepcopy(DEFAULT_PROJECT)
+    project, style = split_style_from_project(deepcopy(DEFAULT_PROJECT))
     project["name"] = "My Visual Novel"
     project["menus"]["main"]["title"] = "My Visual Novel"
     (data / "project.json").write_text(
         json.dumps(project, ensure_ascii=True, indent=2) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    (data / "style.json").write_text(
+        json.dumps(style, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
         newline="\n",
     )

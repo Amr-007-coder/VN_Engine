@@ -1,14 +1,14 @@
-"""Standalone authoring editor for VN Engine projects.
+"""Standalone PySide6 authoring editor for VN Engine projects.
 
 Run ``python editor.py`` from a project folder, or pass ``--project-dir``.
 Without a project folder, the editor installs a starter project in Documents.
-The interface uses Tkinter; PyYAML enables YAML parsing and live diagnostics.
 """
 
 from __future__ import annotations
 
 import argparse
 import ast
+from copy import deepcopy
 from dataclasses import dataclass
 from difflib import get_close_matches
 import json
@@ -16,26 +16,28 @@ import math
 import os
 from pathlib import Path
 from pathlib import PurePosixPath
-import queue
 import re
-import shlex
 import shutil
 import stat
 import struct
 import subprocess
 import sys
 import tempfile
-import threading
-import tkinter as tk
-from tkinter import filedialog, messagebox, simpledialog, ttk
+import editor_qt as tk
+from editor_qt import filedialog, messagebox, simpledialog, ttk
 from typing import Any
 from zipfile import BadZipFile, ZipFile
 
-from export_pipeline import PLATFORMS, export_project, safe_project_name
+from engine.style import (
+    DEFAULT_STYLE as ENGINE_DEFAULT_STYLE,
+    clean_project_values,
+    merge_style,
+    resolve_style,
+    split_style_from_project,
+)
 from engine.mods import build_asset_package
 from engine.localization import catalog_report, load_catalog, translation_template, write_catalog
 from engine.ui_text import UI_LABEL_KEYS
-from template_repository import install_starter_project, list_template_release_tags
 
 try:
     import yaml
@@ -175,12 +177,12 @@ FALLBACK_DEFAULT_PROJECT = {
     "paths": {"data": "data", "assets": "assets", "user_data": "user_data"},
     "window": {"width": 1920, "height": 1200, "caption": "VN Engine"},
     "dialogue_buttons": {
-        "back": {"visible": True, "label": "Back"},
-        "history": {"visible": True, "label": "History"},
-        "quick_save": {"visible": True, "label": "Q. Save"},
-        "quick_load": {"visible": True, "label": "Q. Load"},
-        "auto": {"visible": True, "label": "Auto"},
-        "mute": {"visible": True, "label": "Mute"},
+        "back": {"visible": True, "label": "Back", "label_alignment": "center"},
+        "history": {"visible": True, "label": "History", "label_alignment": "center"},
+        "quick_save": {"visible": True, "label": "Q. Save", "label_alignment": "center"},
+        "quick_load": {"visible": True, "label": "Q. Load", "label_alignment": "center"},
+        "auto": {"visible": True, "label": "Auto", "label_alignment": "center"},
+        "mute": {"visible": True, "label": "Mute", "label_alignment": "center"},
     },
     "menus": {
         "main": {"title": "Visual Novel", "items": [
@@ -220,8 +222,8 @@ FALLBACK_DEFAULT_PROJECT = {
     "characters": {},
     "theme": {},
 }
-DEFAULT_PROJECT = _literal_from_engine("engine/project.py", "DEFAULT_PROJECT") or FALLBACK_DEFAULT_PROJECT
-DEFAULT_PROJECT.setdefault("android", dict(FALLBACK_DEFAULT_PROJECT["android"]))
+LEGACY_DEFAULT_PROJECT = _literal_from_engine("engine/project.py", "DEFAULT_PROJECT") or FALLBACK_DEFAULT_PROJECT
+LEGACY_DEFAULT_PROJECT.setdefault("android", dict(FALLBACK_DEFAULT_PROJECT["android"]))
 DEFAULT_THEME = _literal_from_engine("engine/theme.py", "DEFAULT_THEME") or {
     "colors": {"background": [30, 30, 45], "text": [230, 230, 230], "muted": [170, 170, 180],
                "normal": [18, 18, 29], "hover": [73, 50, 65],
@@ -239,6 +241,7 @@ DEFAULT_THEME = _literal_from_engine("engine/theme.py", "DEFAULT_THEME") or {
     },
     "menu": {
         "layout": "centered", "background": None, "width": 860,
+        "label_alignment": "left",
         "x": None, "row_height": 56, "row_gap": 9, "title_y": 112,
         "top": 190, "border_radius": 8,
         "screens": {
@@ -300,9 +303,65 @@ def merge_defaults(defaults: Any, overrides: Any):
     return overrides
 
 
-DEFAULT_PROJECT["theme"] = merge_defaults(
-    DEFAULT_THEME, DEFAULT_PROJECT.get("theme", {})
+DEFAULT_PROJECT = clean_project_values(LEGACY_DEFAULT_PROJECT)
+DEFAULT_RUNTIME_PROJECT = merge_defaults(DEFAULT_PROJECT, LEGACY_DEFAULT_PROJECT)
+DEFAULT_STYLE = merge_defaults(
+    ENGINE_DEFAULT_STYLE,
+    split_style_from_project(LEGACY_DEFAULT_PROJECT)[1],
 )
+
+
+def _starter_story_content() -> str:
+    return (
+        "title: My Visual Novel\n"
+        "start: opening\n\n"
+        "dialogues:\n"
+        "  opening:\n"
+        "    chapter: Chapter 1\n"
+        "    speaker: Narrator\n"
+        "    active_character: null\n"
+        "    text: Replace this line with your opening dialogue.\n"
+    )
+
+
+def _write_text_if_missing(path: Path, contents: str) -> None:
+    if path.exists():
+        if path.is_file():
+            return
+        raise IsADirectoryError(f"Expected a file, found a directory: {path}")
+    try:
+        with path.open("x", encoding="utf-8", newline="\n") as output:
+            output.write(contents)
+    except FileExistsError:
+        if path.is_file():
+            return
+        raise
+
+
+def _ensure_project_structure(project_root: Path) -> None:
+    project_root = Path(project_root)
+    for relative in (
+        "assets/fonts",
+        "assets/images",
+        "assets/sounds",
+        "assets/characters",
+        "data",
+    ):
+        (project_root / relative).mkdir(parents=True, exist_ok=True)
+
+    starter_files = (
+        (
+            project_root / "data" / "project.json",
+            json.dumps(DEFAULT_PROJECT, ensure_ascii=False, indent=2) + "\n",
+        ),
+        (
+            project_root / "data" / "style.json",
+            json.dumps(DEFAULT_STYLE, ensure_ascii=False, indent=2) + "\n",
+        ),
+        (project_root / "data" / "story.yaml", _starter_story_content()),
+    )
+    for path, contents in starter_files:
+        _write_text_if_missing(path, contents)
 
 
 def editor_index(start: str, offset: int) -> str:
@@ -447,8 +506,9 @@ class AssetCatalog:
         self.characters: dict[str, dict] = {}
         self.mod_assets = {"images": [], "sounds": [], "music": [], "fonts": [], "characters": []}
         self._suggestion_cache = {}
-        self._scan_mod_packages()
-        self._scan_characters()
+        self._filesystem_asset_index = {}
+        self._mod_packages_scanned = False
+        self._characters_scanned = False
 
     @staticmethod
     def _resolve_path(value, root: Path) -> Path:
@@ -537,10 +597,48 @@ class AssetCatalog:
         for category, names in self.mod_assets.items():
             self.mod_assets[category] = sorted(set(names), key=str.casefold)
 
+    def _ensure_mod_packages(self):
+        if self._mod_packages_scanned:
+            return
+        self._scan_mod_packages()
+        self._mod_packages_scanned = True
+
+    def _ensure_characters(self):
+        if self._characters_scanned:
+            return
+        self._ensure_mod_packages()
+        self._scan_characters()
+        self._characters_scanned = True
+
+    def _ensure_filesystem_asset_index(self, kind: str):
+        if kind in self._filesystem_asset_index:
+            return self._filesystem_asset_index[kind]
+        folder = ASSET_FOLDER[kind]
+        stems = set()
+        paths_without_suffix = set()
+        for root in self.roots:
+            category = root / folder
+            if not category.is_dir():
+                continue
+            try:
+                for path in category.rglob("*"):
+                    if not path.is_file():
+                        continue
+                    relative = path.relative_to(category)
+                    stems.add(path.stem.casefold())
+                    paths_without_suffix.add(relative.with_suffix("").as_posix().casefold())
+            except OSError:
+                continue
+        index = (stems, paths_without_suffix)
+        self._filesystem_asset_index[kind] = index
+        return index
+
     def character_names(self):
+        self._ensure_characters()
         return sorted((item["name"] for item in self.characters.values()), key=str.casefold)
 
     def find_character(self, name):
+        self._ensure_characters()
         if not isinstance(name, str):
             return None
         return self.characters.get(name.casefold())
@@ -574,6 +672,17 @@ class AssetCatalog:
             return candidate.is_file()
         normalized = name.replace("\\", "/")
         wanted = normalized.casefold()
+        for root in self.roots:
+            folder = ASSET_FOLDER[kind]
+            for base in (root, root / folder):
+                direct = base / Path(normalized)
+                if direct.is_file():
+                    return True
+        if not candidate.suffix:
+            stems, paths_without_suffix = self._ensure_filesystem_asset_index(kind)
+            if wanted in stems or wanted in paths_without_suffix:
+                return True
+        self._ensure_mod_packages()
         mod_names = self.mod_assets.get(ASSET_FOLDER.get(kind, ""), [])
         for item in mod_names:
             candidates = {item.casefold(), f"{ASSET_FOLDER[kind]}/{item}".casefold()}
@@ -586,23 +695,6 @@ class AssetCatalog:
                 matches = [value for value in mod_names if Path(value).stem.casefold() == wanted]
                 if len(matches) == 1:
                     return True
-        for root in self.roots:
-            folder = ASSET_FOLDER[kind]
-            for base in (root, root / folder):
-                direct = base / Path(normalized)
-                if direct.is_file():
-                    return True
-                if not candidate.suffix:
-                    category = root / folder
-                    if category.is_dir():
-                        try:
-                            for path in category.rglob("*"):
-                                if path.is_file():
-                                    rel = path.relative_to(category).as_posix()
-                                    if path.stem.casefold() == wanted or Path(rel).with_suffix("").as_posix().casefold() == wanted:
-                                        return True
-                        except OSError:
-                            pass
         builtins = BUILTIN_ASSETS[kind]
         category = ASSET_FOLDER[kind]
         builtin_names = {item.casefold() for item in builtins}
@@ -617,6 +709,7 @@ class AssetCatalog:
     def asset_suggestions(self, kind: str):
         if kind in self._suggestion_cache:
             return self._suggestion_cache[kind]
+        self._ensure_mod_packages()
         folder = ASSET_FOLDER[kind]
         result = set()
         for root in self.roots:
@@ -1249,10 +1342,28 @@ def analyze_project(source: str, catalog: AssetCatalog):
         return [Diagnostic("error", f"JSON syntax: {error.msg}", error.lineno)]
     if not isinstance(raw, dict):
         return [Diagnostic("error", "Project configuration root must be a JSON object.", 1)]
-    values = merge_defaults(DEFAULT_PROJECT, raw)
     diagnostics: list[Diagnostic] = []
-    _validate_project_object(values, raw, source, diagnostics)
-    _validate_project_assets(values, catalog, source, diagnostics)
+    project_raw = json.loads(json.dumps(raw))
+    for key in ("theme", "dialogue_buttons", "characters"):
+        if key in project_raw:
+            diagnostics.append(Diagnostic(
+                "warning",
+                f"'{key}' is a visual setting; move it to data/style.json.",
+                _line_of_key(source, key),
+            ))
+            project_raw.pop(key, None)
+    intro = project_raw.get("intro")
+    if isinstance(intro, dict):
+        for key in ("credit_image", "warning_image", "headphones_image"):
+            if key in intro:
+                diagnostics.append(Diagnostic(
+                    "warning",
+                    f"'intro.{key}' is a visual setting; move it to style.json under 'intro'.",
+                    _line_of_key(source, key, _line_of_key(source, "intro")),
+                ))
+                intro.pop(key, None)
+    values = merge_defaults(DEFAULT_RUNTIME_PROJECT, project_raw)
+    _validate_project_object(values, project_raw, source, diagnostics)
     story_name = values.get("story")
     if isinstance(story_name, str):
         story_path = Path(story_name)
@@ -1260,6 +1371,109 @@ def analyze_project(source: str, catalog: AssetCatalog):
             story_path = catalog.data_dir / story_path
         if not story_path.is_file():
             diagnostics.append(Diagnostic("error", f"Configured story file was not found: {story_path}.", _line_of_key(source, "story")))
+    return diagnostics
+
+
+def analyze_style(source: str, catalog: AssetCatalog, project_source: str = "{}"):
+    try:
+        raw = json.loads(source)
+    except json.JSONDecodeError as error:
+        return [Diagnostic("error", f"JSON syntax: {error.msg}", error.lineno)]
+    if not isinstance(raw, dict):
+        return [Diagnostic("error", "Style configuration root must be a JSON object.", 1)]
+
+    diagnostics: list[Diagnostic] = []
+
+    def check_unknown(override, schema, path, line):
+        if not isinstance(override, dict) or not isinstance(schema, dict):
+            return
+        if path == "style.json.characters":
+            return
+        if path == "style.json.variants":
+            for name, variant in override.items():
+                variant_line = _line_of_key(source, str(name), line)
+                if not isinstance(name, str) or not name.strip():
+                    diagnostics.append(Diagnostic("error", "Variant names must be non-empty strings.", variant_line))
+                    continue
+                if not isinstance(variant, dict):
+                    diagnostics.append(Diagnostic("error", f"variants.{name} must be an object.", variant_line))
+                    continue
+                variant_values = {key: value for key, value in variant.items() if key != "label"}
+                check_unknown(
+                    variant_values,
+                    {key: value for key, value in DEFAULT_STYLE.items() if key != "variants"},
+                    f"style.json.variants.{name}",
+                    variant_line,
+                )
+            return
+        if path == "style.json.skins":
+            for name, skin in override.items():
+                skin_line = _line_of_key(source, str(name), line)
+                if not isinstance(skin, dict):
+                    diagnostics.append(Diagnostic("error", f"skins.{name} must be an object.", skin_line))
+                    continue
+                check_unknown(skin, DEFAULT_STYLE["skins"]["button"], f"style.json.skins.{name}", skin_line)
+            return
+        diagnostics.extend(_mapping_key_diagnostics(override, set(schema), source, line, path))
+        for key, child in override.items():
+            if key in schema and isinstance(child, dict) and isinstance(schema[key], dict):
+                check_unknown(child, schema[key], path + "." + str(key), _line_of_key(source, key, line))
+
+    check_unknown(raw, DEFAULT_STYLE, "style.json", 1)
+    character_styles = raw.get("characters", {})
+    if not isinstance(character_styles, dict):
+        diagnostics.append(Diagnostic(
+            "error", "characters must be an object mapping character names to settings.",
+            _line_of_key(source, "characters"),
+        ))
+    else:
+        for name, settings in character_styles.items():
+            line = _line_of_key(source, str(name), _line_of_key(source, "characters"))
+            if not isinstance(name, str) or not name.strip():
+                diagnostics.append(Diagnostic("error", "characters keys must be non-empty character names.", line))
+                continue
+            if not isinstance(settings, dict):
+                diagnostics.append(Diagnostic("error", f"characters.{name} must be an object.", line))
+                continue
+            diagnostics.extend(_mapping_key_diagnostics(
+                settings, {"scale"}, source, line, f"characters.{name}"
+            ))
+            scale = settings.get("scale", 100)
+            try:
+                valid_scale = (
+                    isinstance(scale, (int, float))
+                    and not isinstance(scale, bool)
+                    and math.isfinite(scale)
+                    and scale > 0
+                )
+            except OverflowError:
+                valid_scale = False
+            if not valid_scale:
+                diagnostics.append(Diagnostic(
+                    "error", f"characters.{name}.scale must be a positive percentage.",
+                    _line_of_key(source, "scale", line),
+                ))
+    version = raw.get("schema_version", 1)
+    if not isinstance(version, int) or isinstance(version, bool) or version != 1:
+        diagnostics.append(Diagnostic(
+            "error", "schema_version must be 1 for this engine version.",
+            _line_of_key(source, "schema_version"),
+        ))
+
+    try:
+        project_values = json.loads(project_source)
+        if not isinstance(project_values, dict):
+            project_values = {}
+    except json.JSONDecodeError:
+        project_values = {}
+    try:
+        from engine.project import ProjectConfig
+
+        project = ProjectConfig(project_values, raw)
+    except (TypeError, ValueError) as error:
+        diagnostics.append(Diagnostic("error", str(error), 1))
+        return diagnostics
+    _validate_project_assets(project.values, catalog, source, diagnostics)
     return diagnostics
 
 
@@ -1276,7 +1490,7 @@ def _validate_project_object(values, raw, source, diagnostics):
     if "USER" in raw and not isinstance(raw["USER"], str):
         diagnostics.append(Diagnostic(
             "error",
-            "USER must be a string; use 'admin' for workspace-source Test Play or 'user' for templates.",
+            "USER must be a string; 'admin' requires workspace-source Test Play, while 'user' permits template fallback.",
             _line_of_key(source, "USER"),
         ))
     for key, child in raw.items():
@@ -1811,31 +2025,52 @@ def _validate_project_object(values, raw, source, diagnostics):
 
 
 def _validate_project_assets(values, catalog, source, diagnostics):
+    def check(name, kind, path):
+        if name and not catalog.asset_exists(kind, name):
+            diagnostics.append(Diagnostic(
+                "error", f"Missing style {kind} asset '{name}'.", _line_of_key(source, path.split(".")[-1]),
+            ))
+
     intro = values.get("intro", {})
     if isinstance(intro, dict):
         for key in ("credit_image", "warning_image", "headphones_image"):
-            value = intro.get(key)
-            if value and not catalog.asset_exists("image", value):
-                diagnostics.append(Diagnostic("error", f"Missing intro image asset '{value}'.", _line_of_key(source, key, _line_of_key(source, "intro"))))
+            check(intro.get(key), "image", f"intro.{key}")
 
     theme = values.get("theme", {})
     if not isinstance(theme, dict):
         return
-    for group, keys, kind in (
-        ("fonts", ("menu", "title"), "font"),
-        ("game_fonts", ("text", "name", "button", "intro"), "font"),
-        ("menu", ("background",), "image"),
-        ("slot", ("normal", "hovered"), "image"),
-        ("textbox", ("background",), "image"),
-        ("sounds", ("hover", "click", "cancel", "load"), "sound"),
-    ):
+    for group, keys in (("fonts", ("menu", "title")), ("game_fonts", ("text", "name", "button", "intro"))):
         values_group = theme.get(group, {})
-        if not isinstance(values_group, dict):
-            continue
-        for key in keys:
-            name = values_group.get(key)
-            if name and not catalog.asset_exists(kind, name):
-                diagnostics.append(Diagnostic("error", f"Missing theme {kind} asset '{name}'.", _line_of_key(source, key, _line_of_key(source, group, _line_of_key(source, "theme")))))
+        if isinstance(values_group, dict):
+            for key in keys:
+                check(values_group.get(key), "font", f"theme.{group}.{key}")
+    menu = theme.get("menu", {})
+    if isinstance(menu, dict):
+        check(menu.get("background"), "image", "theme.menu.background")
+        screens = menu.get("screens", {})
+        if isinstance(screens, dict):
+            for screen_name, screen in screens.items():
+                if not isinstance(screen, dict):
+                    continue
+                check(screen.get("background"), "image", f"theme.menu.screens.{screen_name}.background")
+                buttons = screen.get("buttons", {})
+                if isinstance(buttons, dict):
+                    for state, name in buttons.items():
+                        check(name, "image", f"theme.menu.screens.{screen_name}.buttons.{state}")
+    textbox = theme.get("textbox", {})
+    if isinstance(textbox, dict):
+        check(textbox.get("background"), "image", "theme.textbox.background")
+    choice_buttons = theme.get("choice_buttons", {})
+    if isinstance(choice_buttons, dict):
+        for state in ("normal", "hovered"):
+            check(choice_buttons.get(state), "image", f"theme.choice_buttons.{state}")
+    pause_button = theme.get("pause_button", {})
+    if isinstance(pause_button, dict):
+        check(pause_button.get("image"), "image", "theme.pause_button.image")
+    sounds = theme.get("sounds", {})
+    if isinstance(sounds, dict):
+        for key in ("hover", "click", "cancel", "load"):
+            check(sounds.get(key), "sound", f"theme.sounds.{key}")
 
 
 class CodeEditor(ttk.Frame):
@@ -1851,9 +2086,14 @@ class CodeEditor(ttk.Frame):
         self._completion_list = None
         self._completion_range = None
         self._completion_items = []
+        self._syntax_installed = False
+        self._highlight_complete = False
+        self._highlight_block = None
 
         self.gutter = tk.Canvas(self, width=48, highlightthickness=0, background="#20242d")
-        self.gutter.pack(side="left", fill="y")
+        self.gutter.setAlignment(
+            tk.QtCore.Qt.AlignmentFlag.AlignLeft | tk.QtCore.Qt.AlignmentFlag.AlignTop
+        )
         self.text = tk.Text(
             self,
             wrap="none",
@@ -1874,9 +2114,15 @@ class CodeEditor(ttk.Frame):
         self.vscroll = ttk.Scrollbar(self, orient="vertical", command=self.text.yview)
         self.hscroll = ttk.Scrollbar(self, orient="horizontal", command=self.text.xview)
         self.text.configure(yscrollcommand=self._on_yview, xscrollcommand=self.hscroll.set)
-        self.text.pack(side="top", fill="both", expand=True)
-        self.vscroll.pack(side="right", fill="y")
-        self.hscroll.pack(side="bottom", fill="x")
+        text_layout = tk.QtWidgets.QGridLayout(self)
+        text_layout.setContentsMargins(0, 0, 0, 0)
+        text_layout.setSpacing(0)
+        text_layout.addWidget(self.gutter, 0, 0)
+        text_layout.addWidget(self.text, 0, 1)
+        text_layout.addWidget(self.vscroll, 0, 2)
+        text_layout.addWidget(self.hscroll, 1, 1)
+        text_layout.setColumnStretch(1, 1)
+        text_layout.setRowStretch(0, 1)
 
         self.text.tag_configure("yaml_key", foreground="#8be9fd")
         self.text.tag_configure("json_key", foreground="#8be9fd")
@@ -1896,8 +2142,6 @@ class CodeEditor(ttk.Frame):
         self.text.bind("<ButtonRelease-1>", self._on_button_release)
         self.text.bind("<Configure>", lambda _event: self.redraw_gutter())
         self.text.bind("<Control-space>", self.show_completion)
-        self.text.bind("<Control-z>", lambda _event: self._edit_history("undo"))
-        self.text.bind("<Control-y>", lambda _event: self._edit_history("redo"))
         self.text.bind("<Tab>", self._tab_key)
         self.text.bind("<Return>", self._return_key)
         self.text.bind("<Escape>", self._escape_key)
@@ -1907,7 +2151,7 @@ class CodeEditor(ttk.Frame):
         self.text.edit_modified(False)
 
     def get_text(self):
-        return self.text.get("1.0", "end-1c")
+        return self.text.get_all_text()
 
     def _edit_history(self, operation):
         try:
@@ -1920,12 +2164,12 @@ class CodeEditor(ttk.Frame):
         return "break"
 
     def set_text(self, content: str):
-        self.text.delete("1.0", "end")
-        if content:
-            self.text.insert("1.0", content)
-        self.text.edit_modified(False)
+        self.text.set_text_silently(content)
         self.dirty = False
-        self.highlight()
+        self._syntax_installed = False
+        self._highlight_complete = False
+        self._highlight_block = self.text.document().begin()
+        self.schedule_highlight()
         self.redraw_gutter()
 
     def _on_modified(self, _event=None):
@@ -1963,6 +2207,9 @@ class CodeEditor(ttk.Frame):
         if not self.winfo_exists():
             return
         self.gutter.delete("all")
+        self.gutter.setSceneRect(
+            0, 0, self.gutter.viewport().width(), self.gutter.viewport().height()
+        )
         try:
             first = int(self.text.index("@0,0").split(".")[0])
             last = int(self.text.index(f"@0,{self.text.winfo_height()}").split(".")[0]) + 1
@@ -1983,18 +2230,43 @@ class CodeEditor(ttk.Frame):
         self._highlight_job = self.after(90, self.highlight)
 
     def highlight(self):
+        if self._highlight_job is not None:
+            self.after_cancel(self._highlight_job)
         self._highlight_job = None
-        for tag in ("yaml_key", "json_key", "string", "number", "keyword", "punctuation", "comment"):
-            self.text.tag_remove(tag, "1.0", "end")
-        for line_no, line in enumerate(self.get_text().splitlines(), 1):
-            base = f"{line_no}.0"
-            if self.document_kind == "story":
-                self._highlight_yaml_line(line_no, line, base)
-            else:
-                self._highlight_json_line(line_no, line, base)
+        if not self._syntax_installed:
+            self.text.set_syntax_callback(self._line_syntax_spans)
+            self._syntax_installed = True
+            self._highlight_block = self.text.document().begin()
         self.app.apply_diagnostic_marks(self)
+        if not self._highlight_complete and (self._highlight_block is None or not self._highlight_block.isValid()):
+            self._highlight_block = self.text.document().begin()
+        self._continue_highlighting()
 
-    def _highlight_yaml_line(self, line_no, line, base):
+    def _continue_highlighting(self):
+        self._highlight_job = None
+        block = self._highlight_block
+        if self._highlight_complete:
+            return
+        if block is None or not block.isValid():
+            block = self.text.document().begin()
+        for _ in range(160):
+            if not block.isValid():
+                break
+            self.text.rehighlight_block(block)
+            block = block.next()
+        self._highlight_block = block
+        if block.isValid():
+            self._highlight_job = self.after(5, self._continue_highlighting)
+        else:
+            self._highlight_complete = True
+
+    def _line_syntax_spans(self, line):
+        if self.document_kind == "story":
+            return self._yaml_syntax_spans(line)
+        return self._json_syntax_spans(line)
+
+    def _yaml_syntax_spans(self, line):
+        spans = []
         quote = None
         escaped = False
         comment_start = None
@@ -2014,31 +2286,34 @@ class CodeEditor(ttk.Frame):
         content_end = comment_start if comment_start is not None else len(line)
         key = re.match(r"^\s*(?:-\s*)?([A-Za-z_][\w-]*)(?=\s*:)", line[:content_end])
         if key:
-            start = key.start(1)
-            end = key.end(1)
-            self.text.tag_add("yaml_key", f"{line_no}.{start}", f"{line_no}.{end}")
-        self._highlight_quoted(line_no, line, content_end)
+            spans.append((key.start(1), key.end(1) - key.start(1), "yaml_key"))
+        spans.extend(self._quoted_syntax_spans(line, content_end))
         for match in re.finditer(r"(?<![\w./-])(?:true|false|null|yes|no|on|off)(?![\w./-])", line[:content_end], re.I):
-            self.text.tag_add("keyword", f"{line_no}.{match.start()}", f"{line_no}.{match.end()}")
+            spans.append((match.start(), match.end() - match.start(), "keyword"))
         for match in re.finditer(r"(?<![\w])[-+]?\d+(?:\.\d+)?(?![\w])", line[:content_end]):
-            self.text.tag_add("number", f"{line_no}.{match.start()}", f"{line_no}.{match.end()}")
+            spans.append((match.start(), match.end() - match.start(), "number"))
         for match in re.finditer(r"[\[\]{},:]", line[:content_end]):
-            self.text.tag_add("punctuation", f"{line_no}.{match.start()}", f"{line_no}.{match.end()}")
+            spans.append((match.start(), match.end() - match.start(), "punctuation"))
         if comment_start is not None:
-            self.text.tag_add("comment", f"{line_no}.{comment_start}", f"{line_no}.end")
+            spans.append((comment_start, len(line) - comment_start, "comment"))
+        return spans
 
-    def _highlight_json_line(self, line_no, line, base):
+    def _json_syntax_spans(self, line):
+        spans = []
         for match in re.finditer(r'"(?:\\.|[^"\\])*"(?=\s*:)', line):
-            self.text.tag_add("json_key", f"{line_no}.{match.start()}", f"{line_no}.{match.end()}")
-        self._highlight_quoted(line_no, line, len(line))
+            spans.append((match.start(), match.end() - match.start(), "json_key"))
+        spans.extend(self._quoted_syntax_spans(line, len(line)))
         for match in re.finditer(r'\b(?:true|false|null)\b', line):
-            self.text.tag_add("keyword", f"{line_no}.{match.start()}", f"{line_no}.{match.end()}")
+            spans.append((match.start(), match.end() - match.start(), "keyword"))
         for match in re.finditer(r"-?\b\d+(?:\.\d+)?\b", line):
-            self.text.tag_add("number", f"{line_no}.{match.start()}", f"{line_no}.{match.end()}")
+            spans.append((match.start(), match.end() - match.start(), "number"))
         for match in re.finditer(r"[\[\]{},:]", line):
-            self.text.tag_add("punctuation", f"{line_no}.{match.start()}", f"{line_no}.{match.end()}")
+            spans.append((match.start(), match.end() - match.start(), "punctuation"))
+        return spans
 
-    def _highlight_quoted(self, line_no, line, end):
+    @staticmethod
+    def _quoted_syntax_spans(line, end):
+        spans = []
         quote = None
         start = 0
         escaped = False
@@ -2053,8 +2328,9 @@ class CodeEditor(ttk.Frame):
                 elif char == "\\" and quote == '"':
                     escaped = True
                 elif char == quote:
-                    self.text.tag_add("string", f"{line_no}.{start}", f"{line_no}.{index + 1}")
+                    spans.append((start, index + 1 - start, "string"))
                     quote = None
+        return spans
 
     def show_completion(self, _event=None, automatic=False):
         candidates, replace_start, prefix = self.app.completions_for(self)
@@ -2161,10 +2437,10 @@ class CodeEditor(ttk.Frame):
         line = self.text.get("insert linestart", "insert lineend")
         indent = re.match(r"\s*", line).group(0)
         stripped = line.strip()
-        if self.document_kind == "project" and stripped.startswith(("}", "]")):
+        if self.document_kind in {"project", "style"} and stripped.startswith(("}", "]")):
             indent = indent[:-2] if len(indent) >= 2 else ""
         elif line.rstrip().endswith(":") or line.rstrip().endswith("-") or (
-            self.document_kind == "project" and line.rstrip().endswith(("{", "["))
+            self.document_kind in {"project", "style"} and line.rstrip().endswith(("{", "["))
         ):
             indent += "  "
         self.text.insert("insert", "\n" + indent)
@@ -2177,7 +2453,7 @@ class CodeEditor(ttk.Frame):
             return "break"
 
     def _comment_key(self, _event):
-        if self.document_kind == "project":
+        if self.document_kind in {"project", "style"}:
             self.app.set_status("JSON does not allow comments.")
             return "break"
         start = self.text.index("insert linestart")
@@ -2197,47 +2473,55 @@ class VNEditorApp:
         self.project_root = project_root.resolve()
         self.editor_home = editor_package_root(Path(sys.argv[0]))
         self.project_file = self.project_root / "data" / "project.json"
+        self.style_file = self.project_root / "data" / "style.json"
         self.story_file = self.project_root / "data" / "story.yaml"
         self.project_buffer = ""
+        self.style_buffer = ""
         self.story_buffer = ""
-        self.live_diagnostics: dict[str, list[Diagnostic]] = {"story": [], "project": []}
+        self.live_diagnostics: dict[str, list[Diagnostic]] = {"story": [], "project": [], "style": []}
         self.engine_diagnostics: list[Diagnostic] = []
         self._analysis_jobs = {}
+        self._tab_change_analysis_job = None
+        self._analysis_revisions = {"story": 0, "project": 0, "style": 0}
+        self._document_analysis_cache = {"story": {}, "project": {}, "style": {}}
         self._completion_jobs = {}
         self._asset_catalog = None
         self._asset_catalog_key = None
         self._asset_refresh_job = None
         self._loading = False
         self.story_editors: dict[Path, CodeEditor] = {}
+        self.open_text_editors: dict[Path, CodeEditor] = {}
         self.markdown_texts = {}
         self.markdown_paths = {}
         self.find_window = None
         self.find_entry = None
         self.find_case_sensitive = None
-        self.terminal_process = None
-        self.terminal_entry = None
-        self.terminal_location = str(self.project_root)
-        self.terminal_name = self._available_terminal_name()
-        self.terminal_queue = queue.Queue()
-        self.terminal_generation = 0
-        self.terminal_poll_job = None
-        self.terminal_prompt = f"{self.terminal_name} {self.project_root}> "
         self.test_play_process = None
         self.test_play_tempdir = None
         self.test_play_poll_job = None
         self.test_play_coverage_path = None
+        self.test_play_log_path = None
+        self._project_load_generation = 0
+        self._project_load_pending = True
+        self._initial_project_load_job = None
+        self._included_story_load_job = None
+        self._included_story_load_queue = []
 
         self.root.title(f"{APP_TITLE} — {self.project_root.name}")
         self.root.geometry("1320x880")
         self.root.minsize(940, 620)
         self._build_ui()
-        self.load_project(self.project_root)
-        self.root.bind("<Control-s>", lambda _event: self.save_active())
-        self.root.bind("<Control-Shift-S>", lambda _event: self.save_all())
+        self.set_status("Opening project…")
+        self._initial_project_load_job = self.root.after(40, self._start_initial_project_load)
         self.root.bind("<Control-f>", lambda _event: self.show_find())
         self.root.bind("<Control-g>", lambda _event: self.open_story_graph())
         self.root.bind("<F5>", lambda _event: self.validate_with_engine())
         self.root.protocol("WM_DELETE_WINDOW", self.close)
+
+    def _start_initial_project_load(self):
+        self._initial_project_load_job = None
+        if self._project_load_generation == 0 and self._project_load_pending:
+            self.load_project(self.project_root)
 
     def _build_ui(self):
         style = ttk.Style(self.root)
@@ -2250,13 +2534,34 @@ class VNEditorApp:
         style.configure("Treeview.Heading", font=("Segoe UI", 9, "bold"))
 
         menu_bar = tk.Menu(self.root)
+        file_menu = tk.Menu(menu_bar, tearoff=False)
+        file_menu.add_command(label="Open Project...", command=self.choose_project)
+        file_menu.add_command(label="Open Story File...", command=self.open_file)
+        file_menu.add_command(label="Close Tab", command=self.close_active_tab)
+        file_menu.add_separator()
+        file_menu.add_command(label="Save", accelerator="Ctrl+S", command=self.save_active)
+        file_menu.add_command(label="Save All", accelerator="Ctrl+Shift+S", command=self.save_all)
+        menu_bar.add_cascade(label="File", menu=file_menu)
+
         edit_menu = tk.Menu(menu_bar, tearoff=False)
         edit_menu.add_command(label="Undo", accelerator="Ctrl+Z", command=lambda: self._edit_active("undo"))
         edit_menu.add_command(label="Redo", accelerator="Ctrl+Y", command=lambda: self._edit_active("redo"))
+        edit_menu.add_separator()
+        edit_menu.add_command(label="Find...", accelerator="Ctrl+F", command=self.show_find)
         menu_bar.add_cascade(label="Edit", menu=edit_menu)
+
         project_menu = tk.Menu(menu_bar, tearoff=False)
+        project_menu.add_command(label="Export Game...", command=self.export_game)
+        project_menu.add_command(label="Refresh Assets", command=self.refresh_asset_tree)
+        project_menu.add_separator()
+        project_menu.add_command(label="Story Graph", command=self.open_story_graph)
+        project_menu.add_separator()
         project_menu.add_command(label="Package Asset Add-on...", command=self.package_asset_addon)
         project_menu.add_command(label="Asset Diagnostics...", command=self.show_asset_diagnostics)
+        project_menu.add_separator()
+        project_menu.add_command(label="Visual Theme Editor...", command=self.open_visual_theme_editor)
+        project_menu.add_command(label="Import Theme Preset...", command=self.import_theme_preset)
+        project_menu.add_command(label="Export Theme Preset...", command=self.export_theme_preset)
         project_menu.add_separator()
         project_menu.add_command(label="Export Translation Template...", command=self.export_translation_template)
         project_menu.add_command(label="Import Translation Catalog...", command=self.import_translation_catalog)
@@ -2264,22 +2569,18 @@ class VNEditorApp:
         project_menu.add_separator()
         project_menu.add_command(label="Run Playthrough Suite...", command=self.run_playthrough_suite)
         menu_bar.add_cascade(label="Project", menu=project_menu)
-        self.root.configure(menu=menu_bar)
 
-        toolbar = ttk.Frame(self.root, padding=(8, 8, 8, 4))
-        toolbar.pack(side="top", fill="x")
-        ttk.Button(toolbar, text="Open Project…", command=self.choose_project).pack(side="left")
-        ttk.Button(toolbar, text="Save", command=self.save_active).pack(side="left", padx=(8, 0))
-        ttk.Button(toolbar, text="Save All", command=self.save_all).pack(side="left", padx=(5, 0))
-        ttk.Button(toolbar, text="Validate Story (F5)", command=self.validate_with_engine).pack(side="left", padx=(18, 0))
-        ttk.Button(toolbar, text="Test Play", command=self.test_play).pack(side="left", padx=(5, 0))
-        ttk.Button(toolbar, text="Test from Dialogue...", command=self.test_from_dialogue).pack(side="left", padx=(5, 0))
-        ttk.Button(toolbar, text="Story Graph", command=self.open_story_graph).pack(side="left", padx=(5, 0))
-        ttk.Button(toolbar, text="Export Game…", command=self.export_game).pack(side="left", padx=(5, 0))
-        ttk.Button(toolbar, text="Refresh Assets", command=self.refresh_asset_tree).pack(side="left", padx=(5, 0))
-        ttk.Button(toolbar, text="Find (Ctrl+F)", command=self.show_find).pack(side="left", padx=(5, 0))
-        self.project_label = ttk.Label(toolbar, text="", anchor="e")
-        self.project_label.pack(side="right", fill="x", expand=True, padx=(12, 4))
+        run_menu = tk.Menu(menu_bar, tearoff=False)
+        run_menu.add_command(label="Validate Story", accelerator="F5", command=self.validate_with_engine)
+        run_menu.add_separator()
+        run_menu.add_command(label="Test Play", command=self.test_play)
+        run_menu.add_command(label="Test from Dialogue...", command=self.test_from_dialogue)
+        menu_bar.add_cascade(label="Run", menu=run_menu)
+
+        help_menu = tk.Menu(menu_bar, tearoff=False)
+        self.help_menu = help_menu
+        menu_bar.add_cascade(label="Help", menu=help_menu)
+        self.root.configure(menu=menu_bar)
 
         main = ttk.Panedwindow(self.root, orient="horizontal")
         main.pack(side="top", fill="both", expand=True, padx=8, pady=(3, 4))
@@ -2288,14 +2589,8 @@ class VNEditorApp:
         main.add(left, weight=0)
         main.add(right, weight=1)
 
-        right_split = ttk.Panedwindow(right, orient="vertical")
-        right_split.pack(fill="both", expand=True)
-        document_area = ttk.Frame(right_split)
-        terminal_frame = ttk.LabelFrame(
-            right_split, text=f"{self.terminal_name} — project folder", padding=5, height=190
-        )
-        right_split.add(document_area, weight=5)
-        right_split.add(terminal_frame, weight=1)
+        document_area = ttk.Frame(right)
+        document_area.pack(fill="both", expand=True)
 
         asset_header = ttk.Frame(left)
         asset_header.pack(fill="x", pady=(0, 4))
@@ -2303,26 +2598,33 @@ class VNEditorApp:
         self.add_button = ttk.Button(asset_header, text="Add", width=6, command=self.show_add_menu)
         self.add_button.pack(side="right", padx=(5, 0))
         ttk.Button(asset_header, text="Insert", width=7, command=self.insert_selected_asset).pack(side="right")
-        ttk.Label(left, text="Double-click a file to insert its reference.", foreground="#707987").pack(anchor="w", pady=(0, 5))
+        ttk.Label(left, text="Select a file, then click Insert to add its reference.", foreground="#707987").pack(anchor="w", pady=(0, 5))
         tree_frame = ttk.Frame(left)
         tree_frame.pack(fill="both", expand=True)
-        self.asset_tree = ttk.Treeview(tree_frame, show="tree", selectmode="browse")
+        self.asset_tree = ttk.Treeview(
+            tree_frame, show="tree", selectmode="browse", compact_files=True
+        )
         tree_scroll = ttk.Scrollbar(tree_frame, orient="vertical", command=self.asset_tree.yview)
         self.asset_tree.configure(yscrollcommand=tree_scroll.set)
         self.asset_tree.pack(side="left", fill="both", expand=True)
         tree_scroll.pack(side="right", fill="y")
         self.asset_tree.bind("<<TreeviewOpen>>", self._on_tree_open)
-        self.asset_tree.bind("<Double-1>", lambda _event: self.insert_selected_asset())
         self.asset_tree.bind("<Return>", lambda _event: self.insert_selected_asset())
 
         self.notebook = ttk.Notebook(document_area)
         self.notebook.pack(fill="both", expand=True)
         self.story_editor = CodeEditor(self.notebook, self, "story")
         self.project_editor = CodeEditor(self.notebook, self, "project")
+        self.style_editor = CodeEditor(self.notebook, self, "style")
+        self.story_editor._tab_closable = False
+        self.project_editor._tab_closable = False
+        self.style_editor._tab_closable = False
         self.story_editor.story_path = self.story_file
         self.story_editors = {self.story_file: self.story_editor}
         self.notebook.add(self.story_editor, text="story.yaml")
         self.notebook.add(self.project_editor, text="project.json")
+        self.notebook.add(self.style_editor, text="style.json")
+        self.notebook.close_callback = self.close_tab
         self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
         diagnostics_frame = ttk.Frame(document_area)
@@ -2347,345 +2649,110 @@ class VNEditorApp:
         diag_scroll.pack(side="right", fill="y")
         self.diagnostics_tree.bind("<Double-1>", self._jump_to_diagnostic)
 
-        terminal_toolbar = ttk.Frame(terminal_frame)
-        terminal_toolbar.pack(side="top", fill="x", pady=(0, 4))
-        ttk.Button(terminal_toolbar, text="Clear", command=self.clear_terminal).pack(side="right")
-        ttk.Button(terminal_toolbar, text="Restart", command=self.restart_terminal).pack(side="right", padx=(0, 5))
-        terminal_body = ttk.Frame(terminal_frame)
-        terminal_body.pack(fill="both", expand=True)
-        self.terminal_output = tk.Text(
-            terminal_body,
-            height=7,
-            wrap="word",
-            font=("Consolas", 10),
-            background="#11151c",
-            foreground="#d8dee9",
-            insertbackground="#ffffff",
-            relief="flat",
-            padx=7,
-            pady=5,
-            state="disabled",
-        )
-        terminal_scroll = ttk.Scrollbar(terminal_body, orient="vertical", command=self.terminal_output.yview)
-        self.terminal_output.configure(yscrollcommand=terminal_scroll.set)
-        self.terminal_output.pack(side="left", fill="both", expand=True)
-        terminal_scroll.pack(side="right", fill="y")
-        self.terminal_output.bind("<Button-1>", self._focus_terminal_input)
-        self.terminal_history = []
-        self.terminal_history_index = 0
-
         self.status = ttk.Label(self.root, text="", anchor="w", relief="sunken", padding=(7, 4))
         self.status.pack(side="bottom", fill="x")
 
     def _refresh_markdown_tabs(self):
-        for frame in list(self.markdown_texts):
-            try:
-                self.notebook.forget(frame)
-                frame.destroy()
-            except tk.TclError:
-                pass
         self.markdown_texts.clear()
         self.markdown_paths.clear()
-
+        self.help_menu.clear()
         paths = _editor_markdown_paths(self.editor_home)
-        labels = [path.name for path in paths]
-
-        for path, label in zip(paths, labels):
-            try:
-                content = path.read_text(encoding="utf-8")
-            except (OSError, UnicodeError):
+        for path in paths:
+            label = path.stem.replace("-", " ").replace("_", " ").title()
+            if path.name.casefold() == "readme.md":
+                label = "Editor Overview"
+            if not path.is_file():
                 continue
-            frame = ttk.Frame(self.notebook)
-            body = ttk.Frame(frame)
-            body.pack(fill="both", expand=True)
-            text = tk.Text(
-                body,
-                wrap="word",
-                font=("Consolas", 10),
-                background="#171a21",
-                foreground="#d8dee9",
-                insertbackground="#f8f8f2",
-                selectbackground="#3b4d65",
-                relief="flat",
-                padx=12,
-                pady=10,
-                state="normal",
-            )
-            scroll = ttk.Scrollbar(body, orient="vertical", command=text.yview)
-            text.configure(yscrollcommand=scroll.set)
-            text.insert("1.0", content)
-            text.tag_configure("search_match", background="#5a4b22", foreground="#fff2b0")
-            text.tag_configure("search_current", background="#b06d19", foreground="#ffffff")
-            text.configure(state="disabled")
-            text.pack(side="left", fill="both", expand=True)
-            scroll.pack(side="right", fill="y")
-            self.notebook.add(frame, text=label)
-            self.markdown_texts[frame] = text
-            self.markdown_paths[frame] = path
+            self.help_menu.add_command(label=label, command=lambda selected=path: self.open_help_document(selected))
 
-    @staticmethod
-    def _available_terminal_name():
-        if os.name == "nt":
-            return "PowerShell"
-        configured = os.environ.get("SHELL", "")
-        if Path(configured).name in {"bash", "zsh", "sh", "dash"} and Path(configured).is_file():
-            return Path(configured).name
-        for candidate in ("bash", "zsh", "sh"):
-            if shutil.which(candidate):
-                return candidate
-        return "Shell"
-
-    def _start_terminal(self):
-        self._stop_terminal()
-        self.terminal_generation += 1
-        generation = self.terminal_generation
-
-        if os.name == "nt":
-            terminal = shutil.which("powershell.exe") or shutil.which("pwsh.exe")
-            if not terminal:
-                windows_root = Path(os.environ.get("SystemRoot", "C:/Windows"))
-                candidate = windows_root / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
-                if candidate.is_file():
-                    terminal = str(candidate)
-            if not terminal:
-                self._append_terminal("PowerShell was not found. The terminal requires Windows PowerShell or pwsh.\n")
-                return
-            self.terminal_name = "PowerShell"
-            location = str(self.project_root).replace("'", "''")
-            script = f"""
-$utf8 = New-Object -TypeName System.Text.UTF8Encoding -ArgumentList $false
-[Console]::InputEncoding = $utf8
-[Console]::OutputEncoding = $utf8
-$OutputEncoding = $utf8
-$ErrorActionPreference = 'Continue'
-Set-Location -LiteralPath '{location}'
-[Console]::Out.WriteLine('__VN_EDITOR_PROMPT__' + (Get-Location).Path)
-while ($true) {{
-    $commandLine = [Console]::In.ReadLine()
-    if ($null -eq $commandLine -or $commandLine -eq '__VN_EDITOR_EXIT__') {{ break }}
-    try {{
-        $result = Invoke-Expression $commandLine 2>&1
-        if ($null -ne $result) {{ [Console]::Out.Write(($result | Out-String -Width 200)) }}
-    }} catch {{
-        $errorText = $_ | Out-String -Width 200
-        [Console]::Out.WriteLine($errorText)
-    }}
-    [Console]::Out.WriteLine('__VN_EDITOR_PROMPT__' + (Get-Location).Path)
-}}
-"""
-            command = [terminal, "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script]
-        else:
-            configured = os.environ.get("SHELL", "")
-            if Path(configured).name in {"bash", "zsh", "sh", "dash"} and Path(configured).is_file():
-                terminal = configured
-            else:
-                terminal = next((shutil.which(name) for name in ("bash", "zsh", "sh") if shutil.which(name)), None)
-            if not terminal:
-                self._append_terminal("No bash, zsh, or sh shell was found for the command pane.\n")
-                return
-            self.terminal_name = Path(terminal).name
-            script = (
-                f"cd -- {shlex.quote(str(self.project_root))}\n"
-                "printf '__VN_EDITOR_PROMPT__%s\\n' \"$PWD\"\n"
-                "while IFS= read -r commandLine; do\n"
-                "    [ \"$commandLine\" = '__VN_EDITOR_EXIT__' ] && break\n"
-                "    eval \"$commandLine\" 2>&1\n"
-                "    printf '__VN_EDITOR_PROMPT__%s\\n' \"$PWD\"\n"
-                "done\n"
-            )
-            if self.terminal_name == "bash":
-                command = [terminal, "--noprofile", "--norc", "-c", script]
-            elif self.terminal_name == "zsh":
-                command = [terminal, "-f", "-c", script]
-            else:
-                command = [terminal, "-c", script]
-
+    def open_help_document(self, path):
+        path = Path(path)
         try:
-            self.terminal_process = subprocess.Popen(
-                command,
-                cwd=self.project_root,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
+            content = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as error:
+            messagebox.showerror("Help", f"Could not open {path.name}: {error}", parent=self.root)
+            return
+        tk.show_markdown(self.root, path.stem.replace("-", " ").title(), content)
+
+    def _style_object_for_visual_editor(self):
+        try:
+            raw = json.loads(self.style_editor.get_text())
+            return resolve_style(raw)
+        except (json.JSONDecodeError, TypeError, ValueError) as error:
+            messagebox.showerror(
+                "Visual Theme Editor",
+                f"Fix the style configuration before opening the visual editor:\n{error}",
+                parent=self.root,
+            )
+            return None
+
+    def _apply_visual_style(self, style_values):
+        content = json.dumps(style_values, ensure_ascii=False, indent=2) + "\n"
+        self.style_editor.set_text(content)
+        self.style_editor.dirty = True
+        self.style_buffer = content
+        self._update_tab_labels()
+        self.analyze_document("style")
+        self.notebook.select(self.style_editor)
+        self.set_status("Visual theme changes are ready in style.json. Save the tab or use Save All to keep them.")
+
+    def open_visual_theme_editor(self):
+        from editor_theme import VisualThemeEditor
+
+        style_values = self._style_object_for_visual_editor()
+        if style_values is None:
+            return
+        dialog = VisualThemeEditor(self.root, style_values, self.project_root)
+        if dialog.exec() == tk.QtWidgets.QDialog.DialogCode.Accepted:
+            self._apply_visual_style(dialog.style_values)
+
+    def import_theme_preset(self):
+        selected = filedialog.askopenfilename(
+            title="Import theme preset",
+            initialdir=self.project_root,
+            filetypes=(("VN style presets", "*.vnstyle *.json"), ("All files", "*")),
+            parent=self.root,
+        )
+        if not selected:
+            return
+        try:
+            raw = json.loads(Path(selected).read_text(encoding="utf-8"))
+            if isinstance(raw, dict) and isinstance(raw.get("style"), dict):
+                raw = raw["style"]
+            resolve_style(raw)
+            current_style = self._style_object_for_visual_editor()
+            if current_style is None:
+                return
+            style_values = resolve_style(merge_style(current_style, raw))
+        except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError) as error:
+            messagebox.showerror("Import Theme Preset", f"Could not import this preset:\n{error}", parent=self.root)
+            return
+        self._apply_visual_style(style_values)
+
+    def export_theme_preset(self):
+        style_values = self._style_object_for_visual_editor()
+        if style_values is None:
+            return
+        selected = filedialog.asksaveasfilename(
+            title="Export reusable theme preset",
+            initialdir=self.project_root,
+            initialfile=f"{self.project_root.name}-theme.vnstyle",
+            defaultextension=".vnstyle",
+            filetypes=(("VN style preset", "*.vnstyle"), ("JSON", "*.json")),
+            parent=self.root,
+        )
+        if not selected:
+            return
+        try:
+            Path(selected).write_text(
+                json.dumps({"format": "vn-style-preset", "version": 1, "style": style_values}, ensure_ascii=False, indent=2) + "\n",
                 encoding="utf-8",
-                errors="replace",
-                bufsize=1,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                newline="\n",
             )
         except OSError as error:
-            self.terminal_process = None
-            self._append_terminal(f"Could not start {self.terminal_name}: {error}\n")
+            messagebox.showerror("Export Theme Preset", f"Could not write the preset:\n{error}", parent=self.root)
             return
-        self.terminal_prompt = f"{self.terminal_name} {self.project_root}> "
-        self._append_terminal(f"\n{self.terminal_name} started in {self.project_root}\n")
-        reader = threading.Thread(
-            target=self._read_terminal_output,
-            args=(self.terminal_process, generation),
-            name="VNEditorShellReader",
-            daemon=True,
-        )
-        reader.start()
-        self._schedule_terminal_poll()
-
-    def _stop_terminal(self):
-        process = self.terminal_process
-        self.terminal_process = None
-        self.terminal_generation += 1
-        if self.terminal_entry is not None:
-            self.terminal_entry.destroy()
-            self.terminal_entry = None
-        if process is None:
-            return
-        try:
-            if process.stdin and process.poll() is None:
-                process.stdin.write("__VN_EDITOR_EXIT__\n")
-                process.stdin.flush()
-            process.wait(timeout=0.5)
-        except (OSError, subprocess.TimeoutExpired):
-            try:
-                process.terminate()
-                process.wait(timeout=1)
-            except (OSError, subprocess.TimeoutExpired):
-                try:
-                    process.kill()
-                except OSError:
-                    pass
-
-    def _read_terminal_output(self, process, generation):
-        try:
-            if process.stdout:
-                for line in process.stdout:
-                    self.terminal_queue.put((generation, line.rstrip("\r\n")))
-        except (OSError, ValueError) as error:
-            self.terminal_queue.put((generation, f"Shell output error: {error}"))
-        finally:
-            if process.stdout:
-                process.stdout.close()
-        self.terminal_queue.put((generation, None))
-
-    def _schedule_terminal_poll(self):
-        if self.terminal_poll_job is None:
-            self.terminal_poll_job = self.root.after(80, self._drain_terminal_output)
-
-    def _drain_terminal_output(self):
-        self.terminal_poll_job = None
-        while True:
-            try:
-                generation, line = self.terminal_queue.get_nowait()
-            except queue.Empty:
-                break
-            if generation != self.terminal_generation:
-                continue
-            if line is None:
-                if self.terminal_process is not None and self.terminal_process.poll() is not None:
-                    self.terminal_process = None
-                    if self.terminal_entry is not None:
-                        self.terminal_entry.destroy()
-                        self.terminal_entry = None
-                    self._append_terminal("\nShell exited. Use Restart to open it again.\n")
-                continue
-            if line.startswith("__VN_EDITOR_PROMPT__"):
-                location = line[len("__VN_EDITOR_PROMPT__"):]
-                self._show_terminal_prompt(location)
-            else:
-                self._append_terminal(line + "\n")
-        if self.terminal_process is not None:
-            self._schedule_terminal_poll()
-
-    def _append_terminal(self, text):
-        if not hasattr(self, "terminal_output"):
-            return
-        self.terminal_output.configure(state="normal")
-        self.terminal_output.insert("end-1c", text)
-        self.terminal_output.see("end")
-        self.terminal_output.configure(state="disabled")
-
-    def _show_terminal_prompt(self, location: str):
-        self.terminal_location = location
-        self.terminal_prompt = f"{self.terminal_name} {location}> "
-        self.terminal_output.configure(state="normal")
-        self.terminal_output.insert("end-1c", self.terminal_prompt)
-        entry = tk.Entry(
-            self.terminal_output,
-            font=("Consolas", 10),
-            background="#11151c",
-            foreground="#d8dee9",
-            insertbackground="#ffffff",
-            selectbackground="#3b4d65",
-            selectforeground="#ffffff",
-            relief="flat",
-            borderwidth=0,
-        )
-        entry.bind("<Return>", self._send_terminal_command)
-        entry.bind("<Up>", self._terminal_history_up)
-        entry.bind("<Down>", self._terminal_history_down)
-        self.terminal_output.window_create("end-1c", window=entry)
-        self.terminal_entry = entry
-        self.terminal_output.see("end")
-        self.terminal_output.configure(state="disabled")
-        entry.focus_set()
-
-    def clear_terminal(self):
-        pending_command = self.terminal_entry.get() if self.terminal_entry is not None else None
-        if self.terminal_entry is not None:
-            self.terminal_entry.destroy()
-            self.terminal_entry = None
-        self.terminal_output.configure(state="normal")
-        self.terminal_output.delete("1.0", "end")
-        self.terminal_output.configure(state="disabled")
-        if pending_command is not None and self.terminal_process is not None:
-            self._show_terminal_prompt(self.terminal_location)
-            self.terminal_entry.insert(0, pending_command)
-
-    def _focus_terminal_input(self, _event=None):
-        if self.terminal_entry is not None:
-            self.terminal_entry.focus_set()
-        return "break"
-
-    def restart_terminal(self):
-        self._start_terminal()
-
-    def _send_terminal_command(self, _event=None):
-        if self.terminal_entry is None:
-            return "break"
-        command = self.terminal_entry.get().strip()
-        process = self.terminal_process
-        if process is None or process.poll() is not None:
-            self.terminal_entry.destroy()
-            self.terminal_entry = None
-            self._append_terminal("\nThe shell is not running. Use Restart to open it again.\n")
-            return "break"
-        if process.stdin is None:
-            return "break"
-        self.terminal_entry.destroy()
-        self.terminal_entry = None
-        self._append_terminal(command + "\n")
-        try:
-            process.stdin.write(command + "\n")
-            process.stdin.flush()
-        except (OSError, BrokenPipeError) as error:
-            self._append_terminal(f"Could not send command: {error}\n")
-        self.terminal_history.append(command)
-        self.terminal_history_index = len(self.terminal_history)
-        return "break"
-
-    def _terminal_history_up(self, _event=None):
-        if self.terminal_entry is None or not self.terminal_history:
-            return "break"
-        self.terminal_history_index = max(0, self.terminal_history_index - 1)
-        self.terminal_entry.delete(0, "end")
-        self.terminal_entry.insert(0, self.terminal_history[self.terminal_history_index])
-        return "break"
-
-    def _terminal_history_down(self, _event=None):
-        if self.terminal_entry is None or not self.terminal_history:
-            return "break"
-        self.terminal_history_index = min(len(self.terminal_history), self.terminal_history_index + 1)
-        self.terminal_entry.delete(0, "end")
-        if self.terminal_history_index < len(self.terminal_history):
-            self.terminal_entry.insert(0, self.terminal_history[self.terminal_history_index])
-        return "break"
+        self.set_status(f"Exported reusable theme preset to {selected}")
 
     def choose_project(self):
         selected = filedialog.askdirectory(title="Choose VN Engine project folder", initialdir=self.project_root)
@@ -2694,73 +2761,334 @@ while ($true) {{
                 return
             self.load_project(Path(selected))
 
-    def load_project(self, root: Path):
-        self._loading = True
-        self._clear_included_story_tabs()
-        self.project_root = project_root_from(root)
-        self.project_file = self.project_root / "data" / "project.json"
-        self.project_root.joinpath("data").mkdir(parents=True, exist_ok=True)
-        self.project_label.configure(text=str(self.project_root))
-        raw_project = None
-        project_dirty = False
-        if self.project_file.is_file():
-            try:
-                raw_text = self.project_file.read_text(encoding="utf-8")
-                if raw_text.strip():
-                    raw_project = json.loads(raw_text)
-                    if raw_project == {}:
-                        raw_project = DEFAULT_PROJECT
-                        self.project_buffer = json.dumps(
-                            DEFAULT_PROJECT, ensure_ascii=False, indent=2
-                        ) + "\n"
-                        project_dirty = True
-                    else:
-                        self.project_buffer = raw_text
-                else:
-                    raw_project = DEFAULT_PROJECT
-                    self.project_buffer = json.dumps(
-                        DEFAULT_PROJECT, ensure_ascii=False, indent=2
-                    ) + "\n"
-                    project_dirty = True
-            except json.JSONDecodeError:
-                self.project_buffer = raw_text
-            except OSError as error:
-                raw_project = DEFAULT_PROJECT
-                self.project_buffer = json.dumps(DEFAULT_PROJECT, ensure_ascii=False, indent=2) + "\n"
-                project_dirty = True
-                self.set_status(f"Could not read project.json: {error}")
-        else:
-            raw_project = DEFAULT_PROJECT
-            self.project_buffer = json.dumps(DEFAULT_PROJECT, ensure_ascii=False, indent=2) + "\n"
-            project_dirty = True
-        values = raw_project if isinstance(raw_project, dict) else DEFAULT_PROJECT
-        self.story_file = self._story_path_from(values)
-        story_dirty = not self.story_file.is_file()
+    def open_file(self):
+        selected = filedialog.askopenfilename(
+            title="Open story YAML file",
+            initialdir=self._story_data_dir(),
+            filetypes=(("Story YAML", "*.yaml *.yml"), ("All files", "*")),
+            parent=self.root,
+        )
+        if not selected:
+            return
+        path = Path(selected).expanduser().resolve()
+        if path.suffix.casefold() not in {".yaml", ".yml"}:
+            messagebox.showerror("Open Story File", "Choose a .yaml or .yml story file.", parent=self.root)
+            return
+        editor = self.story_editors.get(path)
+        if editor is not None:
+            if str(editor) not in self.notebook.tabs():
+                self.notebook.add(editor, text=self._story_tab_label(path, editor.dirty))
+            self.notebook.select(editor)
+            return
         try:
-            self.story_buffer = self.story_file.read_text(encoding="utf-8") if self.story_file.is_file() else self._starter_story()
+            content = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as error:
+            messagebox.showerror("Open Story File", f"Could not read {path}:\n{error}", parent=self.root)
+            return
+        editor = CodeEditor(self.notebook, self, "story")
+        editor.story_path = path
+        editor.set_text(content)
+        self.story_editors[path] = editor
+        self.notebook.add(editor, text=self._story_tab_label(path))
+        self.notebook.select(editor)
+        self.analyze_document("story")
+        self.set_status(f"Opened {path}")
+
+    def close_active_tab(self):
+        selected = self.notebook.select()
+        if selected:
+            self.close_tab(self.notebook.nametowidget(selected))
+
+    def close_tab(self, editor):
+        if editor in {self.story_editor, self.project_editor, self.style_editor}:
+            self.set_status("The project story, project settings, and style tabs stay open.")
+            return
+        path = next((path for path, candidate in self.story_editors.items() if candidate is editor), None)
+        if path is None:
+            return
+        if editor.dirty:
+            answer = messagebox.askyesnocancel(
+                APP_TITLE,
+                f"Save changes to {path.name} before closing this tab?",
+                parent=self.root,
+            )
+            if answer is None:
+                return
+            if answer:
+                try:
+                    self._write_story_editor(editor)
+                except OSError as error:
+                    messagebox.showerror(APP_TITLE, f"Could not save {path}:\n{error}", parent=self.root)
+                    return
+        self.notebook.forget(editor)
+        self.story_editors.pop(path, None)
+        self._document_analysis_cache["story"].pop(id(editor), None)
+        editor.destroy()
+        self._update_tab_labels()
+        if self.active_kind() == "story":
+            self.analyze_document("story")
+
+    def load_project(self, root: Path):
+        if self._initial_project_load_job is not None:
+            self.root.after_cancel(self._initial_project_load_job)
+            self._initial_project_load_job = None
+        self._project_load_generation += 1
+        generation = self._project_load_generation
+        self._project_load_pending = True
+        self._included_story_load_queue = []
+        if self._included_story_load_job is not None:
+            self.root.after_cancel(self._included_story_load_job)
+            self._included_story_load_job = None
+        for kind in self._analysis_revisions:
+            self._analysis_revisions[kind] += 1
+            self._document_analysis_cache[kind].clear()
+            pending_analysis = self._analysis_jobs.pop(kind, None)
+            if pending_analysis is not None:
+                self.root.after_cancel(pending_analysis)
+        requested_root = Path(root)
+        self.set_status("Loading project files in the background…")
+        self.root.run_in_background(
+            lambda: self._prepare_project_snapshot(requested_root),
+            lambda snapshot, error: self._finish_project_load(generation, snapshot, error),
+        )
+
+    def _prepare_project_snapshot(self, requested_root: Path):
+        """Read project files and resolve included stories without touching Qt widgets."""
+        project_root = project_root_from(requested_root)
+        project_file = project_root / "data" / "project.json"
+        style_file = project_root / "data" / "style.json"
+        _ensure_project_structure(project_root)
+        load_errors = []
+
+        raw_project = None
+        raw_project_text = ""
+        project_parse_failed = False
+        project_buffer = ""
+        project_dirty = False
+        if project_file.is_file():
+            try:
+                raw_project_text = project_file.read_text(encoding="utf-8")
+                raw_project = json.loads(raw_project_text) if raw_project_text.strip() else {}
+            except json.JSONDecodeError:
+                project_buffer = raw_project_text
+                project_parse_failed = True
+            except OSError as error:
+                load_errors.append(f"Could not read project.json: {error}")
+        if not isinstance(raw_project, dict) or raw_project == {}:
+            raw_project = deepcopy(DEFAULT_PROJECT)
+            if not project_parse_failed:
+                project_buffer = json.dumps(raw_project, ensure_ascii=False, indent=2) + "\n"
+                project_dirty = True
+
+        clean_project, legacy_style = split_style_from_project(raw_project)
+        has_legacy_style = clean_project != raw_project
+        if has_legacy_style:
+            project_buffer = json.dumps(clean_project, ensure_ascii=False, indent=2) + "\n"
+            project_dirty = True
+        elif not project_parse_failed and raw_project_text.strip() and isinstance(raw_project, dict):
+            project_buffer = raw_project_text
+
+        style_text = ""
+        raw_style = None
+        style_exists = style_file.is_file()
+        if style_exists:
+            try:
+                style_text = style_file.read_text(encoding="utf-8")
+                raw_style = json.loads(style_text) if style_text.strip() else {}
+            except (OSError, json.JSONDecodeError) as error:
+                style_text = style_text or "{}\n"
+                load_errors.append(f"Could not read style.json: {error}")
+        if isinstance(raw_style, dict):
+            _clean_again, effective_style = split_style_from_project(raw_project, raw_style)
+        else:
+            effective_style = legacy_style
+        style_dirty = not style_exists or has_legacy_style
+        if style_dirty:
+            style_buffer = json.dumps(effective_style, ensure_ascii=False, indent=2) + "\n"
+        elif style_text:
+            style_buffer = style_text
+        else:
+            style_buffer = json.dumps(DEFAULT_STYLE, ensure_ascii=False, indent=2) + "\n"
+            style_dirty = True
+
+        values = clean_project if isinstance(clean_project, dict) else DEFAULT_PROJECT
+        paths = values.get("paths", {}) if isinstance(values.get("paths", {}), dict) else {}
+        data_dir = AssetCatalog._resolve_path(paths.get("data", "data"), project_root)
+        story_name = values.get("story", "story.yaml")
+        story_file = Path(story_name) if isinstance(story_name, str) else Path("story.yaml")
+        if not story_file.is_absolute():
+            story_file = (data_dir / story_file).resolve()
+
+        story_dirty = not story_file.is_file()
+        try:
+            story_buffer = story_file.read_text(encoding="utf-8") if story_file.is_file() else _starter_story_content()
         except OSError as error:
-            self.story_buffer = self._starter_story()
+            story_buffer = _starter_story_content()
             story_dirty = True
-            self.set_status(f"Could not read {self.story_file}: {error}")
+            load_errors.append(f"Could not read {story_file}: {error}")
+
+        included_stories = {}
+        if yaml is not None:
+            pending = [(story_file, story_buffer)]
+            visited = set()
+            while pending:
+                parent_path, content = pending.pop()
+                parent_path = parent_path.resolve()
+                if parent_path in visited:
+                    continue
+                visited.add(parent_path)
+                try:
+                    document = yaml.safe_load(content)
+                except Exception:
+                    continue
+                if not isinstance(document, dict) or not isinstance(document.get("includes", []), list):
+                    continue
+                for include in document.get("includes", []):
+                    if not isinstance(include, str) or not include.strip():
+                        continue
+                    relative = Path(include.replace("\\", "/"))
+                    if relative.is_absolute():
+                        continue
+                    child_path = (parent_path.parent / relative).resolve()
+                    try:
+                        child_path.relative_to(data_dir.resolve())
+                    except ValueError:
+                        continue
+                    if child_path == story_file.resolve():
+                        pending.append((child_path, story_buffer))
+                        continue
+                    child = included_stories.get(child_path)
+                    if child is None:
+                        try:
+                            child_content = child_path.read_text(encoding="utf-8")
+                            child_dirty = False
+                        except OSError:
+                            child_content = "# Add dialogue content here.\ndialogues: {}\n"
+                            child_dirty = True
+                        child = (child_content, child_dirty)
+                        included_stories[child_path] = child
+                    pending.append((child_path, child[0]))
+
+        return {
+            "project_root": project_root,
+            "project_file": project_file,
+            "style_file": style_file,
+            "project_buffer": project_buffer,
+            "style_buffer": style_buffer,
+            "story_file": story_file,
+            "story_buffer": story_buffer,
+            "project_dirty": project_dirty,
+            "style_dirty": style_dirty,
+            "story_dirty": story_dirty,
+            "included_stories": included_stories,
+            "load_errors": load_errors,
+        }
+
+    def _finish_project_load(self, generation, snapshot, error):
+        if generation != self._project_load_generation:
+            return
+        if error is not None:
+            self._project_load_pending = False
+            self.set_status(f"Could not load project: {error}")
+            return
+        if any(editor.dirty for editor in self.story_editors.values()) or self.project_editor.dirty or self.style_editor.dirty:
+            if not messagebox.askyesno(
+                "Project Load",
+                "Discard edits made while the project was loading?",
+                parent=self.root,
+            ):
+                self._project_load_pending = False
+                self.set_status("Project load canceled; your edits were kept.")
+                return
+        try:
+            self._apply_project_snapshot(snapshot)
+        except Exception as apply_error:
+            self._loading = False
+            self._project_load_pending = False
+            self.set_status(f"Could not finish loading project: {apply_error}")
+
+    def _apply_project_snapshot(self, snapshot):
+        self._loading = True
+        for kind in self._analysis_revisions:
+            self._analysis_revisions[kind] += 1
+            self._document_analysis_cache[kind].clear()
+            pending_analysis = self._analysis_jobs.pop(kind, None)
+            if pending_analysis is not None:
+                self.root.after_cancel(pending_analysis)
+        self._clear_included_story_tabs()
+        self.project_root = snapshot["project_root"]
+        self.project_file = snapshot["project_file"]
+        self.style_file = snapshot["style_file"]
+        self.story_file = snapshot["story_file"]
+        self.project_buffer = snapshot["project_buffer"]
+        self.style_buffer = snapshot["style_buffer"]
+        self.story_buffer = snapshot["story_buffer"]
+        self.root.title(f"{APP_TITLE} — {self.project_root}")
+
         self.story_editor.set_text(self.story_buffer)
-        self.story_editor.dirty = story_dirty
+        self.story_editor.dirty = snapshot["story_dirty"]
         self.story_editor.story_path = self.story_file
-        self.story_editors = {self.story_file: self.story_editor}
         self.project_editor.set_text(self.project_buffer)
-        self.project_editor.dirty = project_dirty
-        self._sync_included_story_tabs()
+        self.project_editor.dirty = snapshot["project_dirty"]
+        self.style_editor.set_text(self.style_buffer)
+        self.style_editor.dirty = snapshot["style_dirty"]
+
+        self.story_editors = {self.story_file: self.story_editor}
+        self.live_diagnostics = {"story": [], "project": [], "style": []}
+        self.engine_diagnostics = []
         self._loading = False
         self._update_tab_labels()
         self._refresh_markdown_tabs()
         self.refresh_asset_tree()
-        self.analyze_document("story")
-        self.analyze_document("project")
-        self._refresh_search_highlights()
-        self._start_terminal()
-        if project_dirty:
-            self.set_status("Default project values were filled in memory. Save project.json to write them.")
+        self.render_diagnostics()
+        self._included_story_load_queue = list(snapshot["included_stories"].items())
+        generation = self._project_load_generation
+        self.set_status(
+            f"Loading {len(self._included_story_load_queue)} included story file(s)…"
+            if self._included_story_load_queue
+            else "Finishing project setup…"
+        )
+        self._included_story_load_job = self.root.after(
+            0, lambda selected=generation, result=snapshot: self._load_included_story_batch(selected, result)
+        )
+
+    def _load_included_story_batch(self, generation, snapshot):
+        self._included_story_load_job = None
+        if generation != self._project_load_generation:
+            return
+        for _ in range(4):
+            if not self._included_story_load_queue:
+                break
+            path, (content, dirty) = self._included_story_load_queue.pop(0)
+            child_editor = CodeEditor(self.notebook, self, "story")
+            child_editor.story_path = path
+            child_editor.set_text(content)
+            child_editor.dirty = dirty
+            index = len(self.story_editors)
+            self.story_editors[path] = child_editor
+            self.notebook.insert(index, child_editor, text=self._story_tab_label(path, dirty))
+        if self._included_story_load_queue:
+            self.set_status(f"Loading {len(self._included_story_load_queue)} included story file(s)…")
+            self._included_story_load_job = self.root.after(
+                8, lambda selected=generation, result=snapshot: self._load_included_story_batch(selected, result)
+            )
+            return
+
+        self._finish_included_story_load(snapshot)
+
+    def _finish_included_story_load(self, snapshot):
+        self._project_load_pending = False
+        self._update_tab_labels()
+        for delay, kind in enumerate(("story", "project", "style"), start=1):
+            self.root.after(delay * 60, lambda selected=kind: self.analyze_document(selected))
+        self.root.after(0, self._refresh_search_highlights)
+        if snapshot["project_dirty"] or snapshot["style_dirty"]:
+            status = "Project defaults are ready. Save All to write pending configuration changes."
         else:
-            self.set_status("Ready. Ctrl+Space shows suggestions; F5 runs the engine validator.")
+            status = "Ready. Ctrl+Space shows suggestions; F5 runs the engine validator."
+        if snapshot["load_errors"]:
+            status += " " + " ".join(snapshot["load_errors"])
+        self.set_status(status)
         try:
             _save_last_project(self.project_root)
         except OSError as error:
@@ -2889,16 +3217,7 @@ while ($true) {{
 
     @staticmethod
     def _starter_story():
-        return (
-            "title: My Visual Novel\n"
-            "start: opening\n\n"
-            "dialogues:\n"
-            "  opening:\n"
-            "    chapter: Chapter 1\n"
-            "    speaker: Narrator\n"
-            "    active_character: null\n"
-            "    text: Replace this line with your opening dialogue.\n"
-        )
+        return _starter_story_content()
 
     def _story_path_from(self, values):
         values = merge_defaults(DEFAULT_PROJECT, values if isinstance(values, dict) else {})
@@ -2915,6 +3234,13 @@ while ($true) {{
             return merge_defaults(DEFAULT_PROJECT, value) if isinstance(value, dict) else DEFAULT_PROJECT
         except (json.JSONDecodeError, AttributeError):
             return DEFAULT_PROJECT
+
+    def _current_style_values(self):
+        try:
+            value = json.loads(self.style_editor.get_text())
+            return resolve_style(value) if isinstance(value, dict) else DEFAULT_STYLE
+        except (json.JSONDecodeError, TypeError, ValueError, AttributeError):
+            return DEFAULT_STYLE
 
     def _catalog(self):
         values = self._current_project_values()
@@ -2933,14 +3259,17 @@ while ($true) {{
         self._asset_catalog_key = None
         for item in self.asset_tree.get_children(""):
             self.asset_tree.delete(item)
-        catalog = self._catalog()
-        roots = [("Project assets", catalog.assets_dir), ("Engine built-in assets", catalog.engine_assets_dir)]
+        values = self._current_project_values()
+        paths = values.get("paths", {}) if isinstance(values.get("paths", {}), dict) else {}
+        assets_dir = AssetCatalog._resolve_path(paths.get("assets", "assets"), self.project_root)
+        roots = [
+            ("Project assets", assets_dir),
+            ("Engine built-in assets", self.project_root / "engine" / "assets"),
+        ]
         for label, path in roots:
             iid = self.asset_tree.insert("", "end", text=label, open=False, values=("root", str(path), str(path)))
             if path.is_dir():
                 self.asset_tree.insert(iid, "end", text="", values=("placeholder", "", str(path)))
-                self.asset_tree.item(iid, open=True)
-                self._populate_tree_node(iid)
             elif label == "Engine built-in assets":
                 self._populate_builtin_tree(iid)
         self.asset_tree.tag_configure("folder", foreground="#b7c7e0")
@@ -3157,8 +3486,10 @@ while ($true) {{
             toolbar.pack(fill="x")
             direction = "right-aligned RTL preview" if rtl else "left-aligned LTR preview"
             ttk.Label(toolbar, text=f"{missing} missing of {len(rows)} strings · {direction}").pack(side="left")
-            content = tk.Text(window, wrap="word", font=("Segoe UI", 10), padx=12, pady=10)
-            scroll = ttk.Scrollbar(window, orient="vertical", command=content.yview)
+            preview_body = ttk.Frame(window)
+            preview_body.pack(fill="both", expand=True)
+            content = tk.Text(preview_body, wrap="word", font=("Segoe UI", 10), padx=12, pady=10)
+            scroll = ttk.Scrollbar(preview_body, orient="vertical", command=content.yview)
             content.configure(yscrollcommand=scroll.set)
             content.pack(side="left", fill="both", expand=True)
             scroll.pack(side="right", fill="y")
@@ -3263,13 +3594,14 @@ while ($true) {{
                 add_reference("characters", dialogue.get("active_character"))
 
         project_values = self._current_project_values()
+        style_values = self._current_style_values()
         for key in ("icon",):
             add_reference("images", project_values.get(key))
-        intro = project_values.get("intro", {})
+        intro = style_values.get("intro", {})
         if isinstance(intro, dict):
             for key in ("credit_image", "warning_image", "headphones_image"):
                 add_reference("images", intro.get(key))
-        theme = project_values.get("theme", {})
+        theme = style_values.get("theme", {})
         if isinstance(theme, dict):
             textbox = theme.get("textbox", {})
             if isinstance(textbox, dict):
@@ -3536,7 +3868,7 @@ while ($true) {{
                 reference = file_path.stem
         editor = self.active_editor()
         if editor is None:
-            self.set_status("Select story.yaml or project.json before inserting an asset reference.")
+            self.set_status("Select a story, project, or style tab before inserting an asset reference.")
             return
         editor.text.insert("insert", reference)
         editor.text.focus_set()
@@ -3880,20 +4212,45 @@ while ($true) {{
     def _on_tab_changed(self, _event=None):
         self.engine_diagnostics = []
         kind = self.active_kind()
-        if kind in {"story", "project"}:
-            self.analyze_document(kind)
+        if kind in {"story", "project", "style"}:
             self.update_cursor_status()
+            if self._tab_change_analysis_job is not None:
+                self.root.after_cancel(self._tab_change_analysis_job)
+            pending_analysis = self._analysis_jobs.pop(kind, None)
+            if pending_analysis is not None:
+                self.root.after_cancel(pending_analysis)
+            self._tab_change_analysis_job = self.root.after(
+                150, self._analyze_active_tab_after_change
+            )
         else:
+            if self._tab_change_analysis_job is not None:
+                self.root.after_cancel(self._tab_change_analysis_job)
+                self._tab_change_analysis_job = None
             self.render_diagnostics()
             path = self.markdown_paths.get(self.notebook.nametowidget(self.notebook.select()))
             self.set_status(f"Viewing {path.name if path else 'documentation'} (read-only). Ctrl+F searches this file.")
-        self._update_tab_labels()
         self._refresh_search_highlights()
+
+    def _analyze_active_tab_after_change(self):
+        self._tab_change_analysis_job = None
+        kind = self.active_kind()
+        if kind in {"story", "project", "style"}:
+            editor = self.active_editor()
+            cached = self._document_analysis_cache[kind].get(id(editor))
+            if cached is not None and cached[0] == self._analysis_revisions[kind]:
+                self.live_diagnostics[kind] = list(cached[1])
+                editor.highlight()
+                self.render_diagnostics()
+            else:
+                self.analyze_document(kind)
+            self.update_cursor_status()
 
     def active_kind(self):
         selected = self.notebook.select()
         if selected == str(self.project_editor):
             return "project"
+        if selected == str(self.style_editor):
+            return "style"
         if any(selected == str(editor) for editor in self.story_editors.values()):
             return "story"
         return "markdown"
@@ -3901,6 +4258,8 @@ while ($true) {{
     def active_editor(self):
         if self.active_kind() == "project":
             return self.project_editor
+        if self.active_kind() == "style":
+            return self.style_editor
         if self.active_kind() == "story":
             selected = self.notebook.select()
             return next((editor for editor in self.story_editors.values() if str(editor) == selected), self.story_editor)
@@ -3944,6 +4303,7 @@ while ($true) {{
         window = tk.Toplevel(self.root)
         self.find_window = window
         window.title("Find")
+        window.geometry("520x120")
         window.transient(self.root)
         window.resizable(False, False)
         row = ttk.Frame(window, padding=10)
@@ -3974,18 +4334,19 @@ while ($true) {{
 
     def _all_text_widgets(self):
         widgets = [editor.text for editor in self.story_editors.values()]
-        widgets.extend((self.project_editor.text, *self.markdown_texts.values()))
+        widgets.extend((self.project_editor.text, self.style_editor.text, *self.markdown_texts.values()))
         return widgets
 
     def _refresh_search_highlights(self):
-        for widget in self._all_text_widgets():
-            widget.tag_remove("search_match", "1.0", "end")
-            widget.tag_remove("search_current", "1.0", "end")
         if self.find_window is None or not self.find_window.winfo_exists() or self.find_entry is None:
             return
-        query = self.find_entry.get()
         text = self.active_text()
-        if not query or text is None:
+        if text is None:
+            return
+        text.tag_remove("search_match", "1.0", "end")
+        text.tag_remove("search_current", "1.0", "end")
+        query = self.find_entry.get()
+        if not query:
             return
         nocase = not bool(self.find_case_sensitive.get())
         start = "1.0"
@@ -4065,14 +4426,16 @@ while ($true) {{
         fields.columnconfigure(1, weight=1)
         fields.columnconfigure(3, weight=1)
 
-        tree = ttk.Treeview(body, columns=("file", "line", "change"), show="headings")
+        results_frame = ttk.Frame(body)
+        results_frame.pack(fill="both", expand=True)
+        tree = ttk.Treeview(results_frame, columns=("file", "line", "change"), show="headings")
         tree.heading("file", text="Story File")
         tree.heading("line", text="Line")
         tree.heading("change", text="Preview")
         tree.column("file", width=190, stretch=False)
         tree.column("line", width=65, anchor="e", stretch=False)
         tree.column("change", width=520, stretch=True)
-        scrollbar = ttk.Scrollbar(body, orient="vertical", command=tree.yview)
+        scrollbar = ttk.Scrollbar(results_frame, orient="vertical", command=tree.yview)
         tree.configure(yscrollcommand=scrollbar.set)
         tree.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
@@ -4170,11 +4533,13 @@ while ($true) {{
             editor = self.active_editor()
             if editor is self.story_editor:
                 self.story_buffer = editor.get_text()
-        else:
+        elif kind == "project":
             self.project_buffer = self.project_editor.get_text()
+        else:
+            self.style_buffer = self.style_editor.get_text()
         self.engine_diagnostics = []
         self._update_tab_labels()
-        if kind == "project":
+        if kind in {"project", "style"}:
             if self._asset_refresh_job:
                 self.root.after_cancel(self._asset_refresh_job)
             self._asset_refresh_job = self.root.after(700, self._refresh_asset_tree_debounced)
@@ -4187,16 +4552,20 @@ while ($true) {{
         if not hasattr(self, "notebook"):
             return
         project_name = self.project_file.name + (" *" if self.project_editor.dirty else "")
+        style_name = self.style_file.name + (" *" if self.style_editor.dirty else "")
         for path, editor in self.story_editors.items():
             try:
                 self.notebook.tab(editor, text=self._story_tab_label(path, editor.dirty))
             except tk.TclError:
                 pass
         self.notebook.tab(self.project_editor, text=project_name)
-        marker = " *" if any(editor.dirty for editor in self.story_editors.values()) or self.project_editor.dirty else ""
+        self.notebook.tab(self.style_editor, text=style_name)
+        marker = " *" if any(editor.dirty for editor in self.story_editors.values()) or self.project_editor.dirty or self.style_editor.dirty else ""
         self.root.title(f"{APP_TITLE} — {self.project_root.name}{marker}")
 
     def schedule_analysis(self, kind):
+        if kind in self._analysis_revisions:
+            self._analysis_revisions[kind] += 1
         old = self._analysis_jobs.get(kind)
         if old:
             self.root.after_cancel(old)
@@ -4204,43 +4573,186 @@ while ($true) {{
 
     def analyze_document(self, kind):
         self._analysis_jobs.pop(kind, None)
-        catalog = self._catalog()
+        if kind not in self._analysis_revisions or self._loading:
+            return
         if kind == "story":
             editor = self.active_editor() or self.story_editor
-            variables, dialogue_ids = self._story_context()
-            self.live_diagnostics[kind] = analyze_story(
-                editor.get_text(), catalog,
-                fragment=editor is not self.story_editor,
-                context_variables=variables,
-                context_dialogues=dialogue_ids,
-                source_path=getattr(editor, "story_path", self.story_file),
-            )
-            for diagnostic in self.live_diagnostics[kind]:
-                diagnostic.source = Path(getattr(editor, "story_path", self.story_file)).name
-            if editor is self.story_editor:
-                graph = self._load_story_graph()
-                if graph is not None:
-                    for dialogue_id in graph["unreachable"]:
-                        source_path = graph["sources"].get(dialogue_id, self.story_file)
-                        source_editor = next(
-                            (candidate for path, candidate in self.story_editors.items()
-                             if path.resolve() == source_path.resolve()),
-                            None,
-                        )
-                        source_text = source_editor.get_text() if source_editor is not None else ""
-                        line = _line_of_key(source_text, dialogue_id, _line_of_key(source_text, "dialogues"))
-                        source_name = self._story_source_label(source_path)
-                        self.live_diagnostics[kind].append(
-                            Diagnostic(
-                                "warning",
-                                f"Dialogue '{dialogue_id}' is unreachable from story start '{graph['start']}'.",
-                                line,
-                                source_name,
-                            )
-                        )
+            document_text = editor.get_text()
+            source_path = Path(getattr(editor, "story_path", self.story_file))
         else:
-            self.live_diagnostics[kind] = analyze_project(self.project_editor.get_text(), catalog)
-            editor = self.project_editor
+            if kind == "project":
+                editor = self.project_editor
+                document_text = self.project_editor.get_text()
+            else:
+                editor = self.style_editor
+                document_text = self.style_editor.get_text()
+            source_path = None
+        revision = self._analysis_revisions[kind]
+        snapshot = {
+            "kind": kind,
+            "revision": revision,
+            "project_root": self.project_root,
+            "story_file": self.story_file,
+            "story_data_dir": self._story_data_dir(),
+            "source_path": source_path,
+            "document_text": document_text,
+            "project_text": self.project_editor.get_text(),
+            "style_text": self.style_editor.get_text(),
+            "story_sources": [
+                (path, story_editor.get_text())
+                for path, story_editor in self.story_editors.items()
+            ],
+        }
+        self.root.run_in_background(
+            lambda: self._analyze_document_snapshot(snapshot),
+            lambda diagnostics, error: self._finish_document_analysis(
+                kind, editor, revision, diagnostics, error
+            ),
+        )
+
+    @staticmethod
+    def _analyze_document_snapshot(snapshot):
+        kind = snapshot["kind"]
+        project_root = snapshot["project_root"]
+        try:
+            project_values = json.loads(snapshot["project_text"])
+        except json.JSONDecodeError:
+            project_values = {}
+        catalog = AssetCatalog(project_root, project_values if isinstance(project_values, dict) else {})
+
+        if kind == "project":
+            return analyze_project(snapshot["project_text"], catalog)
+        if kind == "style":
+            diagnostics = analyze_style(snapshot["style_text"], catalog, snapshot["project_text"])
+            for diagnostic in diagnostics:
+                diagnostic.source = "style.json"
+            return diagnostics
+
+        if yaml is None:
+            return analyze_story(snapshot["document_text"], catalog, source_path=snapshot["source_path"])
+
+        data_dir = Path(snapshot["story_data_dir"]).resolve()
+        story_file = Path(snapshot["story_file"]).resolve()
+        source_path = Path(snapshot["source_path"])
+        source_map = {Path(path).resolve(): content for path, content in snapshot["story_sources"]}
+        documents = {}
+        sources = {}
+        variables = {}
+        dialogue_ids = set()
+        start_id = None
+        default_locale = "en"
+        pending = [story_file]
+        visited = set()
+        while pending:
+            path = pending.pop()
+            if path in visited:
+                continue
+            visited.add(path)
+            try:
+                content = source_map.get(path)
+                if content is None:
+                    content = path.read_text(encoding="utf-8")
+                document = yaml.safe_load(content)
+            except Exception:
+                continue
+            if not isinstance(document, dict):
+                continue
+            documents[path] = document
+            local_variables = document.get("variables", {})
+            if isinstance(local_variables, dict):
+                variables.update(local_variables)
+            local_dialogues = document.get("dialogues", {})
+            if isinstance(local_dialogues, dict):
+                dialogue_ids.update(key for key in local_dialogues if isinstance(key, str))
+                for dialogue_id, dialogue in local_dialogues.items():
+                    if isinstance(dialogue_id, str) and isinstance(dialogue, dict):
+                        sources[dialogue_id] = path
+            if path == story_file:
+                start_id = document.get("start")
+                localization = document.get("localization", {})
+                if isinstance(localization, dict) and isinstance(localization.get("default_locale"), str):
+                    default_locale = localization["default_locale"]
+            includes = document.get("includes", [])
+            if isinstance(includes, list):
+                for include in includes:
+                    if not isinstance(include, str) or not include.strip():
+                        continue
+                    child_path = (path.parent / include.replace("\\", "/")).resolve()
+                    try:
+                        child_path.relative_to(data_dir)
+                    except ValueError:
+                        continue
+                    pending.append(child_path)
+
+        diagnostics = analyze_story(
+            snapshot["document_text"],
+            catalog,
+            fragment=source_path.resolve() != story_file,
+            context_variables=variables,
+            context_dialogues=dialogue_ids,
+            source_path=source_path,
+        )
+        for diagnostic in diagnostics:
+            diagnostic.source = source_path.name
+
+        if source_path.resolve() == story_file and documents:
+            dialogues = {
+                dialogue_id: dialogue
+                for document in documents.values()
+                for dialogue_id, dialogue in (document.get("dialogues", {}) if isinstance(document.get("dialogues", {}), dict) else {}).items()
+                if isinstance(dialogue_id, str) and isinstance(dialogue, dict)
+            }
+            edges = {dialogue_id: [] for dialogue_id in dialogues}
+            for dialogue_id, dialogue in dialogues.items():
+                next_id = dialogue.get("next")
+                if isinstance(next_id, str) and next_id in dialogues:
+                    edges[dialogue_id].append(next_id)
+                call_id = dialogue.get("call")
+                if isinstance(call_id, str) and call_id in dialogues:
+                    edges[dialogue_id].append(call_id)
+                options = dialogue.get("options", [])
+                if isinstance(options, list):
+                    edges[dialogue_id].extend(
+                        option.get("target") for option in options
+                        if isinstance(option, dict) and isinstance(option.get("target"), str)
+                        and option.get("target") in dialogues
+                    )
+            reachable = set()
+            if isinstance(start_id, str) and start_id in dialogues:
+                pending_ids = [start_id]
+                while pending_ids:
+                    current = pending_ids.pop()
+                    if current in reachable:
+                        continue
+                    reachable.add(current)
+                    pending_ids.extend(edges[current])
+            for dialogue_id in sorted(set(dialogues) - reachable):
+                source = sources.get(dialogue_id, story_file)
+                source_text = source_map.get(source.resolve(), "")
+                line = _line_of_key(source_text, dialogue_id, _line_of_key(source_text, "dialogues"))
+                try:
+                    source_name = source.relative_to(data_dir).as_posix()
+                except ValueError:
+                    source_name = source.name
+                diagnostics.append(Diagnostic(
+                    "warning",
+                    f"Dialogue '{dialogue_id}' is unreachable from story start '{start_id}'.",
+                    line,
+                    source_name,
+                ))
+        return diagnostics
+
+    def _finish_document_analysis(self, kind, editor, revision, diagnostics, error):
+        if revision != self._analysis_revisions.get(kind):
+            return
+        if kind == "story" and editor not in self.story_editors.values():
+            return
+        if error is not None:
+            diagnostics = [Diagnostic("error", f"Could not analyze {kind}: {error}")]
+        self._document_analysis_cache[kind][id(editor)] = (revision, list(diagnostics or []))
+        if kind == "story" and self.active_editor() is not editor:
+            return
+        self.live_diagnostics[kind] = diagnostics or []
         editor.highlight()
         if self.active_kind() == kind:
             self.render_diagnostics()
@@ -4589,7 +5101,7 @@ while ($true) {{
         line = editor.text.get(line_start_index, "insert")
         if editor.document_kind == "story":
             return self._story_completions(before, line, line_start_index)
-        return self._project_completions(before, line, line_start_index)
+        return self._project_completions(before, line, line_start_index, editor.document_kind)
 
     def _story_completions(self, before, line, line_start_index):
         catalog = self._catalog()
@@ -4776,7 +5288,7 @@ while ($true) {{
         matches = re.findall(r"^\s*(?:-\s*)?" + re.escape(key) + r"\s*:\s*['\"]?([^\s'\"]+)", before, re.M)
         return matches[-1] if matches else None
 
-    def _project_completions(self, before, line, line_start_index):
+    def _project_completions(self, before, line, line_start_index, document_kind="project"):
         value_match = re.match(r'^(\s*)"([^"\n]+)"\s*:\s*(.*)$', line)
         if value_match:
             indent, key, current = value_match.groups()
@@ -4803,6 +5315,10 @@ while ($true) {{
                 values = [(value, "setting") for value in sorted(SETTING_NAMES)]
             elif key == "layout":
                 values = [(value, "layout") for value in ("centered", "left", "right")]
+            elif key == "label_alignment":
+                values = [(value, "label alignment") for value in ("left", "center", "right")]
+            elif key == "schema_version":
+                values = [("1", "style schema version")]
             elif key in {"normal", "hovered"} and context[-1:] in {
                 ("buttons",), ("choice_buttons",),
             }:
@@ -4853,8 +5369,8 @@ while ($true) {{
         indent_text, partial = key_match.groups()
         partial = partial or ""
         context = self._json_context(before)
-        keys = self._json_allowed_keys(context)
-        return [(f'"{key}":', f"{context or 'project'} setting") for key in keys], f"{line_start_index}+{len(indent_text)}c", partial
+        keys = self._json_allowed_keys(context, document_kind)
+        return [(f'"{key}":', f"{context or document_kind} setting") for key in keys], f"{line_start_index}+{len(indent_text)}c", partial
 
     @staticmethod
     def _json_context(before):
@@ -4900,23 +5416,21 @@ while ($true) {{
         return path
 
     @staticmethod
-    def _json_allowed_keys(context):
+    def _json_allowed_keys(context, document_kind="project"):
         if not context:
-            return sorted(DEFAULT_PROJECT)
+            return sorted(DEFAULT_STYLE if document_kind == "style" else DEFAULT_PROJECT)
         if context[0] == "characters":
             return ["scale"] if len(context) == 2 else []
         joined = ".".join(context)
         schemas = {
-            "intro": ["creator", "game_version", "warning_message", "credit_image", "warning_image", "headphones_image"],
+            "intro": (["credit_image", "warning_image", "headphones_image"] if document_kind == "style" else ["creator", "game_version", "warning_message"]),
             "paths": ["data", "assets", "user_data"],
             "window": ["width", "height", "caption"],
-            "dialogue_buttons": list(DEFAULT_PROJECT.get("dialogue_buttons", {})),
-            "dialogue_buttons.back": ["visible", "label"],
-            "dialogue_buttons.history": ["visible", "label"],
-            "dialogue_buttons.quick_save": ["visible", "label"],
-            "dialogue_buttons.quick_load": ["visible", "label"],
-            "dialogue_buttons.auto": ["visible", "label"],
-            "dialogue_buttons.mute": ["visible", "label"],
+            "dialogue_buttons": list(DEFAULT_STYLE.get("dialogue_buttons", {})),
+            **{
+                f"dialogue_buttons.{button}": ["visible", "label", "label_alignment"]
+                for button in DEFAULT_STYLE.get("dialogue_buttons", {})
+            },
             "menus": ["main", "pause", "settings", "slots"],
             "menus.main": ["title", "items"],
             "menus.pause": ["title", "items"],
@@ -4935,11 +5449,11 @@ while ($true) {{
             "theme.game_font_sizes": list(DEFAULT_THEME.get("game_font_sizes", {})),
             "theme.menu": list(DEFAULT_THEME.get("menu", {})) + ["right_margin"],
             "theme.menu.screens": list(DEFAULT_THEME.get("menu", {}).get("screens", {})),
-            "theme.menu.screens.main": list(DEFAULT_THEME.get("menu", {}).get("screens", {}).get("main", {})),
-            "theme.menu.screens.pause": list(DEFAULT_THEME.get("menu", {}).get("screens", {}).get("pause", {})),
-            "theme.menu.screens.settings": list(DEFAULT_THEME.get("menu", {}).get("screens", {}).get("settings", {})),
-            "theme.menu.screens.slots": list(DEFAULT_THEME.get("menu", {}).get("screens", {}).get("slots", {})),
-            "theme.menu.screens.credits": list(DEFAULT_THEME.get("menu", {}).get("screens", {}).get("credits", {})),
+            "theme.menu.screens.main": list(DEFAULT_THEME.get("menu", {}).get("screens", {}).get("main", {})) + ["label_alignment"],
+            "theme.menu.screens.pause": list(DEFAULT_THEME.get("menu", {}).get("screens", {}).get("pause", {})) + ["label_alignment"],
+            "theme.menu.screens.settings": list(DEFAULT_THEME.get("menu", {}).get("screens", {}).get("settings", {})) + ["label_alignment"],
+            "theme.menu.screens.slots": list(DEFAULT_THEME.get("menu", {}).get("screens", {}).get("slots", {})) + ["label_alignment"],
+            "theme.menu.screens.credits": list(DEFAULT_THEME.get("menu", {}).get("screens", {}).get("credits", {})) + ["label_alignment"],
             "theme.menu.screens.main.buttons": ["normal", "hovered"],
             "theme.menu.screens.pause.buttons": ["normal", "hovered"],
             "theme.menu.screens.settings.buttons": ["normal", "hovered"],
@@ -4949,6 +5463,7 @@ while ($true) {{
             "theme.choice_buttons": list(DEFAULT_THEME.get("choice_buttons", {})),
             "theme.pause_button": list(DEFAULT_THEME.get("pause_button", {})),
             "theme.sounds": list(DEFAULT_THEME.get("sounds", {})),
+            "schema_version": [],
             "messages": list(DEFAULT_PROJECT.get("messages", {})),
             "credits[]": ["label", "url"],
         }
@@ -4971,12 +5486,17 @@ while ($true) {{
         if kind == "story":
             editor = self.active_editor() or self.story_editor
             return self._write_story_editor(editor)
-        else:
+        elif kind == "project":
             path, editor = self.project_file, self.project_editor
+        else:
+            path, editor = self.style_file, self.style_editor
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(editor.get_text(), encoding="utf-8", newline="\n")
         editor.dirty = False
-        self.project_buffer = editor.get_text()
+        if kind == "project":
+            self.project_buffer = editor.get_text()
+        else:
+            self.style_buffer = editor.get_text()
         self._update_tab_labels()
         return path
 
@@ -4992,6 +5512,9 @@ while ($true) {{
         return path
 
     def save_active(self):
+        if self._project_load_pending:
+            self.set_status("Wait for the project to finish loading before saving.")
+            return
         kind = self.active_kind()
         if kind == "markdown":
             self.set_status("Documentation tabs are read-only.")
@@ -5033,12 +5556,16 @@ while ($true) {{
             return None
         return self._story_path_from(values)
 
-    def save_all(self):
+    def save_all(self, analyze=True):
+        if self._project_load_pending:
+            self.set_status("Wait for the project to finish loading before saving.")
+            return False
         old_story = self.story_file
         try:
             for story_editor in list(self.story_editors.values()):
                 self._write_story_editor(story_editor)
             self._write_document("project")
+            self._write_document("style")
             self._after_project_save(old_story)
             self._sync_included_story_tabs()
             for story_editor in list(self.story_editors.values()):
@@ -5046,10 +5573,12 @@ while ($true) {{
                     self._write_story_editor(story_editor)
             self.engine_diagnostics = []
             self.refresh_asset_tree()
-            self.analyze_document("story")
-            self.analyze_document("project")
+            if analyze:
+                self.analyze_document("story")
+                self.analyze_document("project")
+                self.analyze_document("style")
             self._update_tab_labels()
-            self.set_status("Saved all story YAML files and project.json.")
+            self.set_status("Saved story YAML files, project.json, and style.json.")
             return True
         except OSError as error:
             messagebox.showerror(APP_TITLE, f"Could not save project files:\n{error}", parent=self.root)
@@ -5087,14 +5616,22 @@ while ($true) {{
         self._sync_included_story_tabs()
 
     def _confirm_discard_or_save(self, action: str):
-        if not (any(editor.dirty for editor in self.story_editors.values()) or self.project_editor.dirty):
+        if not (
+            any(editor.dirty for editor in self.story_editors.values())
+            or self.project_editor.dirty
+            or self.style_editor.dirty
+        ):
             return True
         answer = messagebox.askyesnocancel(APP_TITLE, f"Save your changes before {action}?", parent=self.root)
         if answer is None:
             return False
         if answer:
             self.save_all()
-            return not (any(editor.dirty for editor in self.story_editors.values()) or self.project_editor.dirty)
+            return not (
+                any(editor.dirty for editor in self.story_editors.values())
+                or self.project_editor.dirty
+                or self.style_editor.dirty
+            )
         return True
 
     def validate_with_engine(self):
@@ -5104,19 +5641,9 @@ while ($true) {{
         if not self.save_all():
             return
         temporary = None
-        try:
-            values = json.loads(self.project_editor.get_text())
-        except json.JSONDecodeError:
-            values = {}
-        if self._uses_workspace_source_test_play(values):
-            try:
-                temporary, _platform, _game_name, runtime = self._create_temporary_game()
-            except (OSError, ValueError, RuntimeError, json.JSONDecodeError) as error:
-                self.engine_diagnostics = [Diagnostic(
-                    "error", f"Could not prepare workspace source validation: {error}", 1, "Engine"
-                )]
-                self.render_diagnostics()
-                return
+        workspace_root = self._workspace_source_root()
+        if workspace_root is not None:
+            runtime = workspace_root / "main.py"
             command = [sys.executable, str(runtime), "--validate"]
         else:
             runtime = self.project_root / "VN_Engine" / "engine.exe"
@@ -5148,10 +5675,14 @@ while ($true) {{
                     )
         self.set_status("Running the engine story validator...")
         self.root.update_idletasks()
+        environment = os.environ.copy()
+        if workspace_root is not None and Path(command[1]).resolve() == workspace_root / "main.py":
+            environment["VN_ENGINE_PROJECT_DIR"] = str(self.project_root)
         try:
             result = subprocess.run(
                 command,
                 cwd=self.project_root,
+                env=environment,
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
@@ -5203,6 +5734,13 @@ while ($true) {{
         errors.extend(
             f"project.json:{item.line}: {item.message}"
             for item in project_diagnostics if item.severity == "error"
+        )
+        style_diagnostics = analyze_style(
+            self.style_editor.get_text(), catalog, self.project_editor.get_text()
+        )
+        errors.extend(
+            f"style.json:{item.line}: {item.message}"
+            for item in style_diagnostics if item.severity == "error"
         )
         return errors
 
@@ -5267,32 +5805,24 @@ while ($true) {{
                 values = {}
         return isinstance(values, dict) and values.get("USER") == "admin"
 
+    @staticmethod
+    def _workspace_source_root():
+        root = Path(__file__).resolve().parent
+        return root if (root / "main.py").is_file() and (root / "engine").is_dir() else None
+
     def _create_source_test_play(self, temporary_root: Path, game_name: str):
-        workspace_root = Path(__file__).resolve().parent
+        workspace_root = self._workspace_source_root()
+        if workspace_root is None:
+            raise RuntimeError("The workspace engine source is not available for Test Play.")
         source_main = workspace_root / "main.py"
         source_engine = workspace_root / "engine"
-        if not source_main.is_file() or not source_engine.is_dir():
-            raise RuntimeError(
-                "USER is set to 'admin', but the workspace source (main.py and engine/) "
-                "is not available."
-            )
-
-        runtime_root = temporary_root / "source-runtime"
-        runtime_root.mkdir()
-        shutil.copy2(source_main, runtime_root / "main.py")
-        shutil.copytree(source_engine, runtime_root / "engine", dirs_exist_ok=True)
-
-        for folder_name in ("assets", "data"):
-            source_folder = self.project_root / folder_name
-            if source_folder.is_dir():
-                shutil.copytree(source_folder, runtime_root / folder_name, dirs_exist_ok=True)
-
-        main_source = runtime_root / "main.py"
-        if not main_source.is_file():
-            raise RuntimeError("Could not stage the workspace source for Test Play.")
-        return runtime_root, main_source
+        if not source_engine.is_dir():
+            raise RuntimeError("The workspace engine source is incomplete.")
+        return workspace_root, source_main
 
     def _create_temporary_game(self):
+        from export_pipeline import export_project, safe_project_name
+
         values = json.loads(self.project_editor.get_text())
         platform = self._current_platform()
         game_name = safe_project_name(values.get("name", "Visual Novel"))
@@ -5301,7 +5831,11 @@ while ($true) {{
         runtime_root = temporary_root / "runtime"
         archive_path = temporary_root / f"{game_name}-{platform}.zip"
         try:
-            if self._uses_workspace_source_test_play(values):
+            source_root = self._workspace_source_root()
+            use_source = source_root is not None
+            if self._uses_workspace_source_test_play(values) and not use_source:
+                raise RuntimeError("USER is set to 'admin', but workspace source files main.py and engine/ are unavailable.")
+            if use_source:
                 _source_root, executable = self._create_source_test_play(temporary_root, game_name)
             else:
                 export_project(
@@ -5371,6 +5905,7 @@ while ($true) {{
             self.test_play_poll_job = self.root.after(750, self._poll_test_play)
             return
         self.test_play_process = None
+        exit_code = process.returncode if process is not None else None
         coverage = None
         coverage_path = self.test_play_coverage_path
         self.test_play_coverage_path = None
@@ -5379,8 +5914,25 @@ while ($true) {{
                 coverage = json.loads(coverage_path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
                 coverage = None
+        log_path = self.test_play_log_path
+        self.test_play_log_path = None
+        log_excerpt = ""
+        if exit_code not in (None, 0) and log_path is not None:
+            try:
+                with log_path.open("rb") as log_file:
+                    log_file.seek(max(0, log_path.stat().st_size - 6000))
+                    log_excerpt = log_file.read().decode("utf-8", errors="replace").strip()
+            except OSError:
+                pass
         self._cleanup_test_play()
-        self.set_status("Test Play closed; temporary game files removed.")
+        if exit_code not in (None, 0):
+            self.set_status(f"Test Play exited with code {exit_code}.")
+            detail = f"Test Play exited with code {exit_code}."
+            if log_excerpt:
+                detail += f"\n\n{log_excerpt}"
+            messagebox.showerror("Test Play Failed", detail, parent=self.root)
+        else:
+            self.set_status("Test Play closed; temporary game files removed.")
         if isinstance(coverage, dict):
             self._show_coverage_report(coverage)
 
@@ -5404,14 +5956,10 @@ while ($true) {{
                 except (OSError, subprocess.TimeoutExpired):
                     pass
         self.test_play_coverage_path = None
+        self.test_play_log_path = None
         self._cleanup_test_play()
 
     def test_from_dialogue(self):
-        if not self.save_all():
-            return
-        errors = self._collect_export_errors()
-        if self._show_export_errors("Cannot Start Test Play", errors):
-            return
         variables, dialogue_ids = self._story_context()
         if not dialogue_ids:
             messagebox.showerror("Test from Dialogue", "No dialogue IDs were found in the story files.", parent=self.root)
@@ -5504,7 +6052,7 @@ while ($true) {{
         if self.test_play_process is not None and self.test_play_process.poll() is None:
             messagebox.showinfo("Test Play", "A test game is already running.", parent=self.root)
             return
-        if not self.save_all():
+        if not self.save_all(analyze=False):
             return
         errors = self._collect_export_errors()
         if self._show_export_errors("Cannot Start Test Play", errors):
@@ -5513,10 +6061,12 @@ while ($true) {{
             temporary, platform, _game_name, executable = self._create_temporary_game()
             self.test_play_tempdir = temporary
             self.test_play_coverage_path = Path(temporary.name) / "editor_coverage.json"
+            self.test_play_log_path = Path(temporary.name) / "test_play.log"
             environment = os.environ.copy()
             environment["VN_ENGINE_USER_DATA_DIR"] = str(Path(temporary.name) / "user_data")
             environment["VN_EDITOR_TEST_MODE"] = "1"
             environment["VN_EDITOR_COVERAGE_FILE"] = str(self.test_play_coverage_path)
+            environment.pop("VN_ENGINE_PROJECT_DIR", None)
             environment.pop("VN_EDITOR_TEST_START_DIALOGUE", None)
             environment.pop("VN_EDITOR_TEST_VARIABLES", None)
             if start_dialogue is not None:
@@ -5524,19 +6074,35 @@ while ($true) {{
                 environment["VN_EDITOR_TEST_VARIABLES"] = json.dumps(
                     initial_variables or {}, ensure_ascii=False
                 )
+            workspace_root = self._workspace_source_root()
+            source_runtime = workspace_root is not None and executable.resolve() == (workspace_root / "main.py").resolve()
+            if source_runtime:
+                environment["VN_ENGINE_PROJECT_DIR"] = str(self.project_root)
             command = (
                 [sys.executable, str(executable)]
                 if executable.suffix.casefold() == ".py"
                 else [str(executable)]
             )
-            self.test_play_process = subprocess.Popen(command, cwd=executable.parent, env=environment)
+            with self.test_play_log_path.open("w", encoding="utf-8") as log_file:
+                self.test_play_process = subprocess.Popen(
+                    command,
+                    cwd=self.project_root if source_runtime else executable.parent,
+                    env=environment,
+                    stdout=log_file,
+                    stderr=subprocess.STDOUT,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
         except (OSError, ValueError, RuntimeError, json.JSONDecodeError, subprocess.SubprocessError) as error:
             self.test_play_coverage_path = None
+            self.test_play_log_path = None
             self._cleanup_test_play()
             messagebox.showerror("Cannot Start Test Play", f"Could not prepare or start the game: {error}", parent=self.root)
             return
 
-        self.set_status(f"Test Play running in a temporary {platform} build. Press F3 in-game to inspect variables.")
+        if source_runtime:
+            self.set_status("Test Play running with the workspace engine and isolated test saves. Press F3 in-game to inspect variables.")
+        else:
+            self.set_status(f"Test Play running in a temporary {platform} build. Press F3 in-game to inspect variables.")
         self.test_play_poll_job = self.root.after(750, self._poll_test_play)
 
     def _show_coverage_report(self, coverage):
@@ -5648,6 +6214,8 @@ while ($true) {{
         )
 
     def export_game(self):
+        from export_pipeline import PLATFORMS, safe_project_name
+
         if not self.save_all():
             return
         errors = self._collect_export_errors()
@@ -5734,6 +6302,8 @@ while ($true) {{
             android_options.grid()
             if release_tags is None:
                 try:
+                    from template_repository import list_template_release_tags
+
                     release_tags = list_template_release_tags()
                 except (OSError, ValueError, RuntimeError) as error:
                     messagebox.showerror(
@@ -5790,6 +6360,8 @@ while ($true) {{
             ):
                 return
             try:
+                from export_pipeline import export_project
+
                 exported = export_project(
                     self.project_root,
                     self.project_file,
@@ -5855,12 +6427,6 @@ while ($true) {{
         if not self._confirm_discard_or_save("closing the editor"):
             return
         self._stop_test_play()
-        self._stop_terminal()
-        if self.terminal_poll_job is not None:
-            try:
-                self.root.after_cancel(self.terminal_poll_job)
-            except tk.TclError:
-                pass
         self.root.destroy()
 
 
@@ -5872,8 +6438,6 @@ def main():
     try:
         last_project = None if args.project_dir is not None else _load_last_project()
         root_path = _initial_project_root(args.project_dir, Path.cwd(), package_root, last_project)
-        if args.project_dir is None and not _contains_project(root_path):
-            install_starter_project(root_path, project_template=DEFAULT_PROJECT)
     except (OSError, RuntimeError, ValueError) as error:
         root = tk.Tk()
         root.withdraw()
